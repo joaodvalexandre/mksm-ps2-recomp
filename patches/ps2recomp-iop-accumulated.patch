@@ -6,7 +6,7 @@ index 4027621..1f4b9a1 100644
          // is due, then runPendingEeCycles runs it (same result as runEeCycles).
          [[nodiscard]] bool accrueEeCycles(uint64_t eeCycles) noexcept;
          void runPendingEeCycles() noexcept;
-+        // GOW-Port: EE cycles that accrueEeCycles still needs before it returns true (>= 1). The caller may add up
++        // MKSM-Port: EE cycles that accrueEeCycles still needs before it returns true (>= 1). The caller may add up
 +        // that many cycles on its side and accrue them at once: same batches at the same EE cycles.
 +        [[nodiscard]] uint64_t eeCyclesUntilBatch() const noexcept;
  
@@ -40,7 +40,7 @@ index eab568e..afdc1f7 100644
          void runEeCycles(uint64_t eeCycles) noexcept;
          [[nodiscard]] bool accrueEeCycles(uint64_t eeCycles) noexcept;
          void runPendingEeCycles() noexcept;
-+        [[nodiscard]] uint64_t eeCyclesUntilBatch() const noexcept; // GOW-Port: see IopSubsystem
++        [[nodiscard]] uint64_t eeCyclesUntilBatch() const noexcept; // MKSM-Port: see IopSubsystem
          [[nodiscard]] RpcResult handleRpc(const RpcRequest &request);
          [[nodiscard]] bool hasRpcServer(uint32_t sid) const noexcept;
          void onSifTransfer(const SifTransfer &transfer);
@@ -69,7 +69,7 @@ index 7a0f4d6..465be28 100644
      [[nodiscard]] ps2x::iop::RpcResult handleIopRpc(uint8_t *rdram, R5900Context *ctx, ps2x::iop::RpcRequest request);
      void notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransfer &transfer);
 -    void advanceIopEeCycles(uint64_t eeCycles) noexcept;
-+    // GOW-Port: called at every EE checkpoint (tens of millions per second, every 8 guest cycles). The cycles are
++    // MKSM-Port: called at every EE checkpoint (tens of millions per second, every 8 guest cycles). The cycles are
 +    // added up here and handed to the IOP only when its next batch is due (eeCyclesUntilBatch): same IOP batches at
 +    // the same EE cycles, without three calls into the IOP library per checkpoint (~25 % of the EE thread).
 +    void advanceIopEeCycles(uint64_t eeCycles) noexcept
@@ -80,13 +80,13 @@ index 7a0f4d6..465be28 100644
 +    }
 +    void flushIopEeCycles() noexcept;
      void resetIop();
-     void shutdownHostGraphics(); // GOW-Port: destruir GS antes de cerrar el contexto raylib.
+     void shutdownHostGraphics(); // MKSM-Port: destruir GS antes de cerrar el contexto raylib.
  
 @@ -505,6 +514,7 @@ private:
      bool m_hostWindowOwned = false;
      std::unique_ptr<PS2IopHostAdapter> m_iopHost;
      std::unique_ptr<ps2x::iop::IopSubsystem> m_iopSubsystem;
-+    uint64_t m_iopEeCycles = 0, m_iopEeCyclesDue = 0; // GOW-Port: see advanceIopEeCycles
++    uint64_t m_iopEeCycles = 0, m_iopEeCyclesDue = 0; // MKSM-Port: see advanceIopEeCycles
      PS2AudioBackend m_audioBackend;
      PSPadBackend m_padBackend;
      PS2RomDevice m_romDevice;
@@ -102,13 +102,13 @@ index 5ad408b..c074ce0 100644
 +void PS2Runtime::flushIopEeCycles() noexcept
  {
 -    // Called at every EE checkpoint (millions/s): only the batched IOP run is timed, the accrual is a few adds
--    // (the perf scope reads the host clock twice, which was ~40 % of the EE thread with GOW_PERF_DIAG=1).
+-    // (the perf scope reads the host clock twice, which was ~40 % of the EE thread with MKSM_PERF_DIAG=1).
 -    if (!m_iopSubsystem->accrueEeCycles(eeCycles))
 -        return;
 -    ps2_perf::Scope perf(ps2_perf::Bucket::Iop);
 -    m_iopSubsystem->runPendingEeCycles();
 +    // Only the batched IOP run is timed (the perf scope reads the host clock twice, which was ~40 % of the EE thread
-+    // with GOW_PERF_DIAG=1 when it wrapped every accrual).
++    // with MKSM_PERF_DIAG=1 when it wrapped every accrual).
 +    const uint64_t eeCycles = m_iopEeCycles;
 +    m_iopEeCycles = 0;
 +    if (m_iopSubsystem->accrueEeCycles(eeCycles))
@@ -122,7 +122,7 @@ index 5ad408b..c074ce0 100644
  void PS2Runtime::resetIop()
  {
      m_iopSubsystem->reset();
-+    m_iopEeCycles = 0; // GOW-Port: the IOP's own accrual restarts; ask it again on the next checkpoint
++    m_iopEeCycles = 0; // MKSM-Port: the IOP's own accrual restarts; ask it again on the next checkpoint
 +    m_iopEeCyclesDue = 0;
  }
  
@@ -137,7 +137,7 @@ index 4be26c5..aabf2bb 100644
  
 +        tc.Run("IOP batches are due exactly after eeCyclesUntilBatch EE cycles", [](TestCase &t)
 +        {
-+            // GOW-Port: PS2Runtime suma los ciclos de los puntos de control del EE y los pasa al IOP solo cuando
++            // MKSM-Port: PS2Runtime suma los ciclos de los puntos de control del EE y los pasa al IOP solo cuando
 +            // vence su lote (eeCyclesUntilBatch). Debe vencer en el mismo ciclo que pasándolos de 8 en 8, también
 +            // con restos que no son múltiplo de 8.
 +            iop_test::Host host;

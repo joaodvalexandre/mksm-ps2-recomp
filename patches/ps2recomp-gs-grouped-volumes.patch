@@ -5,7 +5,7 @@ index 0000000..2f5de58
 +++ b/ps2xRuntime/include/runtime/gs/gs_tri_groups.h
 @@ -0,0 +1,94 @@
 +#pragma once
-+// GOW-Port: groups of consecutive triangles that cover disjoint pixels (GS hardware backend, shadow volumes).
++// MKSM-Port: groups of consecutive triangles that cover disjoint pixels (GS hardware backend, shadow volumes).
 +// The shadow-volume passes blend with wrapping arithmetic (COLCLAMP=0) in the shader, which reads the destination:
 +// a triangle must see the result of every earlier triangle that covers the same pixels, so the backend drew one
 +// triangle per call with a texture barrier in between (~3000 calls and barriers per frame on the ship, which kept the
@@ -103,7 +103,7 @@ index 5606736..9a66a27 100644
 --- a/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
 +++ b/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
 @@ -1,4 +1,5 @@
- // GOW-Port: render-target GS renderer, see include/runtime/gs/gs_hw_backend.h.
+ // MKSM-Port: render-target GS renderer, see include/runtime/gs/gs_hw_backend.h.
 +#include "runtime/gs/gs_tri_groups.h"
  #include "runtime/gs/gs_hw_backend.h"
  #include "gs_texture_store.h"
@@ -112,7 +112,7 @@ index 5606736..9a66a27 100644
      GSDrawState shuffleState{};
      bool haveShuffle = false;
      int shuffleWhy = 0; // debug: which tryShuffle check rejected the last sprite
-+    std::vector<uint32_t> triGroups; // GOW-Port: shadow-volume triangle groups (gs_tri_groups.h)
++    std::vector<uint32_t> triGroups; // MKSM-Port: shadow-volume triangle groups (gs_tri_groups.h)
      RenderTarget *shuffleDst = nullptr, *shuffleSrc = nullptr;
      bool shuffleSrcZ = false;
      std::unordered_map<uint32_t, std::vector<uint16_t>> ownerInverse; // psm -> in-page word index -> y * 64 + x
@@ -121,9 +121,9 @@ index 5606736..9a66a27 100644
              // triangle at a time with a barrier in between; overlapping triangles of one draw then see each other's results
              // like on the GS (the volumes count overlaps this way)
 -            for (size_t i = 0; i + 3 <= verts.size(); i += 3)
-+            // GOW-Port: consecutive triangles that cover disjoint pixels share a call (gs_tri_groups.h);
-+            // GOW_GS_HW_VOLGROUP=0 draws one triangle per call again
-+            static const bool group = [] { const char *v = std::getenv("GOW_GS_HW_VOLGROUP"); return !(v && v[0] == '0'); }();
++            // MKSM-Port: consecutive triangles that cover disjoint pixels share a call (gs_tri_groups.h);
++            // MKSM_GS_HW_VOLGROUP=0 draws one triangle per call again
++            static const bool group = [] { const char *v = std::getenv("MKSM_GS_HW_VOLGROUP"); return !(v && v[0] == '0'); }();
 +            const size_t triCount = verts.size() / 3u;
 +            if (group)
 +                gs_tri_groups::build(&verts[0].x, sizeof(HwVertex) / sizeof(float), triCount, triGroups);
@@ -161,7 +161,7 @@ index eb4ce1f..c2c1e6e 100644
 +
 +        tc.Run("shadow-volume triangles share a draw only when their pixels are disjoint", [](TestCase &t)
 +        {
-+            // GOW-Port: ps2recomp-gs-volumenes-agrupados. Los volúmenes de sombra se dibujaban un triángulo por llamada con
++            // MKSM-Port: ps2recomp-gs-volumenes-agrupados. Los volúmenes de sombra se dibujaban un triángulo por llamada con
 +            // una barrera entre cada uno; ahora los consecutivos que no se solapan van juntos.
 +            const auto groups = [](std::vector<float> xy)
 +            {

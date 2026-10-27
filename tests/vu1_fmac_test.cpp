@@ -1,4 +1,4 @@
-// GOW-Port: compares the compiled VU1 code with the interpreter in every FMAC operation (each
+// MKSM-Port: compares the compiled VU1 code with the interpreter in every FMAC operation (each
 // source variant, DEST masks and cross operations) with boundary values: signed zeros, subnormals,
 // FLT_MIN, FLT_MAX, Inf/NaN and random values. Each program is the tested FMAC, another FMAC that overwrites its
 // flags (dead flags in the block) and the end of the program. No game microcode.
@@ -16,14 +16,14 @@
 #include <vector>
 #if defined(_M_X64) || defined(_M_IX86) || defined(__x86_64__) || defined(__i386__)
 #include <xmmintrin.h>
-#define GOW_FMAC_MXCSR 1
+#define MKSM_FMAC_MXCSR 1
 #else
-#define GOW_FMAC_MXCSR 0
+#define MKSM_FMAC_MXCSR 0
 #endif
 
 namespace
 {
-#if GOW_FMAC_MXCSR
+#if MKSM_FMAC_MXCSR
 struct RestoreMxcsr
 {
     unsigned value = _mm_getcsr();
@@ -166,7 +166,7 @@ int main(int argc, char **argv)
         return f ? 0 : 2;
     }
     const unsigned trials = argc == 2 ? static_cast<unsigned>(std::atoi(argv[1])) : 40u;
-#if GOW_FMAC_MXCSR
+#if MKSM_FMAC_MXCSR
     RestoreMxcsr restore;
     _mm_setcsr(restore.value & ~0x8040u);
 #endif
@@ -206,8 +206,8 @@ int main(int argc, char **argv)
     }
     std::printf("VU1 FMAC: %llu exact cases (%zu instructions, %u trials with boundary values)\n", cases, list.size(),
                 trials);
-#if GOW_FMAC_MXCSR
-    // GOW-Port: FTZ/DAZ can give a rounded zero without exact cancellation. The following
+#if MKSM_FMAC_MXCSR
+    // MKSM-Port: FTZ/DAZ can give a rounded zero without exact cancellation. The following
     // FMAC overwrites Z/S, but the U underflow must persist in status (bit 8).
     _mm_setcsr(_mm_getcsr() | 0x8040u);
     unsigned ftzCases = 0;

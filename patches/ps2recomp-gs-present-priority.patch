@@ -7,7 +7,7 @@ index 30fc3c9..44a41b6 100644
      // Returns when every queued packet has been processed. No-op on the stage thread itself.
      void waitIdle();
 +
-+    // GOW-Port: the stage takes and releases the GS state lock once per packet, thousands of times per frame, and
++    // MKSM-Port: the stage takes and releases the GS state lock once per packet, thousands of times per frame, and
 +    // the lock is not fair: the host presentation (main thread) waiting for it could wait for many frames (the
 +    // window showed 2-8 pictures per second while the game ran at 60-120). Between packets, the stage yields while
 +    // a priority waiter is registered. Bracket the lock acquisition of such a waiter with these (never call them
@@ -23,13 +23,13 @@ index 1180a14..2f8db17 100644
 +#include "runtime/gs/gs_stage.h"
  #include "runtime/gs/gs_frontend.h"
  #include "runtime/gs/gs_backend.h"
- // GOW-Port: CPU de referencia por defecto; OpenGL/cola seleccionables.
+ // MKSM-Port: CPU de referencia por defecto; OpenGL/cola seleccionables.
 @@ -778,7 +779,9 @@ void GS::latchHostPresentationFrame()
  {
      GSPresentationRequest request{};
      {
 -        std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
-+        ps2_gs_stage::priorityWaitBegin(); // GOW-Port: the stage yields the lock (gs_stage.h)
++        ps2_gs_stage::priorityWaitBegin(); // MKSM-Port: the stage yields the lock (gs_stage.h)
 +        std::unique_lock<std::recursive_mutex> lock(m_stateMutex);
 +        ps2_gs_stage::priorityWaitEnd();
          if (!m_backend || !m_privRegs)
@@ -40,7 +40,7 @@ index 1180a14..2f8db17 100644
      if (hasFrame)
      {
 -        std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
-+        ps2_gs_stage::priorityWaitBegin(); // GOW-Port: the stage yields the lock (gs_stage.h)
++        ps2_gs_stage::priorityWaitBegin(); // MKSM-Port: the stage yields the lock (gs_stage.h)
 +        std::unique_lock<std::recursive_mutex> lock(m_stateMutex);
 +        ps2_gs_stage::priorityWaitEnd();
          recordPresentDebugEventUnlocked(displayFbp, sourceFbp, width, height, usedPreferred, request.vsyncTick);
@@ -54,7 +54,7 @@ index 710a1ad..b6cb032 100644
          return s;
      }
  
-+    std::atomic<int> g_priorityWaiters{0}; // GOW-Port: see priorityWaitBegin
++    std::atomic<int> g_priorityWaiters{0}; // MKSM-Port: see priorityWaitBegin
 +
      void loop()
      {
@@ -89,7 +89,7 @@ index 317960a..eb4ce1f 100644
 +
 +        tc.Run("GS stage yields between packets while a priority waiter is registered", [](TestCase &t)
 +        {
-+            // GOW-Port: ps2recomp-gs-prioridad-presentacion. La presentación espera el lock del GS con prioridad: la
++            // MKSM-Port: ps2recomp-gs-prioridad-presentacion. La presentación espera el lock del GS con prioridad: la
 +            // etapa no procesa más paquetes mientras haya una espera prioritaria registrada.
 +            std::atomic<uint32_t> processed{0u};
 +            ps2_gs_stage::start([&](GifPathId, const uint8_t *, uint32_t) { processed.fetch_add(1u); }, nullptr);

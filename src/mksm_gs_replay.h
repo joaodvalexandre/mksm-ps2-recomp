@@ -1,4 +1,4 @@
-// GOW-Port: optional diagnostic to replay exactly the commands of the GS backend.
+// MKSM-Port: optional diagnostic to replay exactly the commands of the GS backend.
 // The idea of capturing state + commands comes from Taylor N. Albarnaz / LightVelox,
 // PS2Recomp sotc-port ac9efa070638ad3b3accd284de6f898d5ab271d1 (GPL-3.0).
 // Own implementation; local format of the same ABI. The dumps are never published.
@@ -20,11 +20,11 @@
 #include <type_traits>
 #include <xmmintrin.h>
 
-namespace gow_gs_replay
+namespace mksm_gs_replay
 {
     constexpr uint64_t kLimit = 64ull << 20;
     constexpr uint32_t kRecordLimit = 16u << 20;
-    // GOW-Port: select a late section without changing the dump limit.
+    // MKSM-Port: select a late section without changing the dump limit.
     struct CaptureOptions { double after=150, seconds=3; bool atTextureFlush=false; };
     inline bool captureOptions(const char *after,const char *seconds,const char *texflush,
                                CaptureOptions &out,const char *&error) {
@@ -38,10 +38,10 @@ namespace gow_gs_replay
                parsed<minimum || parsed>maximum) return false;
             value=parsed; return true;
         };
-        if(!number(after,0,3600,candidate.after)) error="GOW_GS_REPLAY_AFTER: valid range 0..3600 s";
-        else if(!number(seconds,0.1,60,candidate.seconds)) error="GOW_GS_REPLAY_SECONDS: valid range 0.1..60 s";
+        if(!number(after,0,3600,candidate.after)) error="MKSM_GS_REPLAY_AFTER: valid range 0..3600 s";
+        else if(!number(seconds,0.1,60,candidate.seconds)) error="MKSM_GS_REPLAY_SECONDS: valid range 0.1..60 s";
         else if(texflush && std::strcmp(texflush,"0") && std::strcmp(texflush,"1"))
-            error="GOW_GS_REPLAY_TEXFLUSH: valid values 0 or 1";
+            error="MKSM_GS_REPLAY_TEXFLUSH: valid values 0 or 1";
         if(error) return false;
         candidate.atTextureFlush=texflush && !std::strcmp(texflush,"1");
         out=candidate; return true;
@@ -110,7 +110,7 @@ namespace gow_gs_replay
         }
     };
 
-    // It is installed only when GOW_GS_REPLAY_TRACE is requested. It also serializes
+    // It is installed only when MKSM_GS_REPLAY_TRACE is requested. It also serializes
     // presentation/readback so the capture does not mix commands from two threads.
     class Backend final: public GSRasterBackend, public GSBackendStateAccess {
         std::unique_ptr<GSRasterBackend> inner; PS2Memory *memory;
@@ -154,15 +154,15 @@ namespace gow_gs_replay
                 if(memory && memory->getRDRAM()) std::memcpy(&state,memory->getRDRAM()+0x29E560u,4);
                 if((memory && state!=11) || std::chrono::duration<double>(now-created).count()<after) return false;
                 started=now; active=snapshot(Op::Initial);
-                if(!active) { finished=true; file.close(); std::fprintf(stderr,"[gow-gs:replay] error de estado inicial\n"); return false; }
-                std::fprintf(stderr,"[gow-gs:replay] inicio state=%u host=%.3f texflush=%u\n",state,
+                if(!active) { finished=true; file.close(); std::fprintf(stderr,"[mksm-gs:replay] error de estado inicial\n"); return false; }
+                std::fprintf(stderr,"[mksm-gs:replay] inicio state=%u host=%.3f texflush=%u\n",state,
                     std::chrono::duration<double>(now-created).count(),unsigned(atTextureFlush));
             }
             // Reserves space for the final state even with a large readback.
             if(std::chrono::duration<double>(now-started).count()>=duration ||
                nextSize>kRecordLimit || bytes+nextSize+32+(kRecordLimit+5)>kLimit) {
                 const bool ok=snapshot(Op::End); active=false; finished=true; file.close();
-                std::fprintf(stderr,"[gow-gs:replay] fin completo=%u bytes=%llu\n",unsigned(ok),(unsigned long long)bytes);
+                std::fprintf(stderr,"[mksm-gs:replay] fin completo=%u bytes=%llu\n",unsigned(ok),(unsigned long long)bytes);
                 return false;
             }
             const uint32_t csr=_mm_getcsr();
@@ -175,7 +175,7 @@ namespace gow_gs_replay
             :inner(std::move(backend)),memory(mem),file(path,std::ios::binary),after(delay),duration(seconds),
              waitForTextureFlush(atTextureFlush) {
             Header h{}; file.write(reinterpret_cast<const char*>(&h),sizeof(h)); finished=!file;
-            if(finished) std::fprintf(stderr,"[gow-gs:replay] could not open the file\n");
+            if(finished) std::fprintf(stderr,"[mksm-gs:replay] could not open the file\n");
         }
         // Explicit close for deterministic probes, without waiting for the host clock.
         bool finish() {
@@ -191,7 +191,7 @@ namespace gow_gs_replay
         void TextureFlush() override {
             std::lock_guard lock(mutex);
             if(waitForTextureFlush && !active) {
-                // GOW-Port: start AFTER the TEXFLUSH received from the game. Do not add
+                // MKSM-Port: start AFTER the TEXFLUSH received from the game. Do not add
                 // another one nor clear the cache too early; the snapshot synchronizes the queue.
                 inner->TextureFlush(); recording(0,true,true); return;
             }
@@ -224,17 +224,17 @@ namespace gow_gs_replay
     inline void configure(PS2Memory &memory,GS &gs) {
         std::filesystem::path path;
 #ifdef _WIN32
-        if(const auto *p=_wgetenv(L"GOW_GS_REPLAY_TRACE");p && *p) path=p;
+        if(const auto *p=_wgetenv(L"MKSM_GS_REPLAY_TRACE");p && *p) path=p;
 #else
-        if(const auto *p=std::getenv("GOW_GS_REPLAY_TRACE");p && *p) path=p;
+        if(const auto *p=std::getenv("MKSM_GS_REPLAY_TRACE");p && *p) path=p;
 #endif
         if(path.empty()) return;
         CaptureOptions options; const char *error=nullptr;
-        if(!captureOptions(std::getenv("GOW_GS_REPLAY_AFTER"),std::getenv("GOW_GS_REPLAY_SECONDS"),
-                           std::getenv("GOW_GS_REPLAY_TEXFLUSH"),options,error)) {
-            std::fprintf(stderr,"[gow-gs:replay] %s; captura desactivada\n",error); return;
+        if(!captureOptions(std::getenv("MKSM_GS_REPLAY_AFTER"),std::getenv("MKSM_GS_REPLAY_SECONDS"),
+                           std::getenv("MKSM_GS_REPLAY_TEXFLUSH"),options,error)) {
+            std::fprintf(stderr,"[mksm-gs:replay] %s; captura desactivada\n",error); return;
         }
-        std::fprintf(stderr,"[gow-gs:replay] espera=%.3f duracion=%.3f texflush=%u\n",
+        std::fprintf(stderr,"[mksm-gs:replay] espera=%.3f duracion=%.3f texflush=%u\n",
             options.after,options.seconds,unsigned(options.atTextureFlush));
         gs.setRasterBackend(std::make_unique<Backend>(GSThreadedBackend::MakeDefault(),&memory,path,
             options.after,options.seconds,options.atTextureFlush));

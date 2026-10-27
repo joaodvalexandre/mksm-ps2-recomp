@@ -6,7 +6,7 @@ index b55641f..abf8026 100644
          constexpr uint32_t kCdvdInitExit = 5u;
          constexpr uint32_t kCdvdCallbackRead = 1u;
          constexpr uint32_t kCdvdCallbackSeek = 4u;
-+        constexpr uint32_t kCdvdCallbackStop = 6u; // GOW-Port: SCECdFuncStop
++        constexpr uint32_t kCdvdCallbackStop = 6u; // MKSM-Port: SCECdFuncStop
          constexpr uint32_t kCdvdInterruptReadyBits = 0x29u;
          constexpr uint32_t kEventFlagMulti = 2u;
          constexpr uint32_t kCdvdStreamTimeout = 5000u;
@@ -14,7 +14,7 @@ index b55641f..abf8026 100644
                  cpu.gpr[2] = 0u;
                  return true;
  
-+            case 15: // GOW-Port: sceCdStop. Without a drive there is nothing to stop: it completes at once (the
++            case 15: // MKSM-Port: sceCdStop. Without a drive there is nothing to stop: it completes at once (the
 +                     // callback, if any, runs like sceCdSeek's). Unhandled, the IOP thread waiting for it spun forever.
 +                lastError = kCdvdErrorNone;
 +                signalCommandComplete();
@@ -40,7 +40,7 @@ index aabf2bb..f555972 100644
              t.IsTrue(value(6) >= 1u && value(6) <= 12u, "month should be valid");
          });
  
-+        // GOW-Port: sceCdStop (cdvdman:15) no estaba implementada: el hilo del IOP que la esperaba se quedaba en bucle
++        // MKSM-Port: sceCdStop (cdvdman:15) no estaba implementada: el hilo del IOP que la esperaba se quedaba en bucle
 +        // (visto al sustituir la intro de una partida nueva por otro vídeo).
 +        tc.Run("IOP sceCdStop completes at once", [](TestCase &t)
 +        {

@@ -4,9 +4,9 @@ index 5556200..cbef652 100644
 +++ b/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
 @@ -611,6 +611,9 @@ namespace ps2_stubs
              uint64_t ptsPresentationBaseTickQ32 = 0u;
-             // GOW-Port: bytes aceptados por sceMpegDemuxPssRing, para saber si sceMpegCbNodata aporto datos.
+             // MKSM-Port: bytes aceptados por sceMpegDemuxPssRing, para saber si sceMpegCbNodata aporto datos.
              uint64_t demuxedBytes = 0u;
-+            // GOW-Port: bytes desde el codigo de fin de programa (0x1B9) hasta el final de lo recibido; no se
++            // MKSM-Port: bytes desde el codigo de fin de programa (0x1B9) hasta el final de lo recibido; no se
 +            // dan por consumidos (ver appendPssBytes).
 +            size_t bytesFromProgramEnd = 0u;
          };
@@ -30,9 +30,9 @@ index 5556200..cbef652 100644
 -                            size_t size,
 -                            uint32_t guestAddr,
 -                            std::vector<MpegStreamCallbackEvent> &callbackEvents)
-+        // GOW-Port: devuelve los bytes consumidos. Como sceMpegDemuxPss de libmpeg, la demultiplexacion se detiene
++        // MKSM-Port: devuelve los bytes consumidos. Como sceMpegDemuxPss de libmpeg, la demultiplexacion se detiene
 +        // en el codigo de fin de programa (0x1B9): ni el ni lo que le sigue cuentan como consumidos, y una entrada
-+        // que empieza por el devuelve 0. God of War lee el PSS en bloques de 0x4000 y el ultimo (4 bytes, el
++        // que empieza por el devuelve 0. El juego base lee el PSS en bloques de 0x4000 y el ultimo (4 bytes, el
 +        // 0x1B9, y el resto del bloque con datos viejos del anillo) se daba por consumido entero: su callback
 +        // sceMpegCbNodata (0x18AAA8) solo vuelve cuando la demultiplexacion devuelve 0 o hay 0x2000 bytes de video
 +        // pendientes, asi que al final de algunos videos (P04MP05.PSW) pedia datos para siempre.
@@ -100,7 +100,7 @@ index 68feb1d..ece3af6 100644
              runtime.requestStop();
          });
  
-+        // GOW-Port: como libmpeg, la demultiplexacion se detiene en el fin de programa (0x1B9). God of War lee el PSS
++        // MKSM-Port: como libmpeg, la demultiplexacion se detiene en el fin de programa (0x1B9). El juego base lee el PSS
 +        // en bloques de 0x4000 y su callback sceMpegCbNodata solo vuelve cuando la demultiplexacion devuelve 0; si el
 +        // ultimo bloque (0x1B9 y datos viejos) se daba por consumido, pedia datos para siempre.
 +        tc.Run("sceMpegDemuxPssRing stops at the program end code", [](TestCase &t)

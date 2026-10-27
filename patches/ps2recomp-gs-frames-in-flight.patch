@@ -5,8 +5,8 @@ index b901816..6e40619 100644
 @@ -508,6 +508,35 @@ struct GSHwBackend::Impl
      bool haveShuffle = false;
      int shuffleWhy = 0; // debug: which tryShuffle check rejected the last sprite
-     std::vector<uint32_t> triGroups; // GOW-Port: shadow-volume triangle groups (gs_tri_groups.h)
-+    // GOW-Port: at most PS2X_GS_FRAMES_IN_FLIGHT (default 2, 0 = no limit) presented frames of this backend's GPU work
+     std::vector<uint32_t> triGroups; // MKSM-Port: shadow-volume triangle groups (gs_tri_groups.h)
++    // MKSM-Port: at most PS2X_GS_FRAMES_IN_FLIGHT (default 2, 0 = no limit) presented frames of this backend's GPU work
 +    // may be queued. Without a limit, a GPU slower than the game (PS2X_GS_HW_SCALE=4 at 60 frames per second) kept
 +    // receiving frames: the driver's queue grew, the host window's SwapBuffers waited behind it and the window showed
 +    // 0.5-2 pictures per second while the game ran at 50-60. Each present waits (at most 100 ms) for the GPU to finish

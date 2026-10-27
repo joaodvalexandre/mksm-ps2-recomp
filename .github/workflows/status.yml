@@ -3,7 +3,7 @@ name: Status map
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     paths:
       - docs/status/data.toml
       - config/funcmap.csv

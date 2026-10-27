@@ -1,6 +1,0 @@
-// GOW-Port: same original imconfig for all objects; STB without an interface.
-#pragma once
-#include "@PCSX2_SOURCE@/3rdparty/imgui/include/imconfig.h"
-#undef IMGUI_ENABLE_FREETYPE
-#undef IMGUI_ENABLE_FREETYPE_PLUTOSVG
-#define IMGUI_ENABLE_STB_TRUETYPE

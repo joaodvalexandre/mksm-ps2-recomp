@@ -507,7 +507,7 @@ index c4192c1..916c65a 100644
 -            gs.writeRegister(GS_REG_UV, kUvRow1);
 -            gs.writeRegister(GS_REG_XYZ2, 0ull);
 -            gs.writeRegister(GS_REG_UV, kUvRow1);
--            // GOW-Port: sprite de 1x1; dos vertices iguales no generan pixels.
+-            // MKSM-Port: sprite de 1x1; dos vertices iguales no generan pixels.
 -            gs.writeRegister(GS_REG_XYZ2, 16ull | (16ull << 16));
 -
 -            const uint32_t dstPixel = readReferenceFramePSMCT32Pixel(vram, 150u, 1u, 0u, 0u);
@@ -1990,7 +1990,7 @@ index c4192c1..916c65a 100644
 -            gs.writeRegister(GS_REG_UV, 0ull);
 -            gs.writeRegister(GS_REG_XYZ2, 0ull);
 -            gs.writeRegister(GS_REG_UV, 0ull);
--            // GOW-Port: sprite de 1x1; dos vertices iguales no generan pixels.
+-            // MKSM-Port: sprite de 1x1; dos vertices iguales no generan pixels.
 -            gs.writeRegister(GS_REG_XYZ2, 16ull | (16ull << 16));
 -
 -            uint32_t pixel = 0u;
@@ -2136,7 +2136,7 @@ index c4192c1..916c65a 100644
 -            gs.writeRegister(GS_REG_UV, 0ull);
 -            gs.writeRegister(GS_REG_XYZ2, 0ull);
 -            gs.writeRegister(GS_REG_UV, 0ull);
--            // GOW-Port: sprite de 1x1; dos vertices iguales no generan pixels.
+-            // MKSM-Port: sprite de 1x1; dos vertices iguales no generan pixels.
 -            gs.writeRegister(GS_REG_XYZ2, 16ull | (16ull << 16));
 -
 -            uint32_t pixel = 0u;
@@ -2199,7 +2199,7 @@ index c4192c1..916c65a 100644
 -            gs.writeRegister(GS_REG_UV, 0ull);
 -            gs.writeRegister(GS_REG_XYZ2, 0ull);
 -            gs.writeRegister(GS_REG_UV, 0ull);
--            // GOW-Port: sprite de 1x1; dos vertices iguales no generan pixels.
+-            // MKSM-Port: sprite de 1x1; dos vertices iguales no generan pixels.
 -            gs.writeRegister(GS_REG_XYZ2, 16ull | (16ull << 16));
 -
 -            uint32_t pixel = 0u;
@@ -2266,7 +2266,7 @@ index c4192c1..916c65a 100644
 -            gs.writeRegister(GS_REG_UV, 0ull);
 -            gs.writeRegister(GS_REG_XYZ2, 0ull);
 -            gs.writeRegister(GS_REG_UV, 0ull);
--            // GOW-Port: sprite de 1x1; dos vertices iguales no generan pixels.
+-            // MKSM-Port: sprite de 1x1; dos vertices iguales no generan pixels.
 -            gs.writeRegister(GS_REG_XYZ2, 16ull | (16ull << 16));
 -
 -            uint32_t pixel = 0u;
@@ -2818,7 +2818,7 @@ index c4192c1..916c65a 100644
 -                gs.writeRegister(GS_REG_RGBAQ, kRgbaq);
 -                gs.writeRegister(GS_REG_ST, packSt(0.0f, 0.0f));
 -                gs.writeRegister(GS_REG_XYZ2, 0ull);
--                // GOW-Port: en el centro GS (1,1), S=0.375 y U=0.75;
+-                // MKSM-Port: en el centro GS (1,1), S=0.375 y U=0.75;
 -                // queda entre texels incluso tras quitar el desplazamiento de medio pixel.
 -                gs.writeRegister(GS_REG_ST, packSt(1.5f, 0.0f));
 -                gs.writeRegister(GS_REG_XYZ2, (64ull << 0) | (0ull << 16));
@@ -2987,7 +2987,7 @@ index c4192c1..916c65a 100644
 -            gs.writeRegister(GS_REG_ST, packSt(0.0f, 0.0f));
 -            gs.writeRegister(GS_REG_RGBAQ, packRgbaq(1.0f));
 -            gs.writeRegister(GS_REG_XYZ2, 0ull);
--            // GOW-Port: centro GS (1,1), pesos 1/2,1/4,1/4. S/Q da texel 2;
+-            // MKSM-Port: centro GS (1,1), pesos 1/2,1/4,1/4. S/Q da texel 2;
 -            // interpolar S/Q por vertice daria texel 1 y debe seguir fallando.
 -            gs.writeRegister(GS_REG_ST, packSt(3.0f, 0.0f));
 -            gs.writeRegister(GS_REG_RGBAQ, packRgbaq(2.0f));
@@ -3198,7 +3198,7 @@ index c4192c1..916c65a 100644
 -            gs.writeRegister(GS_REG_XYZF2, makeXyzf(420u, 420u));
 -            gs.writeRegister(GS_REG_XYZF2, makeXyzf(102u, 420u));
 -
--            // GOW-Port: VRAM CT32 es swizzled; leerla como filas lineales inventaba
+-            // MKSM-Port: VRAM CT32 es swizzled; leerla como filas lineales inventaba
 -            // huecos y no comprobaba el quad de [6.375,26.25] en centros enteros.
 -            for (uint32_t y = 0u; y <= 31u; ++y)
 -            {
@@ -3635,7 +3635,7 @@ index c4192c1..916c65a 100644
 -            gs.writeRegister(GS_REG_UV, 0ull);
 -            gs.writeRegister(GS_REG_XYZ2, 0ull);
 -            gs.writeRegister(GS_REG_UV, 0ull);
--            // GOW-Port: sprite de 1x1; dos vertices iguales no generan pixels.
+-            // MKSM-Port: sprite de 1x1; dos vertices iguales no generan pixels.
 -            gs.writeRegister(GS_REG_XYZ2, 16ull | (16ull << 16));
 -
 -            uint32_t pixelHL = 0u;
@@ -3659,7 +3659,7 @@ index c4192c1..916c65a 100644
 -            gs.writeRegister(GS_REG_UV, 0ull);
 -            gs.writeRegister(GS_REG_XYZ2, 0ull);
 -            gs.writeRegister(GS_REG_UV, 0ull);
--            // GOW-Port: sprite de 1x1; dos vertices iguales no generan pixels.
+-            // MKSM-Port: sprite de 1x1; dos vertices iguales no generan pixels.
 -            gs.writeRegister(GS_REG_XYZ2, 16ull | (16ull << 16));
 -
 -            uint32_t pixelHH = 0u;
@@ -4871,7 +4871,7 @@ index 3847fda..4b159ae 100644
 -                t.Equals(causes[0], 9u, "SPR_TO completion should use DMAC cause 9");
 -        });
  
--        // GOW-Port: God of War copia la paleta de huesos con fromSPR en cadena de destino (CHCR 0x104).
+-        // MKSM-Port: El juego base copia la paleta de huesos con fromSPR en cadena de destino (CHCR 0x104).
 -        tc.Run("DMAC SPR_FROM destination chain writes each tag's data to its address", [](TestCase &t)
 -        {
 -            PS2Memory mem;
@@ -4954,7 +4954,7 @@ index 3847fda..4b159ae 100644
 -            constexpr uint32_t kDrbor = 0x1000E050u;
 -            constexpr uint32_t kDrbsr = 0x1000E040u;
 -            constexpr uint32_t kDstadr = 0x1000E060u;
-+        // GOW-Port: God of War copia la paleta de huesos con fromSPR en cadena de destino (CHCR 0x104).
++        // MKSM-Port: El juego base copia la paleta de huesos con fromSPR en cadena de destino (CHCR 0x104).
  
 -            PS2Memory &mem = runtime.memory();
 -            t.IsTrue(mem.writeIORegister(kDctrl, 0u), "clearing D_CTRL should succeed");
@@ -5050,7 +5050,7 @@ index 3847fda..4b159ae 100644
 -            t.IsTrue(imageOk, "VIF1 DIRECT image should update GS VRAM through GIF path2");
 -        });
  
-         // GOW-Port: en el hardware la IMAGE continua con la carga del siguiente DIRECT, no con los codigos VIF
+         // MKSM-Port: en el hardware la IMAGE continua con la carga del siguiente DIRECT, no con los codigos VIF
          // que siguen al primero. Las dos pruebas de abajo comprobaban el comportamiento anterior.
 -        tc.Run("VIF1 DIRECT image tag continues in the next DIRECT payload", [](TestCase &t)
 -        {
@@ -5110,7 +5110,7 @@ index 3847fda..4b159ae 100644
 -            t.IsTrue(imageOk, "the next DIRECT payload should continue the PATH2 image upload");
 -        });
  
-         // GOW-Port: una etiqueta PACKED tambien puede cruzar varios comandos DIRECT/HL.
+         // MKSM-Port: una etiqueta PACKED tambien puede cruzar varios comandos DIRECT/HL.
          tc.Run("VIF1 DIRECT preserves a PACKED tag across separate commands and MARK", [](TestCase &t)
 @@ -2421,125 +1184,8 @@ void register_ps2_memory_tests()
              t.IsTrue(paths==std::vector<GifPathId>({GifPathId::Path2,GifPathId::Path2,GifPathId::Path2}),"El arbiter conserva PATH2");
@@ -5172,7 +5172,7 @@ index 3847fda..4b159ae 100644
 -            t.IsTrue(imageOk, "image continuation after packed setup should come from the next DIRECT payload");
 -        });
  
-         // GOW-Port: los comandos VIF entre dos DIRECT no forman parte de la IMAGE pendiente.
+         // MKSM-Port: los comandos VIF entre dos DIRECT no forman parte de la IMAGE pendiente.
 -        tc.Run("VIF1 image continuation preserves intervening commands and following GIF tags", [](TestCase &t)
 -        {
 -            for (const uint8_t opcode : {0x50u, 0x51u})
@@ -5227,7 +5227,7 @@ index 3847fda..4b159ae 100644
 -                        t.Equals(static_cast<uint32_t>(mem.getGSVRAM()[off + c]), 0xD0u + x * 4u + c,
 -                                 "only the subsequent DIRECT payload supplies image pixels");
 -                }
--                // GOW-Port: el frontend conserva la IMAGE; DIRECT entrega su payload sin etiquetas sinteticas.
+-                // MKSM-Port: el frontend conserva la IMAGE; DIRECT entrega su payload sin etiquetas sinteticas.
 -                std::vector<uint8_t> expected(16u);
 -                for (uint32_t i = 0u; i < 16u; ++i) expected[i] = static_cast<uint8_t>(0xD0u + i);
 -                expected.insert(expected.end(), followingTag.begin(), followingTag.end());
@@ -5236,7 +5236,7 @@ index 3847fda..4b159ae 100644
 -            }
 -        });
  
-         // GOW-Port: cambiar DIRECT/HL entre comandos tambien cambia la prioridad de PATH2.
+         // MKSM-Port: cambiar DIRECT/HL entre comandos tambien cambia la prioridad de PATH2.
          tc.Run("VIF1 image continuation uses the current DIRECT priority", [](TestCase &t)
 @@ -2640,36 +1286,6 @@ void register_ps2_memory_tests()
              t.Equals(mem.vif1_regs.mark, 0x2345u, "FIFO MARK must execute after the complete DIRECT");
@@ -5481,7 +5481,7 @@ index 4870fed..10e4b2f 100644
 -            runtime.requestStop();
 -        });
  
-         // GOW-Port: God of War demultiplexa el primer bloque (con la cabecera de secuencia) antes de
+         // MKSM-Port: El juego base demultiplexa el primer bloque (con la cabecera de secuencia) antes de
          // sceMpegCreate; reiniciar el estado ahí dejaba el decodificador esperando una cabecera que no vuelve.
 @@ -1482,111 +1285,7 @@ void register_ps2_runtime_expansion_tests()
                       "TPC should point at the first instruction not executed");
@@ -5519,7 +5519,7 @@ index 4870fed..10e4b2f 100644
 -            // With XYOFFSET=(1,1), vertex at (2,2) draws to pixel (1,1).
 -            const uint64_t xyz = (32ull) | (32ull << 16) | (0ull << 32);
 -            gs.writeRegister(GS_REG_XYZ2, xyz);
--            // GOW-Port: segundo extremo una unidad mas alla en cada eje: sprite de 1x1.
+-            // MKSM-Port: segundo extremo una unidad mas alla en cada eje: sprite de 1x1.
 -            gs.writeRegister(GS_REG_XYZ2, xyz + 16ull + (16ull << 16));
 -
 -            const uint32_t insideOff = frameOffsetBytes(1u, 1u, 1u);
@@ -5534,7 +5534,7 @@ index 4870fed..10e4b2f 100644
 -            const uint64_t scissorOutside = (3ull) | (4ull << 16) | (3ull << 32) | (4ull << 48);
 -            gs.writeRegister(GS_REG_SCISSOR_1, scissorOutside);
 -            gs.writeRegister(GS_REG_XYZ2, xyz);
--            // GOW-Port: segundo extremo una unidad mas alla en cada eje: sprite de 1x1.
+-            // MKSM-Port: segundo extremo una unidad mas alla en cada eje: sprite de 1x1.
 -            gs.writeRegister(GS_REG_XYZ2, xyz + 16ull + (16ull << 16));
 -
 -            bool anyWrite = false;
@@ -5584,7 +5584,7 @@ index 4870fed..10e4b2f 100644
 -
 -            const uint64_t xyz = (16ull) | (16ull << 16) | (0ull << 32); // pixel (1,1)
 -            gs.writeRegister(GS_REG_XYZ2, xyz);
--            // GOW-Port: segundo extremo una unidad mas alla en cada eje: sprite de 1x1.
+-            // MKSM-Port: segundo extremo una unidad mas alla en cada eje: sprite de 1x1.
 -            gs.writeRegister(GS_REG_XYZ2, xyz + 16ull + (16ull << 16));
 -
 -            // ((200 - 40) * 64 >> 7) + 40 = 120
@@ -5604,7 +5604,7 @@ index 7242e65..1a9eac0 100644
              TestEnv env;
  
 -            env.runtime.eeScheduler().accountCycles(80u);
-+            env.runtime.eeScheduler().accountCycles(8u * 4096u); // GOW-Port: el IOP avanza por lotes de 512 ciclos
++            env.runtime.eeScheduler().accountCycles(8u * 4096u); // MKSM-Port: el IOP avanza por lotes de 512 ciclos
              const uint64_t cyclesBeforeInit = env.runtime.iopDebugSnapshot().emulatorCycles;
              t.IsTrue(cyclesBeforeInit != 0u, "IOP cycle counter should advance before RPC initialization");
  

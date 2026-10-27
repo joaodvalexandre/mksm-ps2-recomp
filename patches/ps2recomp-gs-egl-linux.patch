@@ -15,7 +15,7 @@ index 1da4e2c..6d2a723 100644
      }
  }
 +#else
-+// GOW-Port: contexto OpenGL del GS en Linux con EGL (sin ventana). libEGL se carga en tiempo de ejecución.
++// MKSM-Port: contexto OpenGL del GS en Linux con EGL (sin ventana). libEGL se carga en tiempo de ejecución.
 +#include <dlfcn.h>
 +
 +namespace
@@ -139,7 +139,7 @@ index 1da4e2c..6d2a723 100644
 +
 +namespace
 +{
-+    // GOW-Port: funciones GL del contexto del GS, comunes a WGL y EGL.
++    // MKSM-Port: funciones GL del contexto del GS, comunes a WGL y EGL.
 +    void loadContextApi(GSGL::Api &a, std::string &missing)
 +    {
 +    load(a.GenBuffers, "glGenBuffers", missing);
@@ -378,7 +378,7 @@ index 1da4e2c..6d2a723 100644
 +        Destroy();
 +    }
  
-+    // GOW-Port: contexto EGL propio, sin compartir con la ventana: la presentación va por RAM.
++    // MKSM-Port: contexto EGL propio, sin compartir con la ventana: la presentación va por RAM.
      bool Context::Create(std::string &error)
      {
 -        error = "GPU GS backend is only implemented for Windows";

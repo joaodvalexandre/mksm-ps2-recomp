@@ -16,7 +16,7 @@ index b7895c6..c02fccc 100644
      }
  }
  
-+// GOW-Port: las rutas rápidas del UNPACK se pueden apagar para compararlas con la ruta genérica (solo pruebas).
++// MKSM-Port: las rutas rápidas del UNPACK se pueden apagar para compararlas con la ruta genérica (solo pruebas).
 +namespace ps2_vif1
 +{
 +    bool g_unpackFastPaths = true;
@@ -32,9 +32,9 @@ index b7895c6..c02fccc 100644
                  }
              }
 -            if (m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
-+            // GOW-Port: rutas rápidas del UNPACK portadas de la base anterior (ps2recomp-vif1-unpack-formats y
++            // MKSM-Port: rutas rápidas del UNPACK portadas de la base anterior (ps2recomp-vif1-unpack-formats y
 +            // -mask-sse); dan el mismo resultado que la ruta genérica (prueba "VIF1 UNPACK fast paths match the generic path").
-+            // GOW-Port: UNPACK sin máscara, sin sumar la fila (STMOD 0) y con CL >= WL (cada escritura tiene su
++            // MKSM-Port: UNPACK sin máscara, sin sumar la fila (STMOD 0) y con CL >= WL (cada escritura tiene su
 +            // vector de origen): el bucle general de abajo lee el qword de destino, sustituye las componentes
 +            // descomprimidas y lo escribe entero. Aquí se hace lo mismo por formato, sin las comprobaciones por
 +            // componente. V3 conserva W de la memoria, V2 escribe XYXY y V1 repite X, como abajo.
@@ -46,7 +46,7 @@ index b7895c6..c02fccc 100644
 +            if (fastUnpack && m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
 +            {
 +                const uint8_t *srcBase = data + pos;
-+                // GOW-Port: un bucle por formato (el formato no cambia dentro del UNPACK); mismo resultado que el
++                // MKSM-Port: un bucle por formato (el formato no cambia dentro del UNPACK); mismo resultado que el
 +                // bucle general por componente de antes: V4 escribe XYZW, V3 conserva W de la memoria, V2 escribe
 +                // XYXY, V1 repite X y V4-5 expande RGBA5551.
 +                const auto unpackAll = [&](auto fill)
@@ -151,7 +151,7 @@ index b7895c6..c02fccc 100644
 +                }
 +            }
 +#if defined(_MSC_VER) || defined(__SSE4_1__)
-+            // GOW-Port: UNPACK con máscara, sumando la fila (STMOD 1/2) o guardándola (STMOD 3) y CL >= WL: lo mismo que el bucle general
++            // MKSM-Port: UNPACK con máscara, sumando la fila (STMOD 1/2) o guardándola (STMOD 3) y CL >= WL: lo mismo que el bucle general
 +            // por componente de abajo, con SSE. Cada escritura descomprime su vector (las componentes que faltan,
 +            // de la memoria; V2 escribe XYXY y V1 repite X), suma ROW a los campos que toman el dato (no en V4-5),
 +            // actualiza ROW en STMOD 2 y 3 solo en esos campos y mezcla dato, ROW, COL o memoria según la máscara de
@@ -162,7 +162,7 @@ index b7895c6..c02fccc 100644
 +                const uint32_t mode = vif1_regs.mode & 3u;
 +                const bool canAdd = (vl != 3u || vn != 3u);
 +                const bool addRow = canAdd && (mode == 1u || mode == 2u);
-+                const bool storeRow = canAdd && (mode == 2u || mode == 3u); // GOW-Port: STMOD 3 guarda el dato en ROW
++                const bool storeRow = canAdd && (mode == 2u || mode == 3u); // MKSM-Port: STMOD 3 guarda el dato en ROW
 +                const uint32_t limit = static_cast<uint32_t>(components);
 +                __m128i specMask[4][4]; // [posición en el ciclo][especificación 0..3]
 +                __m128i colv[4];
@@ -244,7 +244,7 @@ index 4b159ae..60b4405 100644
  
 +namespace ps2_vif1
 +{
-+    void setUnpackFastPaths(bool enabled); // GOW-Port: ps2_vif1_interpreter.cpp
++    void setUnpackFastPaths(bool enabled); // MKSM-Port: ps2_vif1_interpreter.cpp
 +}
 +
  namespace
@@ -256,7 +256,7 @@ index 4b159ae..60b4405 100644
  
 +        tc.Run("VIF1 UNPACK fast paths match the generic path", [](TestCase &t)
 +        {
-+            // GOW-Port: las rutas rápidas del UNPACK (sin máscara/STMOD 0 y la de SSE con máscara o STMOD 1-3) deben dar
++            // MKSM-Port: las rutas rápidas del UNPACK (sin máscara/STMOD 0 y la de SSE con máscara o STMOD 1-3) deben dar
 +            // lo mismo que la ruta genérica en memoria de VU1 y en ROW, para cada formato, máscara, modo y ciclo.
 +            uint32_t seed = 0x12345678u;
 +            const auto rnd = [&seed]() { seed = seed * 1664525u + 1013904223u; return seed; };

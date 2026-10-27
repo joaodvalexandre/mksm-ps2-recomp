@@ -1,7 +1,7 @@
 param([Parameter(Mandatory)][string]$Profiler,[Parameter(Mandatory)][string]$Fixture)
 $ErrorActionPreference='Stop'
 $testBase=[IO.Path]::GetFullPath([IO.Path]::GetTempPath())
-$testDir=Join-Path $testBase ('gow-sample-'+[Guid]::NewGuid().ToString('N'))
+$testDir=Join-Path $testBase ('mksm-sample-'+[Guid]::NewGuid().ToString('N'))
 $testProcess=$null
 try {
     New-Item -ItemType Directory -Path $testDir | Out-Null
@@ -22,6 +22,6 @@ finally {
     $testResolved=[IO.Path]::GetFullPath($testDir)
     $testPrefix=$testBase.TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
     if(-not $testResolved.StartsWith($testPrefix,[StringComparison]::OrdinalIgnoreCase) -or
-       (Split-Path -Leaf $testResolved) -notmatch '^gow-sample-[a-f0-9]{32}$'){throw 'Invalid cleanup target'}
+       (Split-Path -Leaf $testResolved) -notmatch '^mksm-sample-[a-f0-9]{32}$'){throw 'Invalid cleanup target'}
     if(Test-Path -LiteralPath $testResolved){Remove-Item -LiteralPath $testResolved -Recurse -Force}
 }

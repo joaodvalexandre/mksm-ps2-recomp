@@ -22,7 +22,7 @@ index 486aa56..5606736 100644
 -        word = uint(c.r) | (uint(c.g) << 8) | (uint(c.b) << 16) | (uint(c.a) << 24);
 +    if (uRtFmt2.w != 0)
 +    {
-+        // GOW-Port: the owner is a depth buffer (uRtColor holds its depth texture): its word is the Z value
++        // MKSM-Port: the owner is a depth buffer (uRtColor holds its depth texture): its word is the Z value
 +        float zf = clamp(texture(uRtColor, (vec2(float(px), float(py)) + 0.5) / uRtPx).r, 0.0, 1.0);
 +        float zmax = uRtFmt2.w == 16 ? 65535.0 : uRtFmt2.w == 24 ? 16777215.0 : 4294967295.0;
 +        word = uint(zf * zmax + 0.5);
@@ -44,7 +44,7 @@ index 486aa56..5606736 100644
          uint32_t fbp = 0, fbw = 1; // PS2 page base and width in 64 px units
          uint8_t psm = 0;
          uint32_t zbp = ~0u;
-+        uint8_t zpsm = 0x30; // GOW-Port: format of the depth buffer at zbp
++        uint8_t zpsm = 0x30; // MKSM-Port: format of the depth buffer at zbp
          uint32_t pxW = 0, pxH = 0; // size in PS2 pixels
          uint32_t glW = 0, glH = 0;
          bool depthCleared = false;
@@ -61,7 +61,7 @@ index 486aa56..5606736 100644
      // target's last colour draw: the memory then holds Z, not the colour picture. Example: the movie player draws its
      // pictures into fbp 104, which is the gameplay Z buffer; after the movie the depth writes replace them, and the
      // game's passes that read the Z memory as PSMCT24 (fog/DOF strips into fbp 320) must not see the old movie frame.
-+    // GOW-Port: the target whose depth buffer holds the texture's first block, when that depth was written after any
++    // MKSM-Port: the target whose depth buffer holds the texture's first block, when that depth was written after any
 +    // colour draw there (overwrittenByDepth): the texture reads the Z words through the Z format's layout. The game's
 +    // fog/DOF strips read the gameplay Z buffer (fbp 104) as PSMCT24; they were decoded on the CPU from GS memory that
 +    // never held the GPU's depth (a 1024x1024 decode and upload every frame, with stale contents).
@@ -93,10 +93,10 @@ index 486aa56..5606736 100644
 +        return false;
 +    }
 +
-+    // GOW-Port: GOW_GS_HW_ZCOLOR=0 decodes Z-as-colour reads on the CPU again (for comparisons)
++    // MKSM-Port: MKSM_GS_HW_ZCOLOR=0 decodes Z-as-colour reads on the CPU again (for comparisons)
 +    static bool depthAsColorOff()
 +    {
-+        static const bool off = [] { const char *v = std::getenv("GOW_GS_HW_ZCOLOR"); return v && v[0] == '0'; }();
++        static const bool off = [] { const char *v = std::getenv("MKSM_GS_HW_ZCOLOR"); return v && v[0] == '0'; }();
 +        return off;
 +    }
 +

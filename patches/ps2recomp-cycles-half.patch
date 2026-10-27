@@ -7,7 +7,7 @@ index 465be28..2856bbb 100644
      const EeScheduler &eeScheduler() const;
      void postEeEvent(EeEvent event);
 -    bool eeCheckpointDue(uint32_t cycles = 32u) noexcept;
-+    bool eeCheckpointDue(uint32_t cycles = 16u) noexcept; // GOW-Port: EeScheduler::kGeneratedCheckpointCycles
++    bool eeCheckpointDue(uint32_t cycles = 16u) noexcept; // MKSM-Port: EeScheduler::kGeneratedCheckpointCycles
      [[noreturn]] void eeWaitVSyncTicks(uint32_t ticks, uint32_t resumePc);
  
      struct EeExitHandlerRegistration
@@ -21,7 +21,7 @@ index 417013f..1cf4c2c 100644
      static constexpr uint64_t kEeClockHz = 294912000ull;
 -    static constexpr uint32_t kGeneratedCheckpointCycles = 32u;
 -    static constexpr uint32_t kGuestDispatchCycles = 8u;
-+    // GOW-Port: EE cycles charged per backward edge of generated code and per dispatch (was 32 and 8). The EE clock
++    // MKSM-Port: EE cycles charged per backward edge of generated code and per dispatch (was 32 and 8). The EE clock
 +    // is paced to the host clock, so an overestimate makes the game sleep off guest time it never spent: with half the
 +    // cost, frames whose VU1/GS work runs long still make the next field (docs/ESTADO.md, ritmo del EE).
 +    static constexpr uint32_t kGeneratedCheckpointCycles = 16u;
@@ -37,7 +37,7 @@ index a4c09fa..92d057d 100644
              }
          }
      }
-+    // GOW-Port: cuenta los puntos de control del código generado hasta el primer VBlank.
++    // MKSM-Port: cuenta los puntos de control del código generado hasta el primer VBlank.
 +    constexpr uint32_t kCheckpointCostPc = 0x00160700u;
 +    uint64_t g_checkpointCalls = 0u;
 +
@@ -63,7 +63,7 @@ index a4c09fa..92d057d 100644
  
 +        tc.Run("generated checkpoints charge 16 EE cycles each", [](TestCase &t)
 +        {
-+            // GOW-Port: ps2recomp-ciclos-mitad. Un salto hacia atrás del código generado cuesta 16 ciclos del EE (antes
++            // MKSM-Port: ps2recomp-ciclos-mitad. Un salto hacia atrás del código generado cuesta 16 ciclos del EE (antes
 +            // 32): el primer VBlank llega tras un campo NTSC, es decir, tras campo / 16 puntos de control.
 +            TestEnv env;
 +            t.IsTrue(env.runtime.memory().initialize(), "runtime memory initialize should succeed");

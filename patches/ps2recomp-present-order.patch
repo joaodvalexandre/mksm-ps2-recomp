@@ -8,7 +8,7 @@ index 89d3258..1da4e2c 100644
          std::lock_guard<std::mutex> lock(s_sharedMutex);
 -        int newest = -1;
 -        uint64_t sequence = s_readingSlot >= 0 ? s_sharedSlots[s_readingSlot].frame.sequence : 0u;
-+        // GOW-Port: los cuadros se muestran en orden (el siguiente aún no mostrado), no siempre el más reciente: con el
++        // MKSM-Port: los cuadros se muestran en orden (el siguiente aún no mostrado), no siempre el más reciente: con el
 +        // ritmo irregular del juego (cuadros de 10 a 22 ms) dos cuadros podían caer en un mismo refresco de la ventana y
 +        // el primero no se veía nunca (60 cuadros del juego, 44 imágenes en pantalla). Solo se salta al más reciente si
 +        // hay 3 o más pendientes, para no acumular retraso. PS2X_GS_PRESENT_LATEST=1: siempre el más reciente.

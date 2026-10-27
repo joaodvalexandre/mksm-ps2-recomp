@@ -1,21 +1,20 @@
 # Guide for agents and contributors
 
 Port of *Mortal Kombat: Shaolin Monks* (PS2, PAL `SLES-53524`) by static recompilation with
-[PS2Recomp](https://github.com/ran-j/PS2Recomp). The repository started from a *God of War* port and keeps its
-runtime patch stack; game-specific files that still say `gow` are being replaced. This repository does not
-contain game files or the generated C++: only what is specific to the game. MKSM notes and research:
+[PS2Recomp](https://github.com/ran-j/PS2Recomp), on top of a native runtime kept as a patch stack. This repository
+does not contain game files or the generated C++: only what is specific to the game. Research log:
 [`docs/MKSM.md`](docs/MKSM.md). Architecture and CI: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-Several agents work on `main` at the same time. `git pull` before starting; before pushing, fetch `main` again
+Several agents work on `master` at the same time. `git pull` before starting; before pushing, fetch `master` again
 and integrate the changes (merge, never rewrite published history).
 
 ## Where each change goes
 
 | Change | Where |
 |---|---|
-| Replacements and diagnostics for game functions | `src/gow_overrides.cpp` (`applyGowOverrides`) |
+| Replacements and diagnostics for game functions | `src/mksm_overrides.cpp` (`applyMksmOverrides`) |
 | Changes to the PS2Recomp runtime/IOP | one patch per topic in `patches/` |
-| Recompiler functions, stubs and entry points | `config/recomp.template.toml`, `config/funcmap.csv` |
+| Recompiler functions, stubs and entry points | `config/recomp.template.toml`, `config/funcmap.csv` (after a map change, `python tools/funcmap_fixup.py game/SLES_535.24`) |
 | Game-independent tests | `tests/` (runtime tests go inside the patch, in `ps2xTest/`) |
 | Port status (README map) | `docs/status/data.toml` |
 | Research log | `docs/MKSM.md` |
@@ -44,29 +43,29 @@ and integrate the changes (merge, never rewrite published history).
   ```
 
   Then check that the patches after `N` still apply.
-- Mark changes with a `// GOW-Port:` comment to tell them apart from the original code.
+- Mark changes with a `// MKSM-Port:` comment to tell them apart from the original code.
 - A runtime behavior change comes with a regression test in `ps2xTest/` that fails without the change. If you
   deliberately change something an existing test checked, adjust the test and explain why.
-- Patch changes require `scripts\2_build.cmd`; `2_rebuild_fast.cmd` only copies `src/gow_overrides.cpp` and
+- Patch changes require `scripts\2_build.cmd`; `2_rebuild_fast.cmd` only copies `src/mksm_overrides.cpp` and
   `src/*.h`.
 
-## Overrides (`src/gow_overrides.cpp`)
+## Overrides (`src/mksm_overrides.cpp`)
 
 - Call the original function for everything you do not replace, and honor resumptions after a checkpoint
   (`ctx->pc` different from the entry address: just call the original).
-- Diagnostics are optional: enable them with an environment variable (`GOW_*_DIAG`) or with a message limit, and
-  use a `[gow-xxx]` tag in the log. Document the variable in `docs/MKSM.md`, and remove the diagnostic once the
+- Diagnostics are optional: enable them with an environment variable (`MKSM_*_DIAG`) or with a message limit, and
+  use a `[mksm-xxx]` tag in the log. Document the variable in `docs/MKSM.md`, and remove the diagnostic once the
   problem is solved.
 - If you use a new runtime function, it must exist in some patch: CI compiles `src/*.cpp` against the patched
   runtime.
 
 ## Checks (CI: `.github/workflows/tests.yml`)
 
-On every push to `main` and every PR, without the game. They must stay green:
+On every push to `master` and every PR, without the game. They must stay green:
 
 - `python3 tools/ci/validate_config.py`: `funcmap.csv` and `recomp.template.toml`.
 - `pwsh -File tools/ci/analyze_ps1.ps1`: syntax of the `.ps1` files.
-- `tests/pad2_packet_test.cpp` (on Windows: `scripts\test_pad2.cmd`).
+- The Python tool tests in `tests/` (`python -m unittest discover -s tests -p <file>`).
 - The patches apply, every stub has a handler in the runtime, `src/*.cpp` compiles against the patched runtime
   and the whole `ps2x_tests` suite passes. `tests/known_failures.txt` is empty: do not add a test there to hide a
   regression, fix it.
@@ -90,16 +89,16 @@ The suite runs from `PS2Recomp/`, as in CI: some tests read sources through rela
 What CI cannot check: it needs the ELF, the IRX modules and the ISO (see the README).
 
 1. `scripts\2_build.cmd` (or `2_rebuild_fast.cmd` if you only changed `src/`).
-2. `scripts\test_menu.ps1 -Seconds 115`: walks through the menu and saves GS captures in `logs\`.
-3. Review `logs\run_err.log` and the captures. A non-black capture or a clean log does not prove the game is
-   playable: record in `docs/MKSM.md` exactly what was verified.
+2. `scripts\3_run.cmd` (60 s) or `scripts\3_run_manual.cmd` (no limit).
+3. Review `logs\run_err.log`. A clean log does not prove the game is playable: record in `docs/MKSM.md` exactly
+   what was verified.
 
 ## Documentation and status
 
 - `docs/MKSM.md` is the research log: add what was tried, with what result, and the next steps. Do not delete
   findings; correct them if they turn out to be wrong.
 - If a component or library changes state (working / partial / pending), update `docs/status/data.toml` and run
-  `python tools/status/generate.py` (the "Status map" action also does it on pushes to `main`).
+  `python tools/status/generate.py` (the "Status map" action also does it on pushes to `master`).
 - Documentation and comments are written in English; commits too.
 
 ## Legal

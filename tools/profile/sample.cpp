@@ -1,4 +1,4 @@
-// GOW-Port: external sampling profiler for Windows.
+// MKSM-Port: external sampling profiler for Windows.
 // Usage: sample <pid> <seconds> [threads=6] [functions=30]
 // Suspends every thread of the process every ~1 ms, reads its RIP and, when done, groups the samples by
 // function with DbgHelp. To see names the executable needs its PDB (/Zi and /DEBUG); without it only
@@ -41,7 +41,7 @@ int main(int argc, char **argv)
     // Samples attributed to the first executable frame (useful when the PC is in a system DLL).
     std::unordered_map<DWORD, std::unordered_map<DWORD64, uint32_t>> callers;
     SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
-    // GOW-Port: a single DbgHelp session per process; repeating it produces ERROR_INVALID_PARAMETER.
+    // MKSM-Port: a single DbgHelp session per process; repeating it produces ERROR_INVALID_PARAMETER.
     if (!SymInitialize(process, nullptr, TRUE))
     {
         std::fprintf(stderr, "SymInitialize failed (%lu)\n", GetLastError());
@@ -155,7 +155,7 @@ int main(int argc, char **argv)
         std::sort(sorted.rbegin(), sorted.rend());
         for (size_t i = 0; i < sorted.size() && i < maxFunctions; ++i)
             std::printf("  %5.1f%%  %s\n", 100.0 * sorted[i].first / report.total, sorted[i].second.c_str());
-        // GOW-Port: attribute the samples in DLLs to the first recovered executable frame.
+        // MKSM-Port: attribute the samples in DLLs to the first recovered executable frame.
         // They are a second view of those same samples, not additional time nor exclusive CPU.
         const auto recovered = callers.find(report.tid);
         if (recovered != callers.end() && !recovered->second.empty())

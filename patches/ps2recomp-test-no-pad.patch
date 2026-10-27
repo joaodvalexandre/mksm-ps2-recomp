@@ -11,9 +11,9 @@ index b008aea..96deb57 100644
      for (int i = 0; i < 4 && kGamepad < 0; ++i)
          if (IsGamepadAvailable(i))
              kGamepad = i;
-+    // GOW-Port: with GOW_PAD_TEST=1 the test script alone drives the game; a gamepad switched on or touched while the
++    // MKSM-Port: with MKSM_PAD_TEST=1 the test script alone drives the game; a gamepad switched on or touched while the
 +    // automated tests run (the player using the PC meanwhile) changed the title menu's state and broke them.
-+    static const bool scripted = [] { const char *v = std::getenv("GOW_PAD_TEST"); return v && v[0] == '1' && v[1] == 0; }();
++    static const bool scripted = [] { const char *v = std::getenv("MKSM_PAD_TEST"); return v && v[0] == '1' && v[1] == 0; }();
 +    if (scripted)
 +        kGamepad = -1;
      const bool useGamepad = kGamepad >= 0;

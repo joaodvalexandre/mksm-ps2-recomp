@@ -10,7 +10,7 @@ Errors (exit code 1), which would otherwise only show up when recompiling on Win
   - With --runtime: stubs without a handler in ps2xRuntime/include/ps2_call_list.h (the name, or without a
     leading "_").
 Warnings (do not fail): stubs that do not start at a function (e.g. those that start in a delay slot and are
-linked from src/gow_overrides.cpp) and addresses repeated between stubs and entry_points.
+linked from src/mksm_overrides.cpp) and addresses repeated between stubs and entry_points.
 """
 from __future__ import annotations
 

@@ -1,5 +1,5 @@
 @echo off
-rem GOW-Port: validates the PR18 generator with procedural microcode, without game data.
+rem MKSM-Port: validates the PR18 generator with procedural microcode, without game data.
 setlocal
 cd /d "%~dp0.."
 if not exist logs mkdir logs
@@ -11,7 +11,7 @@ set VSCMD_SKIP_SENDTELEMETRY=1
 call "%TASK_VU1_VSPATH%\VC\Auxiliary\Build\vcvars64.bat" > logs\vu1_procedural_vcvars.log 2>&1
 if errorlevel 1 goto :failed
 if not errorlevel 0 goto :failed
-if defined GOW_WORK (set "TASK_VU1_WORK=%GOW_WORK%") else (for /f "usebackq delims=" %%w in (`powershell -NoProfile -Command ". '%~dp0common.ps1'; Get-GowWorkDir"`) do set "TASK_VU1_WORK=%%w")
+if defined MKSM_WORK (set "TASK_VU1_WORK=%MKSM_WORK%") else (for /f "usebackq delims=" %%w in (`powershell -NoProfile -Command ". '%~dp0common.ps1'; Get-MksmWorkDir"`) do set "TASK_VU1_WORK=%%w")
 set "TASK_VU1_RUNTIME=%TASK_VU1_WORK%\PS2Recomp"
 set "TASK_VU1_BUILD=%TASK_VU1_RUNTIME%\out\build"
 if not exist "%TASK_VU1_BUILD%\ps2xRuntime\ps2_runtime.lib" goto :failed
@@ -34,10 +34,10 @@ if not errorlevel 0 goto :failed
 link /nologo /out:logs\vu1_compiled_test.exe logs\vu1_fixture.obj logs\vu1_procedural\programa*.obj "%TASK_VU1_BUILD%\ps2xRuntime\ps2_runtime.lib" "%TASK_VU1_BUILD%\_deps\fmt-build\fmt.lib" "%TASK_VU1_BUILD%\_deps\raylib-build\raylib\raylib.lib" "%TASK_VU1_BUILD%\ps2xIOP\ps2_iop.lib" glu32.lib winmm.lib opengl32.lib gdi32.lib user32.lib shell32.lib ole32.lib advapi32.lib bcrypt.lib secur32.lib ws2_32.lib >> logs\vu1_procedural_build.log 2>&1
 if errorlevel 1 goto :failed
 if not errorlevel 0 goto :failed
-set GOW_VU1C_DIAG=1
-set GOW_VU1C_RANGO=
-set GOW_VU1C_SIN_BLOQUES=
-set GOW_VU1_SIN_COMPILAR=
+set MKSM_VU1C_DIAG=1
+set MKSM_VU1C_RANGO=
+set MKSM_VU1C_SIN_BLOQUES=
+set MKSM_VU1_SIN_COMPILAR=
 logs\vu1_compiled_test.exe > logs\vu1_procedural_test.log 2>&1
 if errorlevel 1 goto :failed
 if not errorlevel 0 goto :failed

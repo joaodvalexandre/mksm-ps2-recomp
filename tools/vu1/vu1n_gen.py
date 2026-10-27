@@ -1,14 +1,14 @@
-# GOW-Port: copiado de Waffle565/God-Of-War-Native-Port, main@34f30d5:tools/vu1/vu1n_gen.py.
+# MKSM-Port: copiado de Waffle565's native port, main@34f30d5:tools/vu1/vu1n_gen.py.
 # Generates the blocks of the native VU1 (ps2recomp-vu1-native.patch).
 """Native VU1 block generator.
 
 usage: python -I tools/vu1/vu1n_gen.py <out dir> <micro-memory dir or .bin files...> [--heads heads.txt] [--parts N]
 
-Reads the captured 16 KB VU1 micro-memories (GOW_VU1_CAPTURA), splits them into basic blocks (same rule as
+Reads the captured 16 KB VU1 micro-memories (MKSM_VU1_CAPTURA), splits them into basic blocks (same rule as
 VU1Interpreter's nativeExtent in ps2_vu1_native.inl) and writes straight-line C++ for each distinct (pc, words) block:
 immediate semantics, no cycle model, MAC flags only where they can be observed. Output: vu1n_part<k>.cpp. The exact engine
-(ps2_vu1_core.cpp) remains the fallback for every block that is not here and the oracle for GOW_VU1N_VERIFY.
-heads.txt (optional): extra entry pcs (hex, one per line), e.g. misses logged by GOW_VU1N_DIAG.
+(ps2_vu1_core.cpp) remains the fallback for every block that is not here and the oracle for MKSM_VU1N_VERIFY.
+heads.txt (optional): extra entry pcs (hex, one per line), e.g. misses logged by MKSM_VU1N_DIAG.
 """
 import os
 import struct
@@ -203,7 +203,7 @@ def emit_upper(u, pc, idx, mac_var, clip_var, prev_clip, clean=frozenset()):
     if kind in ('add', 'sub', 'mul', 'madd', 'msub') and mac_var:
         out.append(f"const uint32_t {mac_var} = vu1n::macVal<{m}>(r{idx});")
         out.append(f"const __m128 q{idx} = r{idx};  // unclamped: flags computed later if it outlives the block")
-    # GOW-Port: the operands are finite (ldn, or registers known clean) and the blocks run with round toward zero, so
+    # MKSM-Port: the operands are finite (ldn, or registers known clean) and the blocks run with round toward zero, so
     # add/sub/mul cannot give Inf/NaN (an overflow stays at FLT_MAX) and madd/msub saturate in maddWide: the clamp is
     # only needed when I or Q, read raw, is an operand of add/sub/mul.
     if kind in ('add', 'sub', 'mul') and src in ('i', 'q'):

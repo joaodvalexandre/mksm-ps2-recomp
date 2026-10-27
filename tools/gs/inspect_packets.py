@@ -78,11 +78,11 @@ def inspect(data: bytes) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('capture', type=Path, help='GIF file or folder with gow_geo_gif_*.bin')
+    parser.add_argument('capture', type=Path, help='GIF file or folder with mksm_geo_gif_*.bin')
     parser.add_argument('--json', type=Path, help='save the report, preferably under logs/')
     args = parser.parse_args()
     files = [args.capture] if args.capture.is_file() else sorted(
-        args.capture.glob('gow_geo_gif_*.bin'), key=lambda p: int(re.search(r'_(\d+)$', p.stem)[1]))
+        args.capture.glob('mksm_geo_gif_*.bin'), key=lambda p: int(re.search(r'_(\d+)$', p.stem)[1]))
     if not files:
         parser.error('no GIF captures were found')
     rows = []

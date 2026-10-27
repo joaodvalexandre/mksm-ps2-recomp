@@ -1,5 +1,5 @@
 @echo off
-rem GOW-Port: DbgHelp and recovered-stack regression, without the game.
+rem MKSM-Port: DbgHelp and recovered-stack regression, without the game.
 setlocal
 cd /d "%~dp0.."
 if not exist logs mkdir logs

@@ -6,7 +6,7 @@ index 7aa72b9..746e1ab 100644
      uint64_t vifWriteCount() const { return m_vifWriteCount.load(std::memory_order_relaxed); }
      uint64_t getVU0CodeGeneration() const { return m_vu0CodeGeneration.load(std::memory_order_relaxed); }
      uint64_t getVU1CodeGeneration() const { return m_vu1CodeGeneration.load(std::memory_order_relaxed); }
-+    // GOW-Port: the byte range of VU1 code memory written by each generation (VIF1 MPG; other writes log the whole
++    // MKSM-Port: the byte range of VU1 code memory written by each generation (VIF1 MPG; other writes log the whole
 +    // memory). Fills `out` with the writes of generations (from, to] and returns true, or false when the log no longer
 +    // holds all of them (the caller then drops everything). The native VU1 dispatcher keeps the blocks outside them.
 +    struct Vu1CodeWrite { uint64_t generation; uint32_t lo, hi; };
@@ -19,7 +19,7 @@ index 7aa72b9..746e1ab 100644
      std::atomic<uint64_t> m_vifWriteCount{0};
      std::atomic<uint64_t> m_vu0CodeGeneration{0};
      std::atomic<uint64_t> m_vu1CodeGeneration{0};
-+    mutable std::mutex m_vu1CodeLogMutex; // GOW-Port: m_vu1CodeLog and the generation it records advance together
++    mutable std::mutex m_vu1CodeLogMutex; // MKSM-Port: m_vu1CodeLog and the generation it records advance together
 +    std::array<Vu1CodeWrite, kVu1CodeLog> m_vu1CodeLog{};
      // I/O registers
      std::unordered_map<uint32_t, uint32_t> m_ioRegisters;
@@ -78,7 +78,7 @@ index c02fccc..befe135 100644
                  {
                      std::memcpy(m_vu1Code + destAddr, data + pos, copyBytes);
 -                    markVU1CodeModified();
-+                    markVU1CodeModified(destAddr, destAddr + copyBytes); // GOW-Port: only that range changed
++                    markVU1CodeModified(destAddr, destAddr + copyBytes); // MKSM-Port: only that range changed
                  }
                  else
                      std::fprintf(stderr, "[vif1] MPG cut: dest=%x bytes=%u have=%u\n", destAddr, copyBytes, sizeBytes - pos);
@@ -90,7 +90,7 @@ index 12c1174..4261224 100644
      const uint64_t generation = context.memory ? context.memory->getVU1CodeGeneration() : 0u;
      if (generation != ns.generation)
      {
-+        // GOW-Port: the game swaps microprograms ~14 times a frame; dropping every slot made the resident code (the
++        // MKSM-Port: the game swaps microprograms ~14 times a frame; dropping every slot made the resident code (the
 +        // MSCAL entry stubs and shared routines) resolve again each time (~870 slotFor per frame). Only the blocks that
 +        // read the written ranges are dropped: a block reads [pc, pc + (pairs + 1) * 8), at most 65 pairs.
 +        PS2Memory::Vu1CodeWrite writes[PS2Memory::kVu1CodeLog];
@@ -131,7 +131,7 @@ index 160a16c..5a31274 100644
  
 +        tc.Run("VIF MPG logs the VU1 code range of each generation", [](TestCase &t)
 +        {
-+            // GOW-Port: ps2recomp-vu1-invalidacion-rango. Cada MPG anota el rango de código que escribe; el despachador
++            // MKSM-Port: ps2recomp-vu1-invalidacion-rango. Cada MPG anota el rango de código que escribe; el despachador
 +            // de la VU1 nativa solo descarta los bloques que lo leen.
 +            PS2Memory mem;
 +            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");

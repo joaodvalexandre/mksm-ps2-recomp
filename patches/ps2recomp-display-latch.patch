@@ -6,19 +6,19 @@ index 6728c64..a5d3d7e 100644
      void setDebugHistoryPaused(bool paused);
      bool getPreferredDisplaySource(GSFrameReg &outSource, uint32_t &outDestFbp) const;
      void latchHostPresentationFrame();
-+    // GOW-Port: captures the display registers the CRTC scans out in a field, when the field's VBlank starts (before the
++    // MKSM-Port: captures the display registers the CRTC scans out in a field, when the field's VBlank starts (before the
 +    // game's VBlank handler runs; called by the EE scheduler). Presentation uses this snapshot, not the registers at
 +    // whatever moment the host presents: the movie player sets DISPFB2 to its other buffer and back within ~0.1 ms every
 +    // 4 fields, which the console never shows, and a present that caught it flashed the stale menu kept in that buffer.
 +    void latchDisplayField();
-     // GOW-Port: el host registra la textura adquirida, nunca el request posterior.
+     // MKSM-Port: el host registra la textura adquirida, nunca el request posterior.
      bool usesSharedPresentation() const;
      void recordAcquiredSharedFrame(const GSSharedPresent::Frame &frame);
 @@ -188,6 +193,9 @@ private:
      uint8_t *m_localMemoryStorage = nullptr;
      uint32_t m_localMemorySize = 0u;
      struct GSRegisters *m_privRegs = nullptr;
-+    mutable std::mutex m_fieldMutex; // GOW-Port: latchDisplayField
++    mutable std::mutex m_fieldMutex; // MKSM-Port: latchDisplayField
 +    uint64_t m_field[7]{};           // pmode, smode2, dispfb1, display1, dispfb2, display2, bgcolor
 +    bool m_fieldValid = false;
      mutable std::recursive_mutex m_stateMutex;
@@ -32,7 +32,7 @@ index b33dadd..07d0af8 100644
                                   std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now().time_since_epoch()).count());
              }
          }
-+        m_runtime.gs().latchDisplayField(); // GOW-Port: what the CRTC shows in this field (gs_frontend.h)
++        m_runtime.gs().latchDisplayField(); // MKSM-Port: what the CRTC shows in this field (gs_frontend.h)
          m_runtime.memory().gs().vsyncTick.store(m_vsyncTick, std::memory_order_release);
          if ((m_vsyncTick & 1u) != 0u)
          {
@@ -45,11 +45,11 @@ index 0dc9480..1180a14 100644
  {
      std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
 +    {
-+        std::lock_guard<std::mutex> fieldLock(m_fieldMutex); // GOW-Port: no latched field from before the reset
++        std::lock_guard<std::mutex> fieldLock(m_fieldMutex); // MKSM-Port: no latched field from before the reset
 +        m_fieldValid = false;
 +    }
      std::memset(m_ctx, 0, sizeof(m_ctx));
-     m_gifInput = {}; // GOW-Port: reset tambien descarta etiquetas/registros incompletos.
+     m_gifInput = {}; // MKSM-Port: reset tambien descarta etiquetas/registros incompletos.
      m_prim = {};
 @@ -730,18 +734,38 @@ void GS::refreshDisplaySnapshot()
      snapshotVRAM();
@@ -79,7 +79,7 @@ index 0dc9480..1180a14 100644
 -    request.dispfb2 = m_privRegs->dispfb2;
 -    request.display2 = m_privRegs->display2;
 -    request.bgcolor = m_privRegs->bgcolor;
-+    // GOW-Port: the display state latched at the field's VBlank (latchDisplayField), when there is one.
++    // MKSM-Port: the display state latched at the field's VBlank (latchDisplayField), when there is one.
 +    uint64_t field[7] = {m_privRegs->pmode, m_privRegs->smode2, m_privRegs->dispfb1, m_privRegs->display1,
 +                         m_privRegs->dispfb2, m_privRegs->display2, m_privRegs->bgcolor};
 +    {
@@ -107,7 +107,7 @@ index 5ddaa4d..d22b1cd 100644
  
 +        t.Run("presentation uses the display state latched at VBlank, not a transient write", [](TestCase &t)
 +        {
-+            // GOW-Port: ps2recomp-pantalla-latch. El reproductor de vídeo pone DISPFB2 en su otro búfer y lo devuelve
++            // MKSM-Port: ps2recomp-pantalla-latch. El reproductor de vídeo pone DISPFB2 en su otro búfer y lo devuelve
 +            // ~0,1 ms después; la consola no lo muestra nunca. La presentación usa los registros capturados al empezar
 +            // el VBlank del campo (latchDisplayField), así que una escritura transitoria posterior no se ve.
 +            Fixture f;

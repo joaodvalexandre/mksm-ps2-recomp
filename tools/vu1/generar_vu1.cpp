@@ -1,4 +1,4 @@
-// GOW-Port: generates C++ for the VU1 microcode captured with GOW_VU1_CAPTURA (16 KB micromemories).
+// MKSM-Port: generates C++ for the VU1 microcode captured with MKSM_VU1_CAPTURA (16 KB micromemories).
 // Usage: generar_vu1 <output folder> <micromemory.bin>...  (writes programa0.cpp ... programa12.cpp)
 //
 // Each instruction pair is written already decoded (as the interpreter decodes it) and is run with
@@ -155,7 +155,7 @@ int main(int argc, char **argv)
         std::cerr << "Usage: generar_vu1 <output folder> <micromemory.bin | folder>...\n";
         return 2;
     }
-    // GOW-Port: a folder counts as all its micromemories (*.bin, by name). Thousands of paths do not fit
+    // MKSM-Port: a folder counts as all its micromemories (*.bin, by name). Thousands of paths do not fit
     // in the Windows command line (32 K characters).
     std::vector<std::string> inputs;
     for (int a = 2; a < argc; ++a)
@@ -419,17 +419,17 @@ int main(int argc, char **argv)
     std::ostringstream out;
     out << header
         << "namespace\n{\n"
-        << "    // GOW_VU1C_DIAG: compiled and interpreted pairs on exit. GOW_VU1C_RANGO=start-end (hex): only uses the\n"
+        << "    // MKSM_VU1C_DIAG: compiled and interpreted pairs on exit. MKSM_VU1C_RANGO=start-end (hex): only uses the\n"
         << "    // compiled code in that address range (to narrow down a difference with the interpreter).\n"
-        << "    // GOW_VU1C_SIN_BLOQUES: sin bloques (solo pares sueltos).\n"
+        << "    // MKSM_VU1C_SIN_BLOQUES: sin bloques (solo pares sueltos).\n"
         << "    struct Stats\n    {\n        unsigned long long compiled = 0, interpreted = 0;\n"
-        << "        ~Stats()\n        {\n            if (std::getenv(\"GOW_VU1C_DIAG\"))\n"
+        << "        ~Stats()\n        {\n            if (std::getenv(\"MKSM_VU1C_DIAG\"))\n"
         << "                std::fprintf(stderr, \"[vu1c] compilados=%llu interpretados=%llu\\n\", compiled + vu1c_gen::g_blockPairs, interpreted);\n        }\n    } g_stats;\n"
         << "    struct Range\n    {\n        uint32_t lo = 0, hi = 0xFFFFFFFFu;\n        bool blocks = true;\n        Range()\n        {\n"
-        << "            if (const char *v = std::getenv(\"GOW_VU1C_RANGO\"))\n            {\n"
+        << "            if (const char *v = std::getenv(\"MKSM_VU1C_RANGO\"))\n            {\n"
         << "                char *end = nullptr;\n                lo = static_cast<uint32_t>(std::strtoul(v, &end, 16));\n"
         << "                hi = end && *end == '-' ? static_cast<uint32_t>(std::strtoul(end + 1, nullptr, 16)) : lo;\n            }\n"
-        << "            blocks = std::getenv(\"GOW_VU1C_SIN_BLOQUES\") == nullptr;\n        }\n    } g_range;\n"
+        << "            blocks = std::getenv(\"MKSM_VU1C_SIN_BLOQUES\") == nullptr;\n        }\n    } g_range;\n"
         << "    inline bool inRange(uint32_t pc) { return pc >= g_range.lo && pc <= g_range.hi; }\n}\n\n"
         << "namespace vu1c_gen\n{\n" << declarations.str()
         << "    void run(VU1Interpreter &vu, C &c)\n    {\n        for (;;)\n        {\n"
@@ -451,7 +451,7 @@ int main(int argc, char **argv)
             out << "                if (g_range.blocks)\n                {\n";
             for (const BlockCase &t : it->second)
             {
-                // GOW-Port: if the block ends in a known successor with its own case, it jumps to it
+                // MKSM-Port: if the block ends in a known successor with its own case, it jumps to it
                 // directly (the same work as returning to the top of the loop, without the switch).
                 out << t.test << "                    {\n                        pc = VU1CompiledAccess::pc(vu);\n";
                 for (const uint32_t next : t.successors)

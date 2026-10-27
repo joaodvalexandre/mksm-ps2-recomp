@@ -1,4 +1,4 @@
-// GOW-Port: procedural VU1 program, without game microcode. It is built with the real generator
+// MKSM-Port: procedural VU1 program, without game microcode. It is built with the real generator
 // to compare blocks, pairs, fallback for modified words and budget cuts/resumptions.
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu1.h"
@@ -12,9 +12,9 @@
 #include <vector>
 #if defined(_M_X64) || defined(_M_IX86) || defined(__x86_64__) || defined(__i386__)
 #include <xmmintrin.h>
-#define GOW_DIV_MXCSR 1
+#define MKSM_DIV_MXCSR 1
 #else
-#define GOW_DIV_MXCSR 0
+#define MKSM_DIV_MXCSR 0
 #endif
 
 namespace {
@@ -52,7 +52,7 @@ std::vector<uint8_t> program() {
         {lowerNop,nop},
     }};
     std::memcpy(code.data(),pairs.data(),sizeof(pairs));
-    // GOW-Port: the 16 DIV selectors, Q before/after WAITQ and D/I flags.
+    // MKSM-Port: the 16 DIV selectors, Q before/after WAITQ and D/I flags.
     for(uint32_t selector=0;selector<16u;++selector) {
         std::array<std::array<uint32_t,2>,divPairs> div{};
         for(auto &pair:div) pair={lowerNop,nop};
@@ -64,7 +64,7 @@ std::vector<uint8_t> program() {
         div[12]={lowerNop,nop|e};
         std::memcpy(code.data()+divStart+selector*divBytes,div.data(),sizeof(div));
     }
-    // GOW-Port: ITOF/FTOI/ABS (with SSE in the compiled code), SQ with partial DEST, flag readers that the
+    // MKSM-Port: ITOF/FTOI/ABS (with SSE in the compiled code), SQ with partial DEST, flag readers that the
     // compiled code handles inline (FCAND, FCGET, FMAND, FMEQ) and BAL, JR and JALR.
     constexpr uint32_t base = specialStart/8u;
     const std::array<std::array<uint32_t,2>,30> sp{{
@@ -188,7 +188,7 @@ bool divCases() {
     GS gs; gs.init(mem.getGSVRAM(),4u*1024u*1024u,&mem.gs());
     const auto code=program();
     std::memcpy(mem.getVU1Code(),code.data(),code.size());
-#if GOW_DIV_MXCSR
+#if MKSM_DIV_MXCSR
     struct Restore { unsigned value=_mm_getcsr(); ~Restore() { _mm_setcsr(value); } } restore;
     constexpr unsigned modes=2u;
 #else
@@ -228,7 +228,7 @@ bool divCases() {
         ++cases; return true;
     };
     for(unsigned mode=0;mode<modes;++mode) {
-#if GOW_DIV_MXCSR
+#if MKSM_DIV_MXCSR
         _mm_setcsr((restore.value&~0x8040u)|(mode?0x8040u:0u));
 #endif
         for(bool queues:{false,true}) for(uint32_t selector=0;selector<16u;++selector) {
@@ -268,7 +268,7 @@ bool specialCases() {
     GS gs; gs.init(mem.getGSVRAM(),4u*1024u*1024u,&mem.gs());
     const auto code=program();
     std::memcpy(mem.getVU1Code(),code.data(),code.size());
-#if GOW_DIV_MXCSR
+#if MKSM_DIV_MXCSR
     struct Restore { unsigned value=_mm_getcsr(); ~Restore() { _mm_setcsr(value); } } restore;
     constexpr unsigned modes=2u;
 #else
@@ -300,7 +300,7 @@ bool specialCases() {
         ++cases; return true;
     };
     for(unsigned mode=0;mode<modes;++mode) {
-#if GOW_DIV_MXCSR
+#if MKSM_DIV_MXCSR
         _mm_setcsr((restore.value&~0x8040u)|(mode?0x8040u:0u));
 #endif
         for(bool queues:{false,true}) {

@@ -6,7 +6,7 @@ index 3614679..af5535e 100644
  
      std::string CodeGenerator::translateVU_VMTIR(const Instruction &inst)
      {
-+        // GOW-Port: VI0 is the constant zero register.
++        // MKSM-Port: VI0 is the constant zero register.
 +        if (inst.rt == 0)
 +        {
 +            return "{ }";

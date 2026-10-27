@@ -11,7 +11,7 @@ index 3f99c2b..f61d4b9 100644
      }
  }
  
-+// GOW-Port: búferes de las transferencias DMA para reutilizar. sendDma/sendDmaChain aplanan la cadena en un vector
++// MKSM-Port: búferes de las transferencias DMA para reutilizar. sendDma/sendDmaChain aplanan la cadena en un vector
 +// (en el barco, ~2,6 MB por cuadro) que antes nacía vacío, crecía realojándose y se liberaba al acabar el trabajo del
 +// GS; ahora vuelve aquí con su capacidad (con un tope de búferes guardados).
 +namespace
@@ -72,7 +72,7 @@ index 3f99c2b..f61d4b9 100644
 +    giveDmaBuffer(std::move(bytes));
  }
  
- // GOW-Port: PS2X_GS_WORKER_TRACE (see PS2Runtime::dispatchGuestBranch): worker kick/start/done times.
+ // MKSM-Port: PS2X_GS_WORKER_TRACE (see PS2Runtime::dispatchGuestBranch): worker kick/start/done times.
 @@ -1977,6 +2010,8 @@ void PS2Memory::runGsWorkerJob(GsWorkerJob &job)
      }
      if (m_gifArbiter)
@@ -92,7 +92,7 @@ index 60b4405..160a16c 100644
  
 +        tc.Run("DMA sends reuse buffers without replaying earlier data", [](TestCase &t)
 +        {
-+            // GOW-Port: los búferes de sendDma se reutilizan (ps2recomp-dma-buffers). Un envío corto después de uno
++            // MKSM-Port: los búferes de sendDma se reutilizan (ps2recomp-dma-buffers). Un envío corto después de uno
 +            // largo no debe volver a procesar los bytes que el primero dejó en el búfer.
 +            PS2Memory mem;
 +            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");

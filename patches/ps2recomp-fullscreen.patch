@@ -7,7 +7,7 @@ index b9933d5..104b148 100644
  private:
      bool m_initialized = false;
 -    bool m_visible = true;
-+    bool m_visible = false; // GOW-Port: oculto al empezar; F1 lo muestra
++    bool m_visible = false; // MKSM-Port: oculto al empezar; F1 lo muestra
      bool m_showRegisters = true;
      unsigned int m_memoryAddress = 0x00100000u;
      unsigned int m_memoryBytes = 0x100u;
@@ -19,19 +19,19 @@ index 757a92c..5ad408b 100644
                      SetWindowSize(static_cast<int>(width * scale), static_cast<int>(height * scale));
                      SetWindowPosition(0, 0);
                  }
-+                // GOW-Port: pantalla completa sin bordes por defecto (cubre la barra de tareas); F11 la
-+                // alterna. GOW_PANTALLA_COMPLETA=0, o un tamaño pedido con GOW_WINDOW, empiezan en ventana.
-+                const char *full = std::getenv("GOW_PANTALLA_COMPLETA");
-+                if (full ? full[0] == '1' : std::getenv("GOW_WINDOW") == nullptr)
++                // MKSM-Port: pantalla completa sin bordes por defecto (cubre la barra de tareas); F11 la
++                // alterna. MKSM_PANTALLA_COMPLETA=0, o un tamaño pedido con MKSM_WINDOW, empiezan en ventana.
++                const char *full = std::getenv("MKSM_PANTALLA_COMPLETA");
++                if (full ? full[0] == '1' : std::getenv("MKSM_WINDOW") == nullptr)
 +                    ToggleBorderlessWindowed();
              }
          }
  #endif
 @@ -2811,6 +2816,9 @@ void PS2Runtime::run()
                  m_debugUiDrawCallback(*this, m_debugUiUserData);
-             static GowFpsMeter fpsMeter; // GOW-Port: F2
+             static MksmFpsMeter fpsMeter; // MKSM-Port: F2
              fpsMeter.frame(*this);
-+            // GOW-Port: F11 alterna pantalla completa sin bordes y ventana (Alt+Enter no: Enter es Start).
++            // MKSM-Port: F11 alterna pantalla completa sin bordes y ventana (Alt+Enter no: Enter es Start).
 +            if (IsKeyPressed(KEY_F11))
 +                ToggleBorderlessWindowed();
          });

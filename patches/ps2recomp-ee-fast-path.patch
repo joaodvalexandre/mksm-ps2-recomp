@@ -6,13 +6,13 @@ index 2856bbb..e04a933 100644
              flushIopEeCycles();
      }
      void flushIopEeCycles() noexcept;
-+    // GOW-Port: EE cycles until the IOP's next batch is due (EeScheduler's checkpoint fast path stops there)
++    // MKSM-Port: EE cycles until the IOP's next batch is due (EeScheduler's checkpoint fast path stops there)
 +    [[nodiscard]] uint64_t iopEeCyclesUntilBatch() const noexcept
 +    {
 +        return m_iopEeCyclesDue > m_iopEeCycles ? m_iopEeCyclesDue - m_iopEeCycles : 0u;
 +    }
      void resetIop();
-     void shutdownHostGraphics(); // GOW-Port: destruir GS antes de cerrar el contexto raylib.
+     void shutdownHostGraphics(); // MKSM-Port: destruir GS antes de cerrar el contexto raylib.
  
 diff --git a/ps2xRuntime/include/runtime/ee_scheduler.h b/ps2xRuntime/include/runtime/ee_scheduler.h
 index f9954bd..b4d6029 100644
@@ -23,7 +23,7 @@ index f9954bd..b4d6029 100644
      void requestStop();
      void postEvent(EeEvent event);
 -    [[nodiscard]] bool checkpointDue(uint32_t cycles = kGeneratedCheckpointCycles) noexcept;
-+    // GOW-Port: generated code calls this every few guest instructions (tens of millions of times per second). Until
++    // MKSM-Port: generated code calls this every few guest instructions (tens of millions of times per second). Until
 +    // the next cycle at which anything can happen (m_fastLimitCycle: next EE timer event, next IOP batch, end of the
 +    // time slice, next comparison with the host clock) or the next scheduled deadline, it only adds the cycles; the
 +    // timers and the IOP get them in one go at that cycle (checkpointDueSlow), the same cycle as before.
@@ -37,18 +37,18 @@ index f9954bd..b4d6029 100644
 +        return checkpointDueSlow();
 +    }
      void accountCycles(uint32_t cycles) noexcept;
-+    // GOW-Port: hands the EE cycles counted since the last call to the EE timers and the IOP (EE executor only).
++    // MKSM-Port: hands the EE cycles counted since the last call to the EE timers and the IOP (EE executor only).
 +    void syncAccountedCycles() noexcept;
-+    // GOW-Port: the next checkpoint takes the slow path (something the fast-path limit depends on has changed).
++    // MKSM-Port: the next checkpoint takes the slow path (something the fast-path limit depends on has changed).
 +    void invalidateFastPath() noexcept { m_fastLimitCycle = 0u; }
-     // GOW-Port: for a guest busy-wait that never blocks (the movie player): when guest time has fallen behind the
+     // MKSM-Port: for a guest busy-wait that never blocks (the movie player): when guest time has fallen behind the
      // host clock (a scheduled event's host deadline has passed but its guest cycle is not reached), account the
      // missing cycles (at most maxCycles) so guest time, EE timers and the IOP keep real time. Returns cycles added.
 @@ -380,6 +396,8 @@ private:
      };
  
      void assertExecutor() const;
-+    bool checkpointDueSlow() noexcept; // GOW-Port: see checkpointDue
++    bool checkpointDueSlow() noexcept; // MKSM-Port: see checkpointDue
 +    void updateFastLimit() noexcept;
      [[nodiscard]] int allocateThreadId();
      GuestThread &acquireInvocationThread();
@@ -57,10 +57,10 @@ index f9954bd..b4d6029 100644
      uint32_t m_pendingEeTimerInterrupts = 0;
      uint64_t m_eeCycle = 0;
      uint64_t m_sliceEndCycle = kDefaultTimeSliceCycles;
--    uint32_t m_hostCatchUpCounter = 0; // GOW-Port: checkpoints since the EE clock was last compared with the host clock
-+    uint64_t m_nextHostCatchUpCycle = 0; // GOW-Port: EE cycle of the next comparison of the EE clock with the host clock
-+    uint64_t m_accountedCycle = 0;       // GOW-Port: EE cycles already handed to the EE timers and the IOP
-+    uint64_t m_fastLimitCycle = 0;       // GOW-Port: checkpointDue's fast path runs below this EE cycle
+-    uint32_t m_hostCatchUpCounter = 0; // MKSM-Port: checkpoints since the EE clock was last compared with the host clock
++    uint64_t m_nextHostCatchUpCycle = 0; // MKSM-Port: EE cycle of the next comparison of the EE clock with the host clock
++    uint64_t m_accountedCycle = 0;       // MKSM-Port: EE cycles already handed to the EE timers and the IOP
++    uint64_t m_fastLimitCycle = 0;       // MKSM-Port: checkpointDue's fast path runs below this EE cycle
      std::thread::id m_executorThread{};
      std::atomic<bool> m_running{false};
      std::atomic<bool> m_guestExecuting{false};
@@ -72,26 +72,26 @@ index 746e1ab..e69d622 100644
      // EE timers advance from the scheduler's emulated EE-cycle clock. The
      // returned mask uses bits 0..3 for newly raised TIM0..TIM3 interrupts.
      uint32_t advanceEeTimers(uint64_t eeCycles) noexcept;
-+    // GOW-Port: EE cycles that can still be advanced without reaching a timer event (0: unknown, advance first).
++    // MKSM-Port: EE cycles that can still be advanced without reaching a timer event (0: unknown, advance first).
 +    [[nodiscard]] uint64_t eeCyclesUntilTimerEvent() const noexcept
 +    {
 +        return m_eeTimerBudget > m_eeTimerPendingCycles ? m_eeTimerBudget - m_eeTimerPendingCycles : 0u;
 +    }
-+    // GOW-Port: called before a timer register is read or written. The EE scheduler hands its cycles to the timers
++    // MKSM-Port: called before a timer register is read or written. The EE scheduler hands its cycles to the timers
 +    // only at its next event (EeScheduler::checkpointDue); this brings them up to date first.
 +    void setEeCycleSync(void (*sync)(void *), void *context) noexcept
 +    {
 +        m_eeCycleSync = sync;
 +        m_eeCycleSyncContext = context;
 +    }
-     // GOW-Port: native EE clock. A timer without compare/overflow events (no CMPE/OVFE/ZRET, e.g. the game's
+     // MKSM-Port: native EE clock. A timer without compare/overflow events (no CMPE/OVFE/ZRET, e.g. the game's
      // T0 = BUSCLK/256 and T1 = H-BLNK counters) is not stepped: its count is computed when read, from the guest
      // EE cycle count since its epoch (the last COUNT write or clock change). Timers with events keep the stepping
 @@ -537,6 +549,8 @@ public:
      uint64_t m_eeTimerPendingCycles = 0;
      uint64_t m_eeTimerBudget = 0;
      uint64_t m_eeCycleTotal = 0; // guest EE cycles seen by advanceEeTimers (the scheduler's EE cycle count)
-+    void (*m_eeCycleSync)(void *) = nullptr; // GOW-Port: see setEeCycleSync
++    void (*m_eeCycleSync)(void *) = nullptr; // MKSM-Port: see setEeCycleSync
 +    void *m_eeCycleSyncContext = nullptr;
      uint32_t eeTimerCount(const EeTimer &timer) const noexcept;
      uint32_t stepEeTimers(uint64_t eeCycles) noexcept;
@@ -104,7 +104,7 @@ index 07d0af8..ed0d41e 100644
  EeScheduler::EeScheduler(PS2Runtime &runtime)
      : m_runtime(runtime)
  {
-+    // GOW-Port: a guest access to an EE timer register first gets the cycles the fast path has not handed over yet
++    // MKSM-Port: a guest access to an EE timer register first gets the cycles the fast path has not handed over yet
 +    // (only on the EE executor; elsewhere the timers stay as of the last checkpoint event, as before).
 +    m_runtime.memory().setEeCycleSync(+[](void *context)
 +                                      {
@@ -137,7 +137,7 @@ index 07d0af8..ed0d41e 100644
  {
 -    accountCycles(cycles);
 +    syncAccountedCycles();
-     // GOW-Port: pacing keeps the EE clock from running ahead of the host clock; this keeps it from falling behind. With
+     // MKSM-Port: pacing keeps the EE clock from running ahead of the host clock; this keeps it from falling behind. With
      // 16 cycles per checkpoint, long stretches of EE work (leaving a movie, loading a menu) accrued less guest time than
      // the wall clock: the IOP, which runs on EE cycles, fell behind and the audio ran dry (~0.13 s at every movie end).
      // A lag of up to one field is left alone: catching up within the frame cost ~0.6 ms of frame period in combat.
@@ -228,7 +228,7 @@ index 07d0af8..ed0d41e 100644
 +{
 +    m_eeCycle += std::max<uint64_t>(1u, cycles);
 +    syncAccountedCycles();
-+    m_fastLimitCycle = 0u; // GOW-Port: a jump of the EE clock (catch-up, idle wait): recompute at the next checkpoint
++    m_fastLimitCycle = 0u; // MKSM-Port: a jump of the EE clock (catch-up, idle wait): recompute at the next checkpoint
 +}
 +
  uint64_t EeScheduler::catchUpToHost(uint64_t maxCycles, std::chrono::nanoseconds slack) noexcept
@@ -238,7 +238,7 @@ index 07d0af8..ed0d41e 100644
  
  void EeScheduler::waitForEvent()
  {
-+    syncAccountedCycles(); // GOW-Port: the idle wait below reads the EE timers' distance to their next event
++    syncAccountedCycles(); // MKSM-Port: the idle wait below reads the EE timers' distance to their next event
      ps2_perf::Scope perf(ps2_perf::Bucket::GuestWait);
      std::unique_lock lock(m_eventMutex);
      if (!m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
@@ -270,7 +270,7 @@ index c074ce0..e65bfcd 100644
 +++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
 @@ -639,6 +639,8 @@ void PS2Runtime::resetIop()
      m_iopSubsystem->reset();
-     m_iopEeCycles = 0; // GOW-Port: the IOP's own accrual restarts; ask it again on the next checkpoint
+     m_iopEeCycles = 0; // MKSM-Port: the IOP's own accrual restarts; ask it again on the next checkpoint
      m_iopEeCyclesDue = 0;
 +    if (m_eeScheduler)
 +        m_eeScheduler->invalidateFastPath();
@@ -285,7 +285,7 @@ index d8a00ca..d29e543 100644
              }
          }
      }
-+    // GOW-Port: invitado que pone en marcha el temporizador 1 (BUSCLK), gasta 1000 puntos de control y lee su cuenta.
++    // MKSM-Port: invitado que pone en marcha el temporizador 1 (BUSCLK), gasta 1000 puntos de control y lee su cuenta.
 +    constexpr uint32_t kTimerReadPc = 0x00160900u;
 +    uint32_t g_timerReadCount = 0u;
 +
@@ -309,7 +309,7 @@ index d8a00ca..d29e543 100644
  
 +        tc.Run("an EE timer read sees the cycles of the checkpoint fast path", [](TestCase &t)
 +        {
-+            // GOW-Port: ps2recomp-ee-via-rapida. Los puntos de control solo suman ciclos hasta el siguiente suceso; los
++            // MKSM-Port: ps2recomp-ee-via-rapida. Los puntos de control solo suman ciclos hasta el siguiente suceso; los
 +            // temporizadores los reciben al leerse un registro suyo. Sin eso, T1_COUNT se quedaba en 0.
 +            TestEnv env;
 +            t.IsTrue(env.runtime.memory().initialize(), "runtime memory initialize should succeed");
@@ -325,4 +325,4 @@ index d8a00ca..d29e543 100644
 +
          tc.Run("a slow guest still reaches the first VBlank on host time", [](TestCase &t)
          {
-             // GOW-Port: ps2recomp-ee-ponerse-al-dia. Si el EE gasta menos ciclos que el tiempo real (16 por punto de
+             // MKSM-Port: ps2recomp-ee-ponerse-al-dia. Si el EE gasta menos ciclos que el tiempo real (16 por punto de

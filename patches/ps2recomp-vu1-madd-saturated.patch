@@ -7,7 +7,7 @@ index 2f5b30f..30b0c0a 100644
              out[i] = x > static_cast<double>(FLT_MAX) ? HUGE_VALF : x < -static_cast<double>(FLT_MAX) ? -HUGE_VALF : static_cast<float>(x);
          }
 -        return _mm_load_ps(out);
-+        // GOW-Port: returned already clamped (the blocks used to clamp every madd result afterwards; vu1n_gen.py no
++        // MKSM-Port: returned already clamped (the blocks used to clamp every madd result afterwards; vu1n_gen.py no
 +        // longer does). macVal counts 0x7F7FFFFF as overflow, so the flags of a clamped overflow are the same.
 +        return clampv(_mm_load_ps(out));
      }
@@ -23,7 +23,7 @@ index 5e61d98..bf09ed3 100644
  
 +        tc.Run("VU1 native madd returns overflows clamped with the same MAC flags", [](TestCase &t)
 +        {
-+            // GOW-Port: ps2recomp-vu1-madd-saturado. Los bloques nativos ya no pasan el resultado de madd/msub por
++            // MKSM-Port: ps2recomp-vu1-madd-saturado. Los bloques nativos ya no pasan el resultado de madd/msub por
 +            // clampv: el desbordamiento sale de maddWide ya en +-FLT_MAX, con los mismos flags MAC que el infinito.
 +            const float big = std::numeric_limits<float>::max(), inf = std::numeric_limits<float>::infinity();
 +            const __m128 acc = _mm_setr_ps(big, -big, 1.0f, -big);

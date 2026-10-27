@@ -1,0 +1,72 @@
+diff --git a/ps2xAnalyzer/src/analyzer_main.cpp b/ps2xAnalyzer/src/analyzer_main.cpp
+index feb1630..2bd6340 100644
+--- a/ps2xAnalyzer/src/analyzer_main.cpp
++++ b/ps2xAnalyzer/src/analyzer_main.cpp
+@@ -1,6 +1,13 @@
+ #include "ps2recomp/elf_analyzer.h"
++#include "ps2recomp/types.h"
++#include <algorithm>
++#include <cstdio>
++#include <cstdlib>
++#include <fstream>
+ #include <iostream>
+ #include <string>
++#include <unordered_set>
++#include <vector>
+ 
+ void printUsage()
+ {
+@@ -58,6 +65,53 @@ int main(int argc, char *argv[])
+             return 1;
+         }
+ 
++        // MKSM-Port: PS2X_ANALYZER_FUNCMAP=<csv> also writes the discovered functions in the Ghidra map format
++        // (Name,Start,End,Size), so a stripped ELF gets a function map without Ghidra.
++        if (const char *mapPath = std::getenv("PS2X_ANALYZER_FUNCMAP"); mapPath && *mapPath)
++        {
++            std::vector<ps2recomp::Function> functions = analyzer.getFunctions();
++            std::sort(functions.begin(), functions.end(),
++                      [](const ps2recomp::Function &a, const ps2recomp::Function &b)
++                      { return a.start < b.start; });
++            std::ofstream map(mapPath, std::ios::binary);
++            if (!map)
++            {
++                std::cerr << "Failed to open function map: " << mapPath << "\n";
++                return 1;
++            }
++            map << "Name,Start,End,Size\n";
++            size_t written = 0;
++            std::unordered_set<std::string> names;
++            for (size_t i = 0; i < functions.size(); ++i)
++            {
++                const auto &function = functions[i];
++                // A function that runs into the next start ends there (SDK matches can be longer than the heuristic
++                // boundaries); a repeated name gets its address so each entry stays unique.
++                uint32_t end = function.end;
++                if (i + 1 < functions.size() && functions[i + 1].start > function.start && end > functions[i + 1].start)
++                {
++                    end = functions[i + 1].start;
++                }
++                if (end <= function.start || (i > 0 && functions[i - 1].start == function.start))
++                {
++                    continue;
++                }
++                std::string name = function.name;
++                if (!names.insert(name).second)
++                {
++                    char suffix[16];
++                    std::snprintf(suffix, sizeof(suffix), "_%08X", function.start);
++                    name += suffix;
++                    names.insert(name);
++                }
++                char line[64];
++                std::snprintf(line, sizeof(line), ",0x%08X,0x%08X,%u\n", function.start, end, end - function.start);
++                map << name << line;
++                ++written;
++            }
++            std::cout << "Function map (" << written << " functions) written to: " << mapPath << "\n";
++        }
++
+         std::cout << "\nAnalysis complete\n";
+         std::cout << "TOML configuration has been written to: " << tomlPath << "\n";
+         std::cout << "\nYou can now use this configuration with PS2Recomp:\n";

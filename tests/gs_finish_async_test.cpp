@@ -1,4 +1,4 @@
-// GOW-Port: check the optional FINISH and the read barrier without a GPU or game data.
+// MKSM-Port: check the optional FINISH and the read barrier without a GPU or game data.
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/gs_threaded_backend.h"
 #include "runtime/ps2_memory.h"
@@ -61,7 +61,7 @@ int main(int argc,char **argv) {
     if(argc!=2 || (std::string_view(argv[1])!="default" && std::string_view(argv[1])!="async")) return 2;
     const bool async=std::string_view(argv[1])=="async";
     // Separate processes: the runtime reads this option only once.
-    option("GOW_GS_FINISH_ASINCRONO",async?"1":"0");
+    option("MKSM_GS_FINISH_ASINCRONO",async?"1":"0");
     option("PS2X_GS_GPU","0"); option("PS2X_GS_THREAD","0");
     Recording recording;
     auto entered=recording.entered.get_future();

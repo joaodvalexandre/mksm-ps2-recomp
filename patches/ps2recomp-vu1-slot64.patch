@@ -8,7 +8,7 @@ index 14823e2..6b2e308 100644
          uint32_t next = 0;
 +        // Entry timing by predecessor (blocks that read entry flags): when the block before ran for maxLat cycles or more
 +        // and nothing from the exact engine is still in flight, that block and its timing table alone decide the entry
-+        // state; the timing found for it is reused. GOW-Port: kept here, not in the dispatch slot (Slot fits one line).
++        // state; the timing found for it is reused. MKSM-Port: kept here, not in the dispatch slot (Slot fits one line).
 +        const BlockTiming *memoPred = nullptr;
 +        const uint8_t *memoCyc = nullptr;
 +        uint32_t memoPredId = 0, memoId = 0;
@@ -26,7 +26,7 @@ index 14823e2..6b2e308 100644
 -        const uint8_t *memoCyc = nullptr;
 -        uint32_t memoPredId = 0, memoId = 0;
          uint16_t pairs = 0;
-+        uint8_t idleLast = 0; // GOW-Port: idle[pairs - 1], so the end cycle of an idle-timed block needs no table read
++        uint8_t idleLast = 0; // MKSM-Port: idle[pairs - 1], so the end cycle of an idle-timed block needs no table read
          bool known = false;
          bool readsEntryFlags = false;
          bool memoable = false;   // its entry timing does not depend on FDIV/EFU state
@@ -34,7 +34,7 @@ index 14823e2..6b2e308 100644
          struct Scalar { uint8_t pair, latency; bool fdiv; } scalar[2] = {};
      };
      static constexpr uint8_t kScalarMany = 0xFF;
-+    static_assert(sizeof(Slot) == 64, "GOW-Port: one dispatch slot per cache line");
++    static_assert(sizeof(Slot) == 64, "MKSM-Port: one dispatch slot per cache line");
      Slot slots[2048];
      // Native blocks run since native entry (or the last sync), newest last; histCount counts them all (the ring keeps the
      // last kHist). A write is ready less than maxLat cycles after its block ended, so only blocks that ended less than

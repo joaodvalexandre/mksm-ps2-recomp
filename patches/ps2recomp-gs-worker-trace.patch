@@ -6,7 +6,7 @@ index 68f8833..377be77 100644
  #include <limits>
  #include <stdexcept>
  
-+double ps2GsWorkerTraceSeconds(); // GOW-Port: ps2_memory.cpp
++double ps2GsWorkerTraceSeconds(); // MKSM-Port: ps2_memory.cpp
 +
  namespace
  {
@@ -16,7 +16,7 @@ index 68f8833..377be77 100644
      m_currentThreadId = item.id;
      renewTimeSlice();
 +    {
-+        // GOW-Port: diagnóstico (PS2X_GS_WORKER_TRACE): hilo del EE que pasa a ejecutarse.
++        // MKSM-Port: diagnóstico (PS2X_GS_WORKER_TRACE): hilo del EE que pasa a ejecutarse.
 +        static const double tf = [] { const char *v = std::getenv("PS2X_GS_WORKER_TRACE"); return v ? std::atof(v) : -1.0; }();
 +        static const auto t0 = std::chrono::steady_clock::now();
 +        if (tf >= 0.0)
@@ -29,12 +29,12 @@ index 68f8833..377be77 100644
 +    }
  }
  
- void gowDumpBranchRing(const char *why);
+ void mksmDumpBranchRing(const char *why);
 @@ -1811,6 +1825,16 @@ void EeScheduler::pollGsInterrupt()
      g_gsIrqLatched = active;
      if (rising != 0u)
      {
-+        // GOW-Port: diagnóstico (PS2X_GS_WORKER_TRACE): el EE despacha la interrupción del GS.
++        // MKSM-Port: diagnóstico (PS2X_GS_WORKER_TRACE): el EE despacha la interrupción del GS.
 +        static const double tf = [] { const char *v = std::getenv("PS2X_GS_WORKER_TRACE"); return v ? std::atof(v) : -1.0; }();
 +        static const auto t0 = std::chrono::steady_clock::now();
 +        if (tf >= 0.0)
@@ -52,7 +52,7 @@ index 68f8833..377be77 100644
      case EeEventType::VBlankStart:
          ++m_vsyncTick;
 +        {
-+            // GOW-Port: diagnóstico (PS2X_GS_WORKER_TRACE): inicio de cada VBlank.
++            // MKSM-Port: diagnóstico (PS2X_GS_WORKER_TRACE): inicio de cada VBlank.
 +            static const double tf = [] { const char *v = std::getenv("PS2X_GS_WORKER_TRACE"); return v ? std::atof(v) : -1.0; }();
 +            static const auto t0 = std::chrono::steady_clock::now();
 +            if (tf >= 0.0)
@@ -74,7 +74,7 @@ index f61d4b9..2204301 100644
      giveDmaBuffer(std::move(bytes));
  }
  
-+// GOW-Port: duración de la ventana de PS2X_GS_WORKER_TRACE (PS2X_GS_WORKER_TRACE_SECS, por defecto 2 s); la usan también
++// MKSM-Port: duración de la ventana de PS2X_GS_WORKER_TRACE (PS2X_GS_WORKER_TRACE_SECS, por defecto 2 s); la usan también
 +// ps2_runtime.cpp y EeScheduler.cpp.
 +double ps2GsWorkerTraceSeconds()
 +{
@@ -82,7 +82,7 @@ index f61d4b9..2204301 100644
 +    return secs;
 +}
 +
- // GOW-Port: PS2X_GS_WORKER_TRACE (see PS2Runtime::dispatchGuestBranch): worker kick/start/done times.
+ // MKSM-Port: PS2X_GS_WORKER_TRACE (see PS2Runtime::dispatchGuestBranch): worker kick/start/done times.
  static void gsWorkerTrace(const char *what, size_t bytes)
  {
 @@ -1981,7 +1989,7 @@ static void gsWorkerTrace(const char *what, size_t bytes)
@@ -98,21 +98,21 @@ diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runti
 index 5bfeccb..f086621 100644
 --- a/ps2xRuntime/src/lib/ps2_runtime.cpp
 +++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
-@@ -39,6 +39,8 @@ static bool gowUsePcsx2Vu1(); // GOW_VU1_PCSX2=1, defined before PS2Runtime::ini
+@@ -39,6 +39,8 @@ static bool mksmUsePcsx2Vu1(); // MKSM_VU1_PCSX2=1, defined before PS2Runtime::ini
  #include <cstdio>
  #include <cstdlib>
  
-+double ps2GsWorkerTraceSeconds(); // GOW-Port: ps2_memory.cpp
++double ps2GsWorkerTraceSeconds(); // MKSM-Port: ps2_memory.cpp
 +
- // GOW-Port: audio device position for the movie A/V check (GOW_MPEG_DIAG, Kernel/Stubs/MPEG.cpp): frames the device
- // has played (including silence fill) and frames the sound engine produced (= GOW_AUDIO_PCM file position).
- std::atomic<uint64_t> g_gowAudioFramesPlayed{0};
+ // MKSM-Port: audio device position for the movie A/V check (MKSM_MPEG_DIAG, Kernel/Stubs/MPEG.cpp): frames the device
+ // has played (including silence fill) and frames the sound engine produced (= MKSM_AUDIO_PCM file position).
+ std::atomic<uint64_t> g_mksmAudioFramesPlayed{0};
 @@ -715,7 +717,19 @@ bool PS2Runtime::syncCoreSubsystems()
                              [this]
                              {
                                  if (m_eeScheduler && (m_memory.gs().csr.load(std::memory_order_acquire) & 0x3u) != 0u)
 +                                {
-+                                    // GOW-Port: diagnóstico (PS2X_GS_WORKER_TRACE): el stage levanta FINISH/SIGNAL y despierta al EE.
++                                    // MKSM-Port: diagnóstico (PS2X_GS_WORKER_TRACE): el stage levanta FINISH/SIGNAL y despierta al EE.
 +                                    static const double tf = [] { const char *v = std::getenv("PS2X_GS_WORKER_TRACE"); return v ? std::atof(v) : -1.0; }();
 +                                    static const auto t0 = std::chrono::steady_clock::now();
 +                                    if (tf >= 0.0)
@@ -128,11 +128,11 @@ index 5bfeccb..f086621 100644
      m_gifArbiter.setProcessPathPacketFn([this](GifPathId path, const uint8_t *data, uint32_t size)
                                      {
 @@ -1586,12 +1600,27 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
-     // GOW-Port: PS2X_GS_WORKER_TRACE=<s>: for 2 s after <s> s of uptime, host µs of vid::Flip (0x1837B8),
+     // MKSM-Port: PS2X_GS_WORKER_TRACE=<s>: for 2 s after <s> s of uptime, host µs of vid::Flip (0x1837B8),
      // vid::WaitForDMAComplete (0x183878) and 0x13F730 entry/return, to see the per-frame dependency chain.
      static const double traceFrom = [] { const char *v = std::getenv("PS2X_GS_WORKER_TRACE"); return v ? std::atof(v) : -1.0; }();
 -    const bool traced = traceFrom >= 0.0 && (targetPc == 0x1837B8u || targetPc == 0x183878u || targetPc == 0x13F730u);
-+    // GOW-Port: PS2X_GS_WORKER_TRACE_PCS=pc,pc,... añade funciones del juego a la traza (diagnóstico).
++    // MKSM-Port: PS2X_GS_WORKER_TRACE_PCS=pc,pc,... añade funciones del juego a la traza (diagnóstico).
 +    static const std::vector<uint32_t> tracePcs = [] {
 +        std::vector<uint32_t> v;
 +        if (const char *e = std::getenv("PS2X_GS_WORKER_TRACE_PCS"))

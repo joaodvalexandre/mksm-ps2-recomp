@@ -12,9 +12,9 @@ $PS2RecompCommit = 'c5a9d02573410a2085a4b4b831b0b68ba3515440'
 # Work folder (PS2Recomp clone and generated code): <repository>\mksm-work. It lives inside the repository folder
 # (never in the root of a drive) and is git-ignored, so it is never pushed. Inside a git worktree
 # (<repo>\.claude\worktrees\<name>) it is still the folder of the main checkout.
-# It can be changed with the GOW_WORK environment variable (keep the path short: Windows has a 260-character limit).
-function Get-GowWorkDir {
-    if ($env:GOW_WORK) { return $env:GOW_WORK }
+# It can be changed with the MKSM_WORK environment variable (keep the path short: Windows has a 260-character limit).
+function Get-MksmWorkDir {
+    if ($env:MKSM_WORK) { return $env:MKSM_WORK }
     $main = $RepoRoot
     $marker = [IO.Path]::DirectorySeparatorChar + '.claude' + [IO.Path]::DirectorySeparatorChar + 'worktrees' + [IO.Path]::DirectorySeparatorChar
     $at = $RepoRoot.IndexOf($marker, [StringComparison]::OrdinalIgnoreCase)
@@ -23,16 +23,14 @@ function Get-GowWorkDir {
 }
 
 # Game executable. Search order:
-#   1. the GOW_ELF environment variable
+#   1. the MKSM_ELF environment variable
 #   2. game\SLES_535.24 (Mortal Kombat: Shaolin Monks, PAL) inside the repository
-#   3. game\SCUS_973.99 (God of War, NTSC-U) inside the repository
-function Get-GowElf {
+function Get-MksmElf {
     $candidates = @()
-    if ($env:GOW_ELF) { $candidates += $env:GOW_ELF }
+    if ($env:MKSM_ELF) { $candidates += $env:MKSM_ELF }
     $candidates += (Join-Path $RepoRoot 'game\SLES_535.24')
-    $candidates += (Join-Path $RepoRoot 'game\SCUS_973.99')
     foreach ($c in $candidates) {
         if (Test-Path -LiteralPath $c) { return (Resolve-Path -LiteralPath $c).Path }
     }
-    throw "The game executable was not found. Copy it into game\ or set GOW_ELF. Searched in:`n  $($candidates -join "`n  ")"
+    throw "The game executable was not found. Copy it into game\ or set MKSM_ELF. Searched in:`n  $($candidates -join "`n  ")"
 }

@@ -6,7 +6,7 @@ index 4de5d6b..30fc3c9 100644
      bool onStageThread();
  
      // Queues a copy of the packet (blocks while too much is queued, so the worker cannot run far ahead).
-+    // GOW-Port: packets are batched (PS2X_GS_STAGE_BATCH) and reach the stage on flush(); the worker flushes at the
++    // MKSM-Port: packets are batched (PS2X_GS_STAGE_BATCH) and reach the stage on flush(); the worker flushes at the
 +    // end of every job, before it reports idle.
      void push(GifPathId path, const uint8_t *data, uint32_t size);
  
@@ -34,7 +34,7 @@ index 786cb51..710a1ad 100644
  
  namespace
  {
-+    // GOW-Port: a queued packet carries a run of GIF packets back to back, each behind a 16-byte record header
++    // MKSM-Port: a queued packet carries a run of GIF packets back to back, each behind a 16-byte record header
 +    // (path, size) and padded to 16 bytes. The worker emits thousands of small XGKICK packets per frame; one lock,
 +    // copy and stage wake per packet cost ~1 ms of every ~7 ms worker job in combat.
      struct Packet
@@ -45,7 +45,7 @@ index 786cb51..710a1ad 100644
  
 +    constexpr size_t kRecordHeader = 16;
 +
-+    // GOW-Port: PS2X_GS_STAGE_BATCH=<bytes> (default 16384): the worker hands packets to the stage once this many
++    // MKSM-Port: PS2X_GS_STAGE_BATCH=<bytes> (default 16384): the worker hands packets to the stage once this many
 +    // bytes are pending (and always at the end of a worker job, see flush()). 0 hands over every packet at once.
 +    size_t batchBytes()
 +    {
@@ -139,7 +139,7 @@ index 786cb51..710a1ad 100644
              return;
          Stage &s = stage();
 +        if (s.producer.load(std::memory_order_relaxed) == std::this_thread::get_id())
-+            flush(); // GOW-Port: the producer's own pending records must reach the stage before it waits for idle
++            flush(); // MKSM-Port: the producer's own pending records must reach the stage before it waits for idle
          std::unique_lock<std::mutex> lock(s.mutex);
          s.idle.wait(lock, [&s] { return s.queue.empty() && !s.busy; });
      }
@@ -151,7 +151,7 @@ index 2204301..44b8d75 100644
      }
      if (m_gifArbiter)
          m_gifArbiter->drain();
-+    ps2_gs_stage::flush(); // GOW-Port: batched GIF packets reach the stage before the worker reports idle
++    ps2_gs_stage::flush(); // MKSM-Port: batched GIF packets reach the stage before the worker reports idle
      for (GsWorkerItem &item : job.items)
          giveDmaBuffer(std::move(item.data));
  }
@@ -181,7 +181,7 @@ index 916c65a..317960a 100644
          });
 +        tc.Run("GS stage batches packets and delivers them in order with exact sizes", [](TestCase &t)
 +        {
-+            // GOW-Port: ps2recomp-gs-stage-lotes. El trabajador agrupa los paquetes GIF antes de pasarlos a la etapa;
++            // MKSM-Port: ps2recomp-gs-stage-lotes. El trabajador agrupa los paquetes GIF antes de pasarlos a la etapa;
 +            // cada paquete debe llegar en orden, con su ruta y su tamaño exacto (aunque no sea múltiplo de 16), y
 +            // waitIdle desde el hilo productor debe entregar también los que aún esperaban en el lote.
 +            struct Seen { GifPathId path; std::vector<uint8_t> bytes; };

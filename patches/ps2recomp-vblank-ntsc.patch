@@ -7,7 +7,7 @@ index 9e38324..68f8833 100644
      constexpr uint32_t WEF_CLEAR = 0x10u;
      constexpr uint32_t WEF_CLEAR_ALL = 0x20u;
 -    constexpr auto kVBlankPeriod = std::chrono::microseconds(16667);
-+    // GOW-Port: campo NTSC real, 60/1,001 Hz (59,94; 16 683,35 µs). Con 16 667 µs (59,9988 Hz) los vídeos se presentaban
++    // MKSM-Port: campo NTSC real, 60/1,001 Hz (59,94; 16 683,35 µs). Con 16 667 µs (59,9988 Hz) los vídeos se presentaban
 +    // a 30,00 imágenes/s en lugar de 29,97 y el audio se quedaba atrás un 0,1 % (0,44 s en BONUS06, 0,8 s en BONUS03).
 +    constexpr auto kVBlankPeriod = std::chrono::nanoseconds(16683350);
      constexpr auto kVBlankDuration = std::chrono::microseconds(500);
@@ -18,7 +18,7 @@ index 9e38324..68f8833 100644
      }
  
 -    constexpr uint64_t kVBlankPeriodCycles = microsecondsToEeCycles(16667u);
-+    constexpr uint64_t kVBlankPeriodCycles = EeScheduler::kEeClockHz * 1001ull / 60000ull; // GOW-Port: campo NTSC (59,94 Hz)
++    constexpr uint64_t kVBlankPeriodCycles = EeScheduler::kEeClockHz * 1001ull / 60000ull; // MKSM-Port: campo NTSC (59,94 Hz)
      constexpr uint64_t kVBlankDurationCycles = microsecondsToEeCycles(500u);
      constexpr uint64_t kAlarmTickCycles = microsecondsToEeCycles(kAlarmTickMicroseconds);
      constexpr uint64_t kPaceSteps = 16u; // pacing points per field (see VBlankStart)
@@ -38,7 +38,7 @@ index 4261bfa..92b381d 100644
          g_vsyncTick = readGuestU64(rdram, kVSyncTickAddr);
          g_vsyncCsr = runtime->memory().gs().csr.load(std::memory_order_acquire);
          g_resumedResult = getRegS32(*ctx, 2);
-+        g_vsyncCycle = runtime->eeScheduler().snapshot().eeCycle; // GOW-Port: ciclo del EE tras el primer VBlank
++        g_vsyncCycle = runtime->eeScheduler().snapshot().eeCycle; // MKSM-Port: ciclo del EE tras el primer VBlank
          ctx->pc = 0u;
          runtime->requestStop();
      }
@@ -48,7 +48,7 @@ index 4261bfa..92b381d 100644
  
 +        tc.Run("VBlank field period is the NTSC 60/1.001 Hz field", [](TestCase &t)
 +        {
-+            // GOW-Port: con 16 667 µs (59,9988 Hz) los vídeos iban a 30,00 imágenes/s en lugar de 29,97 y el audio se
++            // MKSM-Port: con 16 667 µs (59,9988 Hz) los vídeos iban a 30,00 imágenes/s en lugar de 29,97 y el audio se
 +            // quedaba atrás un 0,1 %. El primer VBlank llega tras un campo NTSC: kEeClockHz * 1001 / 60000 ciclos.
 +            TestEnv env;
 +            t.IsTrue(env.runtime.memory().initialize(), "runtime memory initialize should succeed");

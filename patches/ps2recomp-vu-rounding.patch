@@ -7,7 +7,7 @@ index ee0c637..e859702 100644
  
  #include <algorithm>
 +#if defined(__x86_64__) || defined(_M_X64)
-+#include <xmmintrin.h> // GOW-Port: MXCSR rounding in run()
++#include <xmmintrin.h> // MKSM-Port: MXCSR rounding in run()
 +#endif
  #include <bit>
  #include <atomic>
@@ -15,8 +15,8 @@ index ee0c637..e859702 100644
 @@ -1912,8 +1915,15 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
      m_activeMemory = memory;
  
-     ps2_perf::Scope perf(ps2_perf::Bucket::Vu); // GOW-Port: VU0/VU1; las llamadas al GS se descuentan.
-+    // GOW-Port: VU float rounding (toward zero) for the run. On x86-64 every float operation goes through SSE, so the
+     ps2_perf::Scope perf(ps2_perf::Bucket::Vu); // MKSM-Port: VU0/VU1; las llamadas al GS se descuentan.
++    // MKSM-Port: VU float rounding (toward zero) for the run. On x86-64 every float operation goes through SSE, so the
 +    // MXCSR alone is switched (~8 ns instead of ~77 ns for fegetround + fesetround twice; ~1900 runs per frame).
 +#if defined(__x86_64__) || defined(_M_X64)
 +    const unsigned previousCsr = _mm_getcsr();
@@ -26,7 +26,7 @@ index ee0c637..e859702 100644
      const bool useVuRounding = std::fesetround(FE_TOWARDZERO) == 0;
 +#endif
      StepContext context{vuCode, codeSize, vuData, dataSize, &gs, memory, m_cycle + maxCycles, false};
-     m_lastRunHitBudget = false; // GOW-Port: funciona también con un despachador compilado.
+     m_lastRunHitBudget = false; // MKSM-Port: funciona también con un despachador compilado.
      const uint32_t runStartPc = m_state.pc;
 @@ -2240,8 +2250,12 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
          if (++endMacRuns % 20000u == 0u)
@@ -40,7 +40,7 @@ index ee0c637..e859702 100644
 +#endif
  }
  
- // GOW-Port: GOW_VU1C_VERIFICAR. Antes de un bloque compilado se ejecutan sus pares con el interprete desde el
+ // MKSM-Port: MKSM_VU1C_VERIFICAR. Antes de un bloque compilado se ejecutan sus pares con el interprete desde el
 diff --git a/ps2xTest/src/ps2_vu1_tests.cpp b/ps2xTest/src/ps2_vu1_tests.cpp
 index fdf950d..ac77dc9 100644
 --- a/ps2xTest/src/ps2_vu1_tests.cpp
@@ -57,7 +57,7 @@ index fdf950d..ac77dc9 100644
  
 +        tc.Run("VU1 runs round toward zero and restore the host rounding mode", [](TestCase &t)
 +        {
-+            // GOW-Port: ps2recomp-vu-redondeo. run() cambia el redondeo con el MXCSR en x86-64 (antes fegetround y
++            // MKSM-Port: ps2recomp-vu-redondeo. run() cambia el redondeo con el MXCSR en x86-64 (antes fegetround y
 +            // fesetround): dentro, hacia cero; al salir, el modo que había.
 +            Vu1Fixture fx;
 +            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");

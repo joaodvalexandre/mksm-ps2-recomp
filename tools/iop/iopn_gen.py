@@ -1,4 +1,4 @@
-# GOW-Port: copiado de Waffle565/God-Of-War-Native-Port main@34f30d5:tools/iop/iopn_gen.py.
+# MKSM-Port: copiado de Waffle565's native port main@34f30d5:tools/iop/iopn_gen.py.
 """Ahead-of-time compiler for the game's IRX modules (IOP, R3000A) -> C++ (ps2xIOP/src/native).
 
 usage: python -I tools/iop/iopn_gen.py <dump dir> <out dir>

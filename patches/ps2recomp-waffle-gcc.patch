@@ -6,7 +6,7 @@ index a6a20be..9849872 100644
      src/lib/games_database.cpp
  )
  
-+# GOW-Port: las fuentes de PCSX2 incluyen "common/..." relativo a su carpeta. MSVC lo encuentra buscando en la
++# MKSM-Port: las fuentes de PCSX2 incluyen "common/..." relativo a su carpeta. MSVC lo encuentra buscando en la
 +# carpeta del archivo que incluye; GCC y Clang no, así que se añade como ruta de inclusión solo para ellas.
 +set_source_files_properties(
 +    src/lib/ee_ref/ee_diff.cpp src/lib/ee_ref/eeref.cpp src/lib/ee_ref/R5900OpcodeImpl.cpp
@@ -24,7 +24,7 @@ index e10ad5d..51957a2 100644
  // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
  // SPDX-License-Identifier: GPL-3.0+
  
-+// GOW-Port: sin __fi/__ri en las funciones no estáticas de este archivo: otras unidades las llaman (extern) y en GCC
++// MKSM-Port: sin __fi/__ri en las funciones no estáticas de este archivo: otras unidades las llaman (extern) y en GCC
 +// __fi/__ri son "inline", que no emite una definición externa (fallo de enlace en Linux). MSVC sí la emitía.
  #include "Common.h"
  
@@ -94,7 +94,7 @@ index a23deee..424eb6f 100644
  // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
  // SPDX-License-Identifier: GPL-3.0+
  
-+// GOW-Port: sin __fi/__ri en las funciones no estáticas de este archivo: otras unidades las llaman (extern) y en GCC
++// MKSM-Port: sin __fi/__ri en las funciones no estáticas de este archivo: otras unidades las llaman (extern) y en GCC
 +// __fi/__ri son "inline", que no emite una definición externa (fallo de enlace en Linux). MSVC sí la emitía.
  #include "Common.h"
  #include "VUops.h"

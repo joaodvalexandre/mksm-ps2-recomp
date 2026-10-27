@@ -3,7 +3,7 @@ index 4ffe16b..5f90be1 100644
 --- a/ps2xRuntime/src/lib/gs/gs_host_present.cpp
 +++ b/ps2xRuntime/src/lib/gs/gs_host_present.cpp
 @@ -1,4 +1,5 @@
- // GOW-Port: contexto host, selección de frames y dibujo raylib usados por el port.
+ // MKSM-Port: contexto host, selección de frames y dibujo raylib usados por el port.
 +#include <atomic>
  #include "runtime/gs/gs_host_present.h"
  #include "rlgl.h"
@@ -12,8 +12,8 @@ index 4ffe16b..5f90be1 100644
  #include <cstring>
  #include <iostream>
  
-+// GOW-Port: imágenes nuevas presentadas en la ventana (medidor de FPS de ps2_runtime.cpp).
-+std::atomic<uint64_t> g_gowPresentedFrames{0};
++// MKSM-Port: imágenes nuevas presentadas en la ventana (medidor de FPS de ps2_runtime.cpp).
++std::atomic<uint64_t> g_mksmPresentedFrames{0};
 +
 +
  namespace
@@ -23,7 +23,7 @@ index 4ffe16b..5f90be1 100644
      current.borrowed = false;
      current.blank = true;
      uploaded = true;
-+    g_gowPresentedFrames.fetch_add(1, std::memory_order_relaxed); // GOW-Port: medidor de FPS (F2)
++    g_mksmPresentedFrames.fetch_add(1, std::memory_order_relaxed); // MKSM-Port: medidor de FPS (F2)
  }
  
  GSHostPresentation::View GSHostPresentation::prepare(GS &gs, uint64_t vsyncTick)
@@ -31,7 +31,7 @@ index 4ffe16b..5f90be1 100644
              {
                  gs.recordAcquiredSharedFrame(frame);
                  lastSharedSequence = frame.sequence;
-+                g_gowPresentedFrames.fetch_add(1, std::memory_order_relaxed); // GOW-Port: medidor de FPS (F2)
++                g_mksmPresentedFrames.fetch_add(1, std::memory_order_relaxed); // MKSM-Port: medidor de FPS (F2)
              }
              if (!frame.blank && frame.texture != 0u && frame.width != 0u && frame.height != 0u)
              {
@@ -39,7 +39,7 @@ index 4ffe16b..5f90be1 100644
          }
          UpdateTextureRec(fallback, Rectangle{0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height)}, scratch.data());
          uploaded = true;
-+    g_gowPresentedFrames.fetch_add(1, std::memory_order_relaxed); // GOW-Port: medidor de FPS (F2)
++    g_mksmPresentedFrames.fetch_add(1, std::memory_order_relaxed); // MKSM-Port: medidor de FPS (F2)
          uploadedBlank = false;
          current.texture = fallback;
          current.width = width;
@@ -47,7 +47,7 @@ index 4ffe16b..5f90be1 100644
      }
      UpdateTexture(fallback, upload.data());
      uploaded = true;
-+    g_gowPresentedFrames.fetch_add(1, std::memory_order_relaxed); // GOW-Port: medidor de FPS (F2)
++    g_mksmPresentedFrames.fetch_add(1, std::memory_order_relaxed); // MKSM-Port: medidor de FPS (F2)
      uploadedBlank = false;
      current.texture = fallback;
      current.width = width;
@@ -55,14 +55,14 @@ diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runti
 index 76c569b..757a92c 100644
 --- a/ps2xRuntime/src/lib/ps2_runtime.cpp
 +++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
-@@ -1539,6 +1539,7 @@ void gowDumpBranchRing(const char *why)
- // las entradas por segundo a la función de cuadro del juego (GOW_PERF_FRAME_PC; en God of War vid::Flip, 0x001837B8),
- // "pantalla" los refrescos de la ventana. Mientras se ve escribe una línea [gow-fps] por segundo en el registro
+@@ -1539,6 +1539,7 @@ void mksmDumpBranchRing(const char *why)
+ // las entradas por segundo a la función de cuadro del juego (MKSM_PERF_FRAME_PC; en el juego base vid::Flip, 0x001837B8),
+ // "pantalla" los refrescos de la ventana. Mientras se ve escribe una línea [mksm-fps] por segundo en el registro
  // (con el mínimo de cada segundo medido en ventanas de 0,25 s), para localizar tirones al jugar.
-+extern std::atomic<uint64_t> g_gowPresentedFrames; // gs_host_present.cpp
++extern std::atomic<uint64_t> g_mksmPresentedFrames; // gs_host_present.cpp
  namespace
  {
-     std::atomic<uint64_t> g_gowFpsGuestFrames{0};
+     std::atomic<uint64_t> g_mksmFpsGuestFrames{0};
 @@ -1559,7 +1560,8 @@ namespace
          std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
          std::chrono::steady_clock::time_point windowStart = start, secondStart = start;
@@ -76,8 +76,8 @@ index 76c569b..757a92c 100644
 @@ -1570,12 +1572,16 @@ namespace
                  return;
              const auto now = std::chrono::steady_clock::now();
-             const uint64_t guest = g_gowFpsGuestFrames.load(std::memory_order_relaxed);
-+            const uint64_t shown = g_gowPresentedFrames.load(std::memory_order_relaxed);
+             const uint64_t guest = g_mksmFpsGuestFrames.load(std::memory_order_relaxed);
++            const uint64_t shown = g_mksmPresentedFrames.load(std::memory_order_relaxed);
              const double window = std::chrono::duration<double>(now - windowStart).count();
              if (window >= 0.25)
              {
@@ -94,8 +94,8 @@ index 76c569b..757a92c 100644
              const double second = std::chrono::duration<double>(now - secondStart).count();
              if (second >= 1.0)
              {
--                std::fprintf(stderr, "[gow-fps] t=%.0f juego=%.1f min=%.1f pantalla=%.1f\n",
-+                std::fprintf(stderr, "[gow-fps] t=%.0f juego=%.1f min=%.1f imagenes=%.1f min_imagenes=%.1f pantalla=%.1f\n",
+-                std::fprintf(stderr, "[mksm-fps] t=%.0f juego=%.1f min=%.1f pantalla=%.1f\n",
++                std::fprintf(stderr, "[mksm-fps] t=%.0f juego=%.1f min=%.1f imagenes=%.1f min_imagenes=%.1f pantalla=%.1f\n",
                               std::chrono::duration<double>(now - start).count(),
                               static_cast<double>(guest - secondGuest) / second, secondMin,
 +                             static_cast<double>(shown - secondShown) / second, secondShownMin,

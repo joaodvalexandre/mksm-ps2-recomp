@@ -92,6 +92,8 @@ def libraries(data: dict) -> tuple[list[Group], list[dict]]:
         if not lib["from"] <= address < lib["to"]:
             continue
         g = entries[bisect.bisect_right(starts, address) - 1]
+        if g.get("skip"):  # game code between two runs of linked libraries
+            continue
         if g["name"] not in by_name:
             by_name[g["name"]] = []
             order.append(g["name"])
@@ -99,6 +101,8 @@ def libraries(data: dict) -> tuple[list[Group], list[dict]]:
 
     info = {}
     for g in entries:
+        if g.get("skip"):
+            continue
         status = check_status(g["status"], g["name"])
         previous = info.get(g["name"])
         if previous and previous["status"] != status:

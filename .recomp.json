@@ -1,33 +1,33 @@
 {
   "$schema": "https://recomp.fyi/schema/v1.json",
-  "game": "God of War",
+  "game": "Mortal Kombat: Shaolin Monks",
   "system": "PS2",
   "type": "recomp",
   "original": {
-    "region": "USA",
-    "serial": "SCUS-97399"
+    "region": "Europe",
+    "serial": "SLES-53524"
   },
-  "project": "God of War — PS2 Static Recompilation",
+  "project": "Mortal Kombat: Shaolin Monks — PS2 Static Recompilation",
   "status": "in-progress",
   "targets": ["Windows"],
   "toolchain": "Ps2recomp",
-  "approach": "Static recompilation of MIPS R5900 code to C++20, with a PS2Recomp-based runtime and God of War-specific overrides.",
+  "approach": "Static recompilation of MIPS R5900 code to C++20, with a PS2Recomp-based runtime and game-specific overrides.",
   "maintainers": [
     {
-      "name": "KIexster",
-      "link": "https://github.com/KIexster"
+      "name": "joaodvalexandre",
+      "link": "https://github.com/joaodvalexandre"
     }
   ],
   "links": [
     {
       "label": "Project status",
-      "url": "https://github.com/KIexster/god-of-war-recomp/blob/main/docs/MKSM.md"
+      "url": "https://github.com/joaodvalexandre/mksm-ps2-recomp/blob/master/docs/MKSM.md"
     }
   ],
   "help": [
-    "VIF/VU/GIF synchronization and 3D rendering",
-    "MPEG FMV playback",
-    "SPU2 audio and SIO2 memory cards"
+    "Function boundaries for the stripped ELF",
+    "CRI ADX audio and Sofdec SFD movies",
+    "PAL 50 Hz timing"
   ],
-  "notes": "Boots to the main menu with keyboard/controller input and difficulty selection. With FMVs skipped, the initial level reaches the gameplay state, but its framebuffer remains black. Text rendering, FMVs, audio and memory cards are still incomplete. Not yet playable."
+  "notes": "Function map and recompiler configuration generated; first boot pending. Not yet playable."
 }

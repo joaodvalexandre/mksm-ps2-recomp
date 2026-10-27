@@ -1,12 +1,12 @@
-"""GOW-Port: the check must run real compiled pairs, in addition to giving parity."""
+"""MKSM-Port: the check must run real compiled pairs, in addition to giving parity."""
 import os
 import re
 import subprocess
 import sys
 
-# GOW-Port: with Waffle565's runtime the native VU1 goes first; it is turned off to exercise the compiled pairs.
-env = dict(os.environ, GOW_VU1C_DIAG="1", GOW_VU1_NATIVE_OFF="1")
-for name in ("GOW_VU1C_RANGO", "GOW_VU1C_SIN_BLOQUES", "GOW_VU1_SIN_COMPILAR"):
+# MKSM-Port: with Waffle565's runtime the native VU1 goes first; it is turned off to exercise the compiled pairs.
+env = dict(os.environ, MKSM_VU1C_DIAG="1", MKSM_VU1_NATIVE_OFF="1")
+for name in ("MKSM_VU1C_RANGO", "MKSM_VU1C_SIN_BLOQUES", "MKSM_VU1_SIN_COMPILAR"):
     env.pop(name, None)
 result = subprocess.run([sys.argv[1]], env=env, capture_output=True, text=True, timeout=120)
 match = re.search(r"\[vu1c\] compilados=(\d+) interpretados=(\d+)", result.stderr)

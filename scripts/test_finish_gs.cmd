@@ -1,5 +1,5 @@
 @echo off
-rem GOW-Port: FINISH, CSR and read barrier; no GPU or game data.
+rem MKSM-Port: FINISH, CSR and read barrier; no GPU or game data.
 setlocal
 cd /d "%~dp0.."
 if not exist logs mkdir logs
@@ -11,7 +11,7 @@ set VSCMD_SKIP_SENDTELEMETRY=1
 call "%TASK_FINISH_VSPATH%\VC\Auxiliary\Build\vcvars64.bat" > logs\gs_finish_vcvars.log 2>&1
 if errorlevel 1 goto :failed
 if not errorlevel 0 goto :failed
-if defined GOW_WORK (set "TASK_FINISH_WORK=%GOW_WORK%") else (for /f "usebackq delims=" %%w in (`powershell -NoProfile -Command ". '%~dp0common.ps1'; Get-GowWorkDir"`) do set "TASK_FINISH_WORK=%%w")
+if defined MKSM_WORK (set "TASK_FINISH_WORK=%MKSM_WORK%") else (for /f "usebackq delims=" %%w in (`powershell -NoProfile -Command ". '%~dp0common.ps1'; Get-MksmWorkDir"`) do set "TASK_FINISH_WORK=%%w")
 set "TASK_FINISH_RUNTIME=%TASK_FINISH_WORK%\PS2Recomp"
 set "TASK_FINISH_BUILD=%TASK_FINISH_RUNTIME%\out\build"
 if not exist "%TASK_FINISH_BUILD%\ps2xRuntime\ps2_runtime.lib" goto :failed

@@ -3,11 +3,11 @@ index 377be77..7b2ac63 100644
 --- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
 +++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
 @@ -58,7 +58,9 @@ namespace
-     constexpr uint64_t kVBlankPeriodCycles = EeScheduler::kEeClockHz * 1001ull / 60000ull; // GOW-Port: campo NTSC (59,94 Hz)
+     constexpr uint64_t kVBlankPeriodCycles = EeScheduler::kEeClockHz * 1001ull / 60000ull; // MKSM-Port: campo NTSC (59,94 Hz)
      constexpr uint64_t kVBlankDurationCycles = microsecondsToEeCycles(500u);
      constexpr uint64_t kAlarmTickCycles = microsecondsToEeCycles(kAlarmTickMicroseconds);
 -    constexpr uint64_t kPaceSteps = 16u; // pacing points per field (see VBlankStart)
-+    // GOW-Port: pacing points per field (see VBlankStart). 64 (was 16): busy-waits run the EE clock up to one step ahead
++    // MKSM-Port: pacing points per field (see VBlankStart). 64 (was 16): busy-waits run the EE clock up to one step ahead
 +    // of the wall clock, and when the GS finishes the game first sleeps that lead off (~1 ms with 16 steps).
 +    constexpr uint64_t kPaceSteps = 64u;
  
@@ -16,7 +16,7 @@ index 377be77..7b2ac63 100644
 @@ -1974,7 +1976,7 @@ void EeScheduler::processDueDeadlines()
                                scheduled.hostDeadline + kVBlankPeriod,
                                EeEvent{EeEventType::VBlankStart, 0, 0});
-                 // GOW-Port: pacing points on the VBlank grid (cycle and host deadline in lockstep, no-op event). The
+                 // MKSM-Port: pacing points on the VBlank grid (cycle and host deadline in lockstep, no-op event). The
 -                // guest clock may not run ahead of the wall clock by more than 1/16 field inside a frame: recompiled
 +                // guest clock may not run ahead of the wall clock by more than 1/64 field inside a frame: recompiled
                  // busy-waits (vid::WaitForDMAComplete polling the GS-done flag) otherwise burn guest cycles ~10x
@@ -38,7 +38,7 @@ index 92b381d..a4c09fa 100644
      constexpr uint32_t kEventWaitPc = 0x00160400u;
      constexpr uint32_t kEventResumePc = 0x00160410u;
      constexpr uint32_t kEventProducerPc = 0x00160420u;
-+    // GOW-Port: función invitada que solo gasta ciclos (como un bucle de sondeo recompilado) y mide cuánto se
++    // MKSM-Port: función invitada que solo gasta ciclos (como un bucle de sondeo recompilado) y mide cuánto se
 +    // adelanta el reloj del EE al reloj real.
 +    constexpr uint32_t kPaceBurnPc = 0x00160600u;
 +    constexpr uint64_t kPaceBurnChunk = 1024u;
@@ -80,7 +80,7 @@ index 92b381d..a4c09fa 100644
  
 +        tc.Run("EE clock never runs more than 1/64 field ahead of the host clock", [](TestCase &t)
 +        {
-+            // GOW-Port: ps2recomp-ritmo-fino. Los bucles de sondeo gastan ciclos del EE mucho más deprisa que el
++            // MKSM-Port: ps2recomp-ritmo-fino. Los bucles de sondeo gastan ciclos del EE mucho más deprisa que el
 +            // tiempo real; con 16 puntos de ritmo por campo el reloj del EE llegaba a ir ~1 ms por delante, y al
 +            // terminar la GS el juego dormía ese adelanto antes de seguir (~0,5 ms de media por cuadro). Con 64
 +            // puntos el adelanto no pasa de ~0,26 ms.
