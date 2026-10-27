@@ -9,17 +9,17 @@ New-Item -ItemType Directory -Force -Path $LogsDir | Out-Null
 $PS2RecompUrl    = 'https://github.com/ran-j/PS2Recomp.git'
 $PS2RecompCommit = 'c5a9d02573410a2085a4b4b831b0b68ba3515440'
 
-# Work folder (PS2Recomp clone and generated code). It is kept inside the Recomps folder that holds this
-# repository (never in the root of a drive) and its path stays short to avoid the Windows 260-character limit.
-# Inside a git worktree (<repo>\.claude\worktrees\<name>) the folder is still the one next to the main checkout.
-# It can be changed with the GOW_WORK environment variable.
+# Work folder (PS2Recomp clone and generated code): <repository>\mksm-work. It lives inside the repository folder
+# (never in the root of a drive) and is git-ignored, so it is never pushed. Inside a git worktree
+# (<repo>\.claude\worktrees\<name>) it is still the folder of the main checkout.
+# It can be changed with the GOW_WORK environment variable (keep the path short: Windows has a 260-character limit).
 function Get-GowWorkDir {
     if ($env:GOW_WORK) { return $env:GOW_WORK }
     $main = $RepoRoot
     $marker = [IO.Path]::DirectorySeparatorChar + '.claude' + [IO.Path]::DirectorySeparatorChar + 'worktrees' + [IO.Path]::DirectorySeparatorChar
     $at = $RepoRoot.IndexOf($marker, [StringComparison]::OrdinalIgnoreCase)
     if ($at -ge 0) { $main = $RepoRoot.Substring(0, $at) }
-    return Join-Path (Split-Path -Parent $main) 'mksm-work'
+    return Join-Path $main 'mksm-work'
 }
 
 # Game executable. Search order:

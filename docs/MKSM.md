@@ -55,11 +55,12 @@ R3000 interpreter. This is a hypothesis: it will be confirmed on first boot.
 
 ## Work folders
 
-Everything lives inside `D:\Projects\Recomps`, never in the root of a drive:
+Everything lives inside `D:\Projects\Recomps\mksm-ps2-recomp`, never in the root of a drive:
 
-- `mksm-ps2-recomp\` — this repository (and its git worktrees under `.claude\worktrees\`).
-- `mksm-work\PS2Recomp\` — PS2Recomp clone at the pinned commit with the 40 patches applied (git-ignored, outside the
-  repository). `scripts\common.ps1` (`Get-GowWorkDir`) points there by default; `GOW_WORK` overrides it.
+- the repository itself (and its git worktrees under `.claude\worktrees\`).
+- `mksm-work\PS2Recomp\` — PS2Recomp clone at the pinned commit with the 40 patches applied. It is git-ignored
+  (`.gitignore`), so it is never pushed. `scripts\common.ps1` (`Get-GowWorkDir`) points there by default;
+  `GOW_WORK` overrides it.
 
 Any other repository that is needed must also be cloned inside `D:\Projects\Recomps`.
 
@@ -76,9 +77,9 @@ Any other repository that is needed must also be cloned inside `D:\Projects\Reco
 ## Status
 
 - [x] Image located and ELF/IOP extracted.
-- [x] PS2Recomp cloned at the pinned commit with the 40 patches applied (`D:\Projects\Recomps\mksm-work\PS2Recomp`).
-- [x] Analyzer and recompiler built once with VS 2022 (the build output was deleted when the clone was moved into
-      the Recomps folder, so they need to be rebuilt).
+- [x] PS2Recomp cloned at the pinned commit with the 40 patches applied (`mksm-work\PS2Recomp`, inside the repository folder).
+- [x] Analyzer and recompiler built once with VS 2022 (the build output was deleted when the clone was moved, so
+      they need to be rebuilt).
 - [ ] MKSM function map and configuration.
 - [ ] First boot.
 

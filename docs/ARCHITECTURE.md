@@ -5,8 +5,8 @@
 `scripts/build.ps1` runs these steps:
 
 1. **Tool check** — `git`, `cmake`, `ninja` (the MSVC environment is loaded by `2_build.cmd`).
-2. **PS2Recomp** — clones `ran-j/PS2Recomp` into `<Recomps>\mksm-work\PS2Recomp` (next to the repository, inside
-   the Recomps folder; override with `GOW_WORK`), checks out commit
+2. **PS2Recomp** — clones `ran-j/PS2Recomp` into `<repository>\mksm-work\PS2Recomp` (inside the repository folder
+   and git-ignored; override with `GOW_WORK`), checks out commit
    `c5a9d02573410a2085a4b4b831b0b68ba3515440` and initializes the submodules.
 3. **Patches** — applies the full list in the order defined by [`scripts/build.ps1`](../scripts/build.ps1).
    [`tools/ci/patches.py`](../tools/ci/patches.py) reads that same list for CI and checks that no file in

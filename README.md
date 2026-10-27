@@ -173,8 +173,8 @@ scripts\1_install_tools.cmd
 scripts\2_build.cmd
 ```
 
-The script clones PS2Recomp into `mksm-work` inside the Recomps folder that holds this repository (a short path to
-avoid the 260-character limit; configurable with `GOW_WORK`), pins commit `c5a9d02`, applies the patches in `patches/`, generates the C++ code and builds
+The script clones PS2Recomp into `mksm-work` inside the repository folder (git-ignored, so it is never pushed; keep
+the path short to avoid the 260-character limit; configurable with `GOW_WORK`), pins commit `c5a9d02`, applies the patches in `patches/`, generates the C++ code and builds
 `ps2EntryRunner.exe`. The log is written to `logs\2_build.log`.
 
 Release builds disable function and IOP RPC traces by default. For diagnostics, use
