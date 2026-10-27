@@ -1,0 +1,554 @@
+# Integración experimental del GS de PCSX2
+
+El usuario propone adaptar el GS de PCSX2 mientras espera el código del port
+de Urban Reign. La captura de ese comentario no contiene repositorio, revisión
+o controles reproducibles. Sus cifras de resolución/FPS son del autor del
+comentario; no se atribuyen a God of War ni a este trabajo.
+
+Se revisa directamente [PCSX2](https://github.com/PCSX2/pcsx2) en
+`2954ebe6965669219f1bbd256e958fbd8f83a85d`, GPL-3.0+ compatible con la licencia
+del port. Las fuentes descargadas quedan en el workspace privado. Los dos
+headers del puente son código propio: incluyen las interfaces del GS original
+al compilar el módulo externo, sin importar fuentes del juego o del otro port.
+
+## Punto de integración
+
+El [GS de PCSX2](https://github.com/PCSX2/pcsx2/blob/2954ebe6965669219f1bbd256e958fbd8f83a85d/pcsx2/GS/GS.h)
+recibe flujos GIF y registros privilegiados. Nuestra interfaz `GSRasterBackend`
+recibe primitivas ya decodificadas, CLUT y transferencias separadas. Para usar
+el frontend/caché originales, el puente debe recibir los tres PATH después
+del arbitraje, antes de reducirlos a primitivas. También debe cubrir los
+atajos de GIF packed y de IMAGE nativo: enganchar solo `processGIFPacket`
+no garantiza cobertura de esos caminos.
+
+`tools/render/pcsx2_gif_bridge.h` conserva hasta 15 bytes pendientes por PATH,
+entrega quadwords completas en el orden en que llegan al adaptador y copia
+los lotes a memoria alineada a 16 bytes. Cantidad en quadwords, lotes máximos
+de 256; no rellena fragmentos ni decodifica/modifica tags. Un rechazo del
+destino retiene el fallo: no se repite un prefijo cuyo consumo es desconocido.
+El reset exige resetear también el GS. Comprobar final de flujo no equivale
+a VSync: los paquetes pueden continuar después de él. El consumidor debe
+terminar de usar el puntero antes de retornar; el puente no es una cola de hilos.
+
+`pcsx2_gif_sink.h` enlaza con `GSState::Transfer<3/1/2>` del renderer abierto.
+PATH1 utiliza el índice continuo 3 de `GSgifTransfer`; PATH2/3 conservan sus
+índices 1/2. No se usa `GSgifTransfer1(span, size)`: esa función espera un
+anillo VU de 16 KiB y una dirección dentro de él. Tampoco basta llamar al
+índice 0 directamente: corta al terminar EOP, ignoraría otros paquetes del
+mismo lote y borra nloop pendiente cuando se agota el span. Son reglas leídas
+en el cuerpo fijado de GSState/MTGS, no una prueba de ejecución del renderer.
+La conexión rechaza un GS ausente. **No crea un dispositivo, importa VRAM,
+presenta un frame ni está conectada al runtime del juego.**
+
+## Comprobado y pendiente
+
+MSVC C++20 /O2 /W4 /WX: pruebas del transporte correctas. Se recorren las 65
+fronteras de un bloque de 64 bytes con origen desalineado, fragmentos PATH1/2/3
+intercalados, flujo de 32.784 bytes contiguo y byte a byte, alineación, unidades,
+entrada inválida, fragmento incompleto, error retenido y reset coordinado.
+Sintaxis de la conexión con las cabeceras **reales** fijadas correcta en MSVC,
+con las definiciones x86/SSE4.1 del proyecto y AVX2. La CI comprueba además
+esa conexión en Linux; no sustituye enlace/ejecución del renderer.
+
+La primera versión del enlace compilaba con índice 0 para PATH1. La revisión
+del cuerpo real detectó aquellas reglas incompatibles con fragmentos/lotes;
+se corrige al índice 3 antes de usarlo en el port. Los controles de sintaxis
+no habrían detectado esa pérdida de datos. Se compila además GSState.cpp real
+como objeto privado con MSVC: correcto; su enlace y ejecución siguen pendientes.
+
+### Parser original ejecutado en Windows (2026-10-12)
+
+Se extrae una biblioteca privada de objetos GS/common de las fuentes fijadas
+y se enlaza un host explícitamente sin ventana. Configuración, memoria virtual
+repetida, detección de CPU y registros de dump usan implementaciones originales;
+los servicios Host de este fixture ofrecen ajustes por defecto, errores a
+stderr y rechazan solicitudes de ventana. Su contador debe quedar en cero.
+La capa de interfaz se compila con fuentes STB de ImGui para este fixture sin UI.
+Los codecs privados ya disponibles en PCSX2 usan cabeceras coincidentes:
+libpng 1.6.58/zlib 1.3.2. Ninguna de esas DLL o fuentes descargadas se publica.
+
+`tests/pcsx2_gif_parser_probe.cpp` ejecuta **GSState real** con una subclase
+que cuenta solicitudes de dibujo sin rasterizarlas. Comprueba tag/payload
+PATH1 separados, nloop retenido, dos paquetes EOP en un lote, fragmentos de
+PATH2/3 intercalados, sus cursores independientes y RGBAQ exacto. Correcto
+en MSVC; dibujo y solicitudes de ventana: cero, como exige la prueba.
+
+Negativo aislado: cambiar solo PATH1 de índice 3 a 0 compila y falla en
+`PATH1 conserva nloop al cortar tras tag`. Restaurado pasa. El ejecutable
+restaurado tiene SHA-256
+`1289d908c425c0f1b138ff7dc4cf619f1a9341c443fe6145eae5c02d9b7e033c`.
+La CI comprueba sintaxis del fixture con los headers reales; **no reproduce
+todavía su enlace/ejecución nativa**. El contexto de extracción y sus artefactos
+siguen privados. Esta prueba confirma la selección de entrada del parser,
+no dispositivo DX11, píxeles, caché completa, FIFO/IRQ o renderizado del juego.
+
+### Dispositivo DX11 original ejecutado (2026-10-12)
+
+La biblioteca privada incorpora GSDevice11, GSTexture11, D3D11ShaderCache y
+GSTexture originales. `tests/pcsx2_dx11_device_probe.cpp` crea el dispositivo
+en modo Surfaceless, con shaders de la revisión fijada y caché desactivada.
+No necesita ventana ni ejecuta EE/VU. El host ofrece ajustes por defecto,
+traducción identidad y errores a stderr; las referencias estáticas a registros
+EE usan almacenamiento procedural, sin ejecutar una CPU de sustitución.
+
+Windows/MSVC Release, AMD Radeon RX 5700 XT: dos ciclos de creación/cierre
+correctos. Cada ciclo verifica **todos los 2.701 píxeles RGBA** de una textura
+73x37 tras Clear y tras subir un patrón con siete palabras de padding por fila
+y dibujarlo con `StretchRectAuto`/Nearest. Esa segunda operación usa el shader
+COPY original, no una copia directa DXGI. El readback respeta el pitch de la
+textura staging. Canales/alpha y orientación se comparan sin tolerancia.
+
+Negativo privado: omitir solamente la llamada de dibujo compila y falla en
+el primer píxel de Shader COPY; restaurado pasa ambos ciclos. SHA-256 del
+ejecutable restaurado:
+`2be054f554e71ebdafc234998b84d4e7b53542f26a40c2f58403fcbead66db14`.
+El fixture se publica; su host/enlace siguen privados y este control GPU no
+se ejecuta en CI. No procesa todavía GIF hacia GSRendererHW, importa VRAM,
+presenta en una ventana o dibuja el juego. No es una medición de rendimiento.
+
+### GIF hacia GSRendererHW y FIFO comprobados (2026-10-12)
+
+La extracción incorpora GSRenderer, GSRendererHW, GSTextureCache y sus helpers
+originales, incluidos los objetos de apoyo SW. No se modifica el dibujo ni
+se reemplaza la caché con valores fabricados. El fixture inicializa las tablas
+SW originales antes del renderer; su ruta SW no está cubierta por este control.
+La configuración usa constructores originales extraídos, sin cargar ajustes,
+tarjetas ni una VM. Los servicios opcionales ausentes (captura, dumps, UI,
+reapertura y reemplazos de texturas) abortan con diagnóstico si se solicitan;
+los ajustes de captura/reemplazos quedan desactivados. No se llama a VSync.
+
+`tests/pcsx2_gif_draw_probe.cpp` envía un mosaico de 16 sprites a FRAME PSMCT32,
+sin textura/blending/depth test, por el puente y la conexión originales. Usa
+fragmentos de 13 bytes, regenera colores distintos para PATH1/2/3 y lee por
+BITBLTBUF/TRXPOS/TRXREG/TRXDIR más InitReadFIFO/ReadFIFO originales. Cada PATH
+produce un draw call GPU y **2.048 píxeles RGBA exactos**, incluida alpha.
+Se verifica el delta de dibujos de cada envío, no un contador acumulado.
+
+Windows/MSVC Release, RX 5700 XT: tres PATH correctos. Negativo privado que
+omite solo el paquete de dibujo compila y falla en el primer píxel de FIFO;
+restaurado pasa los tres. SHA-256 restaurado:
+`1d271fd05fcbf01cec0b688655c26337b99259a2545274ecccda423740ef01fb`.
+Este control verifica dibujo y descarga procedural; no equivale a presentar
+un frame del juego, coherencia con su RAM/VRAM, interrupciones o rendimiento.
+Su host/enlace todavía siguen privados y la CI no ejecuta este control GPU.
+
+### Receta pública de construcción y control IMAGE (2026-10-12)
+
+`tools/render/pcsx2_probe/` publica el host limitado, servicios, CMake y una
+preparación que extrae solo fuentes GS/config originales de la revisión limpia.
+No copia DLL privadas ni datos del juego al repositorio. Instrucciones y
+dependencias en su [README](../tools/render/pcsx2_probe/README.md). Se añade CI
+Windows para enlazar todos los fixtures y ejecutar parser/memoria sin GPU;
+los controles de dispositivo/dibujo se ejecutan localmente, de forma explícita.
+
+Esta receta compila y pasa los cuatro controles en Windows/MSVC sobre la
+RX 5700 XT. El dibujo amplía su cobertura: IMAGE PSMCT32 host→local, TEXFLUSH,
+sprite texturado DECAL/nearest y descarga FIFO. Los 2.048 píxeles completos y
+los 91 de una región 13x7 que cruza bloques coinciden exactamente, incluida
+alpha. El final parcial de quadword no escribe más allá del QWC solicitado.
+Omitir solo IMAGE compila y falla en el primer píxel; restaurado correcto.
+SHA-256 del fixture restaurado de dibujo:
+`a7991d25961bdddddd8ce3631cf73287f057b8928c735df8724c818e575f3444`.
+
+El cierre del mapeo Windows extraído tenía dos fugas locales: el handle y
+tres placeholders retenidos. La preparación añade correcciones GOW-Port sin
+cambiar el checkout original: cierra el handle y une las vistas antes de
+liberar el rango. Se sigue la semántica documentada de
+[VirtualFreeEx](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualfreeex).
+Ocho ciclos de cuatro vistas alias, handles estables y MEM_FREE en todo el
+rango: correctos. Omitir cada corrección por separado compila y falla (ocho
+handles retenidos o vista 1 reservada); restaurado correcto. No valida fallos
+de reserva ni transforma este host limitado en el host completo del juego.
+
+Los cuatro ejecutables locales funcionan sin dxcompiler.dll/dxil.dll en su
+carpeta: DX11 usa el compilador SM4/5 original, con import DXC retardado para
+otras APIs. La carga retardada no acredita soporte de DX12/Vulkan.
+
+### VSync/PCRTC sin ventana comprobados (2026-10-12)
+
+El modo `gs_gif_draw_probe --frame` añade GSvsync **original**: actualización
+de PCRTC y Flush antes de GSRendererHW::VSync, caché de salida y Merge DX11.
+Tres patrones IMAGE distintos producen tres salidas compuestas 64x32 con
+2.048 píxeles RGBA exactos cada una. PMODE MMOD/ALP 255 determina alpha final
+255; RGB conserva el patrón. Host cuenta solicitud de frame, FrameSkipped de
+Surfaceless y actualización de métricas; no ejecuta interfaz ni mide FPS.
+
+El fixture configura DISPLAY con MAGH 3/DW 255 y DY 25 conforme a NTSC en
+PCSX2. La primera configuración procedural usaba DW 63/DY 0: daba salida
+16x32 y un desplazamiento vertical de 25 líneas. Se corrigen los registros
+de **la prueba** según el cuerpo original; no se modifica el renderer ni se
+atribuye este caso al encuadre observado en God of War.
+
+Negativo que omite solo GSvsync: compila y falla por salida 0x0; restaurado
+pasa los tres patrones. SHA-256 restaurado:
+`cd46ebb2f58aa6bd80c5849e30d7ee5fc0659c644db030f65c8fed1c6701cffb`.
+[CI de `08307ac` completo correcto](https://github.com/KIexster/god-of-war-recomp/actions/runs/38243100981),
+incluido enlace nativo Windows y parser/memoria. Los controles de píxeles siguen
+siendo locales. VSync compuesto no valida todavía swapchain, imagen visible,
+sincronización con el juego o las combinaciones de FINISH/hilos.
+
+### Swapchain DX11 procedural comprobado (2026-10-12)
+
+`gs_gif_draw_probe --window` crea una ventana Win32 propia oculta y usa el
+swapchain/Present originales. Un contexto ImGui vacío acompaña EndPresent,
+sin interfaz del emulador ni archivos ini/log. El control lee el recurso
+**realmente enlazado como render target DXGI antes de Present**, respetando
+RowPitch; la lectura se limita al fixture y no se propone como rendimiento.
+
+Dos ciclos completos de creación/dibujo/cierre de dispositivo, renderer y
+ventana, con tres patrones distintos cada uno: los seis backbuffers y las
+seis salidas PCRTC contienen sus 2.048 píxeles RGBA exactos. Callbacks de
+presentación/métricas consistentes, cierre de HWND/clase comprobado. La ventana
+oculta no demuestra una imagen visible o estabilidad prolongada con el juego.
+
+Negativo privado: borrar a magenta el backbuffer real después de dibujar y
+antes de compararlo compila y falla, aunque la textura PCRTC coincide. Restaurado
+pasa ventana y Surfaceless. Confirma que el control distingue composición y
+buffer final, sin atribuir la alteración procedural a un fallo de God of War.
+SHA-256 restaurado `74e92ae9a886b66f55079d06f6cbf0ddcbf9af18bfe2064e7d92137f94f3c543`.
+[CI de `d1bf750` completo correcto](https://github.com/KIexster/god-of-war-recomp/actions/runs/38244581430).
+El control GPU nuevo es local; el CI del HEAD que lo publica queda pendiente.
+
+### IMAGE FLG 2/3 y revisión del enganche (2026-10-12)
+
+El fixture alterna ahora IMAGE FLG=2 y FLG=3, conservando el tag en el puente.
+Ambos pasan FIFO y, en modo ventana, composición/backbuffer exactos. Omitir
+solo el envío FLG=3 compila y falla: recibe el color del patrón anterior en
+vez del nuevo. Restaurados, los modos sin VSync, Surfaceless y ventana pasan.
+SHA-256 restaurado `77ecd2fa20509b18422d9ade62c8ee35db18f90a0a8ad19e6882be412d311bfd`.
+Conserva explícitamente la semántica que necesitaba la corrección de Opus #55;
+no es una reproducción de sus medidas de FPS ni un fallo observado del juego.
+
+Revisión del runtime 102: el árbitro entrega bytes en su orden decidido, pero
+`tryProcessNativeGifPackedChain` y `tryProcessNativeGifImageUploadChain` pueden
+evitarlo. Esta última llama a `uploadImageNative` con cuatro registros, datos
+y solo el low word del setup tag: ese punto ya no ofrece el flujo GIF original.
+La ruta genérica también puede tomar un atajo IMAGE interno, conservando el
+span de entrada. Un único hook dentro de processGIFPacket perdería las dos
+rutas DMA externas. El primer control de integración deberá conservar bytes
+y orden post-arbitraje, y asegurar un consumidor en un solo hilo; se propone
+desactivar aquellos atajos DMA únicamente al activar el puente opcional y
+mantenerlos cuando esté ausente. No se implementa aún ese cambio del runtime.
+También faltan escrituras directas fuera de GIF, espejo privilegiado, FIFO e IRQ.
+
+### DLL y ABI de renderizado comprobadas (2026-10-12)
+
+El módulo aislado ahora construye `gow_pcsx2_gs_module.dll`, con ABI 1 propia
+de estructuras de tamaño fijo, handles, estado y validación de hilo. Recibe
+GIF fragmentado y un espejo privilegiado PS2 de 8 KiB, llama GSvsync original
+y copia explícitamente la textura compuesta. No intercambia objetos C++ con
+el consumidor. Recursos y superficie se configuran al crear; no cambia runtime.
+
+Contrato sin dispositivo: DLL cargada, exports/ABI y argumentos/handles
+rechazados correctamente. GPU por GetProcAddress, sin usar los globals del GS:
+dos ciclos correctos; singleton ocupado, handles cerrados, otro hilo, registros
+incompletos y buffer pequeño rechazados; consulta de tamaño/secuencia correcta,
+guardia final intacta y 2.048 píxeles RGBA exactos en cada ciclo.
+
+Negativos aislados: omitir guardia de hilo o de capacidad compila y hace fallar
+el control; restaurados correctos. El negativo de capacidad reserva físicamente
+más memoria que la capacidad declarada para probar el contrato sin provocar
+un acceso fuera de su asignación. La DLL sigue siendo render-only: IRQ/FINISH,
+FIFO/VRAM del runtime, activación a mitad de juego y recuperación del dispositivo
+pendientes. Detalles en el [README del módulo](../tools/render/pcsx2_probe/README.md).
+La CI nueva carga solo el contrato sin dispositivo; GPU comprobada localmente.
+
+### Espejo privilegiado para el adaptador (2026-10-12)
+
+`src/gow_gs_pcsx2_mirror.h` empaqueta los 19 registros reales del runtime en
+sus offsets PS2 de 8 KiB, explícitamente little-endian y con huecos en cero.
+Excluye vsyncTick: es un contador del runtime que ocupa espacio entre CSR/IMR
+en su struct compacto. CSR se lee atómicamente; el llamante debe sincronizar
+los demás registros con su escritor. El helper todavía no se instala en el juego.
+
+Prueba independiente con valores distintos y CSR multibyte: correcta en MSVC.
+Contraste de los 19 offsets y tamaño con GSPrivRegSet **original** mediante
+static_assert: correcto. Se añaden controles portables y de headers reales
+a CI, más CTest Windows. No se transforma una copia del struct de 160 bytes
+en una copia válida de registros de 8 KiB por rellenar solo su final.
+
+Pendiente para una adaptación funcional:
+
+1. Enlazar la ABI probada con un hook opcional del runtime que preserve bytes,
+   orden y hilo, incluidos los atajos DMA. Completar servicios de Host necesarios;
+   los servicios ausentes de este fixture siguen limitados.
+2. Ampliar presentación a ventana visible, redimensionado y recuperación de
+   dispositivo; ampliar formatos, CLUT, blending y depth/alpha test.
+3. Añadir espejo de registros privilegiados, CSR/FINISH/SIGNAL, FIFO local→host,
+   VRAM inicial y sincronización de escrituras/lecturas. `GSopen` recibe memoria
+   de **registros privilegiados**, no directamente los 4 MiB de VRAM.
+4. Enlazar todos los caminos de envío y presentación del runtime en un parche
+   opcional con regresiones, preservando CPU/OpenGL como referencias.
+5. Compilación completa, controles menú/introducción/partida y comparación de
+   escena; después medir GS y juego con diagnósticos desactivados. Cambiar GS
+   no elimina el coste de EE/VU ni corrige geometría de entrada incorrecta.
+
+Este primer puente es preparación verificable de la integración, sin mejora
+de FPS o fidelidad atribuida todavía y sin declarar disponibles DX11/DX12/Vulkan.
+
+### Conexión opcional al runtime: preparación (2026-10-12)
+
+El parche 103 añade `GSExternalObserver`: copia los spans GIF originales antes
+del atajo interno, informa las escrituras directas de stubs y reset, y entrega
+VSync desde `EeScheduler::VBlankStart`, antes de callbacks/IRQ del juego. Ambos
+atajos DMA y PACKED nativo rechazan sin consumir cuando hay observador; sin él
+conservan su comportamiento. El GS del runtime sigue siendo la autoridad de
+VRAM, FIFO, CSR, SIGNAL y FINISH. No es un cambio del renderer predeterminado.
+
+`GOW_PCSX2_GS_DIAG=1` enlaza la DLL desde arranque. Requiere una ruta absoluta
+`GOW_PCSX2_GS_DLL`; admite `GOW_PCSX2_GS_RESOURCES` para shaders. Un hilo propio
+crea/consume/cierra DX11. Cola FIFO con copia propia, 64 MiB y presión al llenarse;
+un fallo detiene el espejo y se registra. Se rechazan `PS2X_VU1_HILO=1` y
+`PS2X_GS_FRENTE=1`: el primer control requiere registros del EE coherentes.
+
+Captura opcional y privada: `GOW_PCSX2_GS_OUTPUT` debe ser una carpeta absoluta
+nueva; `GOW_PCSX2_GS_CAPTURE_COUNT=0..16` (8 si hay carpeta, 0 sin ella) y
+`GOW_PCSX2_GS_CAPTURE_FROM_TICK` (900 por defecto). Guarda BMP de la composición
+PCRTC con tick/secuencia; mínimo 120 ticks entre capturas. No representa la
+textura adquirida de OpenGL ni un fotograma alineado con PCSX2 externo.
+
+Ampliación posterior: `GOW_PCSX2_GS_CAPTURE_EVERY_TICKS=1..600` conserva 120
+por defecto y permite una ráfaga de hasta 16 ticks consecutivos con valor 1.
+El controlador admite `--pcsx2-capture-interval`. Es readback explícito y no
+se usa para medir FPS. Fixture con dos colores/reset/ticks 1 y 2 correcto;
+negativo que fuerza de nuevo 120 pierde la segunda captura y falla. Restaurado
+correcto. Las 19 pruebas Python de preparación/rechazo de opciones pasan.
+
+ABI 1 amplía exports con escritura directa y reset. El adaptador usa el índice
+legado 0 solo para A+D completo y conserva Q; PATH1/2/3 del juego usan 3/1/2.
+Parser y DLL GPU pasan con escritura directa durante un tag incompleto. Cola
+con regresión de copia/FIFO/presión/drenaje; sintaxis Windows correcta. Nuevas
+regresiones del runtime y compilación completa/juego pendientes en este commit.
+No hay medición de FPS ni corrección de animación/encuadre acreditada.
+
+### Recorrido runtime/DLL y entorno Windows (2026-10-12)
+
+`gow_gs_pcsx2_client_test` usa el frontend real del runtime, observador, cola,
+DLL y composición PCRTC. Dos patrones distintos separados por reset, entregados
+en fragmentos de 13 bytes y con escritura directa durante un tag incompleto:
+las dos imágenes 64x32 coinciden exactamente en sus 2.048 RGBA. Drena la cola y
+cierra el módulo sin fallos. Ejecutado localmente en Windows/DX11, no en CI GPU.
+
+El fixture configura el entorno con una ruta real que contiene acentos y una
+carpeta `capturas_ñ`. Reproduce el fallo de interpretar bytes ACP de `getenv`
+como UTF-8. Corregido a `_wgetenv` y paths UTF-16; recursos convertidos a UTF-8
+para el ABI. Negativo anterior código 1; positivo corregido código 0. No cambia
+la cadena 103: es una actualización de src/ sobre la compilación completa.
+
+### VSync y controles del juego con campo corregido (2026-10-12)
+
+El cliente 89ffb57 selecciona el campo con CSR.FIELD de la misma instantánea
+que recibe la DLL: `CSR.FIELD ? 0 : 1`, conforme al MTGS original. Pasar la
+paridad EE directamente, como en el cliente anterior, invertía esa convención.
+Regresión de cuatro entregas cliente/cola/DLL sin dispositivo correcta;
+negativo anterior compila/falla y restaurado pasa. Seis CTest Windows correctos
+y fixture runtime/DLL/DX11 de dos colores/reset, 2x2.048 RGBA exactos y cierre limpio.
+
+Compilación completa 103 y actualización de src/ verificadas. Dos controles
+compartidos de 420 s con campo corregido terminan al límite, sin fallo registrado
+del espejo; tarjetas privadas intactas. Inspector: 714/417 adquisiciones sin
+anomalías en las muestras registradas. Ráfaga de introducción: 15 pares de ticks
+coincidentes y un adquirido sin pareja dentro del cupo PCRTC. Ráfaga de HUD/NPCs:
+16 pares 2100..2115; OpenGL muestra mucha más niebla que DX11 y diferencias de
+visibilidad de NPCs. No hay paridad visual validada, ni se identifica todavía la
+causa entre fog, profundidad, mezcla o diferencia de prefijo de comandos.
+
+Conservar CPU/OpenGL y seguir ese contraste antes de cambiar el renderer principal.
+Estas ejecuciones activan dos renderers, hash y readbacks: no miden FPS. El espejo
+usa rutas DMA genéricas y rechaza hilos VU1/frente GS. Resultados completos y
+siguiente control en ESTADO.md; revisión y créditos en REVISION_URBAN_REIGN.md.
+
+### Runner 105 con VU1 compilada (2026-10-13)
+
+Controles síncrono y asíncrono compartidos de 420 s con el runner 105
+congelado, ambos hilos apagados, mismo módulo DX11 y tarjetas privadas.
+El primero ofrece 16 parejas 2100..2115 de introducción; el segundo, 15
+parejas 4000..4014 con HUD/Kratos/enemigos y un adquirido 3999 sin PCRTC del
+mismo tick dentro del cupo. Metadatos correlacionados e imágenes revisadas.
+La neblina OpenGL más intensa persiste. El tick coincidente dentro de la
+ejecución no acredita igual prefijo de comandos ni equivalencia de píxeles.
+
+El combinado de 105 completa otros 420 s, pero utiliza solo OpenGL: el espejo
+mantiene el rechazo de ambos hilos por coherencia de registros. Los tres
+controles, retornos de hash, estados finales y límites constan en ESTADO.md.
+No son benchmarks ni validan estabilidad prolongada o el encuadre de PS2.
+
+### Precisión declarada del espejo DX11 (2026-10-13)
+
+El módulo anterior heredaba `AccBlendLevel::Basic` de GSOptions. En un corpus
+procedural de 24 casos, ya con ZTE corregido, cuatro mezclas diferían un nivel
+frente a CPU/compute/hardware, incluidas dos sin FOG. Una DLL privada Maximum
+separada coincide en 24/24 con los tres backends sin cambiar su mezcla. La
+referencia Basic se conserva: sus diferencias no justifican por sí solas
+otra corrección del runtime.
+
+El módulo aislado fija ahora Maximum explícitamente; CMake admite
+`-DGOW_PCSX2_BLENDING=Basic` para repetir los controles anteriores y rechaza
+otros valores. Al crear GS declara su precisión en el registro. ABI 1 y el
+renderer del port se conservan. El control optativo
+`tools/render/probe_pipeline_reference.py` comprueba 24 celdas de 8×8:
+ZTE/ZTST, escritura Z y FOG seguido de mezcla. No verifica alpha framebuffer.
+
+Control de juego con la DLL Maximum privada y runner 106 congelado: 420,39 s
+por límite, tarjeta intacta, sin firmas buscadas de fallo; primer informe de
+estado 11 a 50,17 s y último 11 a 415,47 s. 16 parejas 4000..4015 con
+HUD/Kratos/enemigos, 16 RGBA distintos y metadatos adquiridos correlacionados.
+672 adquisiciones registradas sin regresiones, inconsistencias, retornos A–B–A
+o cambios de tamaño; distancia máxima de ticks 0.
+
+**La neblina más intensa de OpenGL persiste frente a Maximum**, junto con
+diferencias de líneas y poses. Mismo tick y ejecución no acreditan el mismo
+prefijo GIF: DX11 recibe el VSync en EE antes de callbacks/IRQ; OpenGL toma
+su solicitud de presentación en el bucle host. Seguir ese orden, composición,
+profundidad y pases posteriores. Este control usa dos renderers y readbacks;
+no demuestra FPS únicos, cierre normal, encuadre PS2 o estabilidad prolongada.
+
+### Contraste privado en la misma frontera (2026-10-13)
+
+Un segundo frontend/OpenGL recibe los mismos spans/reg/reset/VSync que la DLL
+DX11, bajo el mutex de la ABI, y captura antes del siguiente evento. Patrones
+24/24 y dos ciclos fragmentados correctos. Control de 600,405 s con runner 106
+sin cambiar, tarjeta intacta, estado 11 hasta el último informe y 16 parejas
+4000..4015: la neblina OpenGL persiste. El diagnóstico usa hardware en esa
+ráfaga y no acredita el prefijo de la imagen del host ni mide FPS. Datos,
+hashes, revisión y límites en ESTADO.md.
+
+Además de la historia de campos de DX11 Automatic, hay límites en alpha del
+espejo hardware: en 16 patrones de composición CPU/OpenGL coinciden entre sí,
+pero hardware y GSRendererSW original discrepan en varios casos. El software
+original pasa los 24 patrones de pipeline y 14 de FOG, aunque su fixture privado
+solo admite GIF y rechaza escrituras directas. No usar Maximum como prueba de
+exactitud de todo alpha ni cambiar el runtime a partir de una sola referencia.
+Seguir merge previo al desentrelazado y estado/pases de una ráfaga acotada.
+
+El control FOG completo detecta también una discrepancia hardware al variar
+FOG entre los dos sprites del lote: 16/28, frente a 28/28 de software original
+y CPU/OpenGL. Los 14 controles históricos solo observaban la mitad izquierda
+y siguen pasando con `--left-only`; ahora se comprueban ambas por defecto.
+El software restaura además una ráfaga Freeze/GIF/VSync sintética con sus
+cuatro imágenes idénticas a su ejecución fresca. El desacuerdo hardware no
+se debe al Freeze de ese patrón. No extrapolarlo aún al fondo del juego.
+
+### Merge y software original en la escena (2026-10-13)
+
+Otra DLL privada conserva el DX11 Maximum original y captura su merge antes
+del desentrelazado junto al shadow OpenGL de la misma frontera. Runner 106
+congelado, hilos apagados, control de 600,391 s terminado por límite y tarjeta
+intacta. Guarda Freeze original en 3999, con destinos de caché leídos a VRAM,
+y una ráfaga limitada de GIF/VSync hasta End 4015: 114.804.229 bytes,
+100.082 registros, sin escrituras directas. GSRendererSW original restaura
+y repite esos eventos: código 0, 17 imágenes 3999..4015. La historia inicial
+de desentrelazado no se serializa; no es otro renderer integrado del juego.
+
+Revisados 16 tríos en contactos y cuatro completos después de varios campos,
+el fondo del software original permanece cercano al merge hardware y OpenGL
+conserva más neblina/brillo. En la región de fondo de 4004, diferencia media
+OpenGL−software +31,03/+37,26/+32,57 RGB; media absoluta software−hardware
+0,49/0,50/0,45. Son descripciones locales, sin equivalencia de imágenes.
+En ese fondo de 4000, PCRTC actual y merge hardware tienen RGB idéntico:
+el desentrelazado posterior no explica allí el contraste con OpenGL.
+
+PMODE constante `0x8023` (ambos circuitos, MMOD=1, ALP=128, SLBG=0),
+SMODE2 `0x21fed1`, DISPFB1 `0x800000090d0` y DISPFB2 `0x90d0`.
+No adjudicar la escena a los desacuerdos sintéticos del espejo. El siguiente
+control compara un campo de backend del runtime en CPU/GPU con estado/VRAM
+propios, para separar frontend y rasterización. Hashes, límites y próximos
+pasos en ESTADO.md. CPU/DX11 originales preservados; sin corrección nueva de
+neblina, benchmark, cierre normal ni validación de estabilidad prolongada.
+
+### Campo de backend, alpha y límites de la referencia CPU (2026-10-13)
+
+Una captura privada 106 con Initial/Present/End contiene 78.181 dibujos de un
+campo, ninguno con FGE. El PCRTC lee FBP208, copiado de FBP0 heredado al inicio;
+su replay CPU de un solo campo conserva esa entrada GPU. Para separar ese
+efecto, una petición sintética lee FBP0 recién dibujado. No representa otra
+imagen presentada del juego ni autoriza comparar ejecuciones por tick.
+
+El RGB del fondo coincide entre CPU/GPU durante la geometría principal y
+diverge en los 64 triángulos tardíos que mezclan con alpha destino (ALPHA.C=Ad).
+Ese alpha ya difiere al preparar la máscara mediante CT24/Z16/CT16. La Z24
+de las regiones inspeccionadas permanece igual en esos controles. Prefijos,
+datos y límites en ESTADO.md; no equivalencia global ni causa única acreditada.
+
+Además, CPU 106 satura ALPHA con COLCLAMP=0, mientras software original y GPU
+envuelven el RGB. Cuatro patrones procedurales confirman los esperados;
+el espejo hardware falla los dos negativos y no sustituye la referencia
+software en esta ruta. El parche 107 de CPU corrige esa selección y tiene
+negativo 2/4/positivo 4/4; suite incremental completa 617/617 y 657/657 GPU.
+Aún requiere compilación obligatoria, CI y control funcional. La CPU más
+oscura antes de esa corrección no probaba
+que su máscara fuera fiel. No se modifica GLSL ni se declara resuelta la
+neblina de GPU. Referencias anteriores, capturas y runner 106 preservados.
+
+### Composición PCRTC progresiva: sonda reproducible (2026-10-14)
+
+`tools/render/probe_pcrtc_reference.py` registra32 patrones uniformes CT32,
+fuentes independientes FBP0/32 y salida64×64. Usa la ABI del módulo original,
+sin assets ni proceso del juego; guardar JSON y registros en una carpeta
+privada nueva. Requiere Windows, recursos originales locales y GPU libre.
+Ejecutar de forma secuencial, preferiblemente con GSRendererSW original:
+
+```powershell
+py -3 tools/render/probe_pcrtc_reference.py --module <DLL-original-SW> --resources <recursos-PCSX2>
+```
+
+La salida contiene identidad SHA-256 y EN/MMOD/SLBG/ALP/alpha/RGBA de cada
+caso. El software sigue usando el compositor DX11 original. En la sonda
+local109, el hardware original difiere del software en cuatro casos con
+alpha de framebuffer. El modelo UNORM ideal coincide con31/32 RGB y difiere
+un nivel rojo en ALP201; precisión de mezcla permitida por D3D11, sección17.5,
+no una tolerancia global de escena. Fuente y resultados en ESTADO.md.
+El control es progresivo y uniforme: no acredita entrelazado, rectángulos
+distintos, realimentación, imagen adquirida por el host ni estabilidad.
+
+### Compositor109 y controles del título/barco (2026-10-14)
+
+El parche109 mantiene RC1 mezclado con BGCOLOR aunque RC2 esté apagado,
+y redondea la suma ponderada UNORM en CPU/GLSL. Full109 terminado0,
+fuente3fb7148, VU1 compilada/501 micromemorias privadas y13 archivos enlazados.
+Las suites incrementales622/622 y666/666GPU y los negativos/positivos de
+PCRTC están cerrados; la identidad completa y los límites están en ESTADO.md.
+
+El título se contrastó dentro de una misma ejecución con merge DX11,
+shadow109, software original restaurado y adquirido: las cuatro fuentes
+revisadas muestran «New Game». La captura del script de menú descarga
+VRAM actual con CRTC latched; no es la textura adquirida por la ventana.
+Sus muestras sin opciones no acreditan una regresión del título.
+
+En la escena109, Freeze3999..End4015 y el mismo GIF/VSync producen17campos
+SW restaurados. Los16 tríos revisados y los cuartetos completos4004/4015
+contienen HUD/Kratos/enemigos. El fondo queda cercano al software original;
+persisten líneas/pose distintas y no se conserva historia inicial de campos.
+La imagen adquirida no es idéntica al shadow por compartir tick y aún no
+acredita su frontera GIF. No declarar paridad global, una mejora de FPS,
+encuadre PS2 o estabilidad prolongada a partir de estas capturas.
+
+### Snapshot original y modo efectivo: extensión optativa de ABI1
+
+`gow_gs_read_video_info` devuelve el modo reconocido, entrelazado efectivo,
+InterlaceMode, PCRTCAntiBlur y SMODE1/SYNCV/SMODE2 con la secuencia del módulo.
+`video_mode` usa el enum GSVideoMode de la fuente fijada; VESA no equivale
+a confirmar el modo físico de PS2 si faltan registros de temporización.
+
+`gow_gs_read_snapshot` llama a `GSRenderer::SaveSnapshotToMemory` original,
+con Stretch0/Auto1/4:3=2/16:9=3. Primero llamar con nullptr/capacidad0:
+BUFFER_SMALL entrega dimensiones y guarda el snapshot. La lectura posterior
+requiere el mismo handle, secuencia, aspecto y ventana. VSync/reset/cierre
+invalidan la caché; no recalcula otra captura silenciosamente. Ventana0/0
+conserva resolución interna, con expansión de aspecto si se solicita; ambas
+dimensiones deben ser cero o estar en1..2048. Se aplican filtro de transparencia,
+reescalado y bandas originales, por lo que no sustituye el output crudo.
+Los structs/calls anteriores conservan ABI1. Comprobar los nuevos exports
+al cargar DLL antiguas; el cliente del juego sigue usando la interfaz previa.
+
+Control sin assets, Windows/GPU libre, secuencial:
+
+```powershell
+py -3 tools/render/probe_snapshot_reference.py --module <DLL-nueva> --resources <recursos-PCSX2> --output <carpeta-nueva-privada>
+```
+
+Sin `--output` imprime JSON sin PNG y no requiere Pillow. Produce16 casos
+uniformes de aspecto/ventana y modo efectivo; no mide FPS ni establece el
+encuadre del juego. Validación local y límites en ESTADO.md. En la matriz
+de filas se comprobó que PCRTCAntiBlur cambia offsets de la referencia:
+conservar la configuración junto al resultado, además de GIF/VRAM/VSync.

@@ -1,0 +1,177 @@
+# GOW-Port: ejecutar los scripts reales con procesos simulados; nunca arrancar ni detener el juego.
+$ErrorActionPreference = 'Stop'
+$testRepo = Split-Path -Parent $PSScriptRoot
+$testTempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+$testRoot = Join-Path $testTempRoot ('gow-perf-guard-' + [Guid]::NewGuid().ToString('N'))
+$testPrevious = @{}
+foreach ($name in @('GOW_WORK','GOW_ELF','GOW_PERF_DIAG','GOW_PAD_TEST','GOW_PAD_TEST_NO_CAPTURE','PS2X_GS_GPU_PROF','PS2X_GS_DIRECT_PRESENT','GOW_GS_REPLAY_STATE','GOW_CAMERA_DIAG',
+                    'PS2X_VU1_HILO','PS2X_GS_FRENTE','GOW_GS_FINISH_ASINCRONO','PS2X_GS_HW_LOG')) {
+    $testPrevious[$name] = [Environment]::GetEnvironmentVariable($name,'Process')
+}
+function Assert-Guard([bool]$condition,[string]$message) {
+    if (-not $condition) { throw $message }
+}
+
+# Los mocks solo sustituyen procesos. Rutas, redirecciones, scripts y restauracion del entorno son reales.
+function global:Get-Process {
+    param([string[]]$Name,[string]$ErrorAction)
+    $global:GowPerfGuardFixture.snapshots++
+    if ($global:GowPerfGuardFixture.scenario -eq 'startup') {
+        return [pscustomobject]@{Id=777;ProcessName='cl'}
+    }
+    if ($global:GowPerfGuardFixture.snapshots -eq 1) { return }
+    $global:GowPerfGuardFixture.process
+    if ($global:GowPerfGuardFixture.snapshots -ge 3 -and $global:GowPerfGuardFixture.scenario -ne 'quiet') {
+        [pscustomobject]@{Id=777;ProcessName=$global:GowPerfGuardFixture.scenario}
+    }
+}
+function global:Start-Process {
+    param($FilePath,$ArgumentList,$WorkingDirectory,$RedirectStandardOutput,$RedirectStandardError,
+          [switch]$PassThru,$WindowStyle)
+    $global:GowPerfGuardFixture.starts++
+    $global:GowPerfGuardFixture.actualPresentation = $env:PS2X_GS_DIRECT_PRESENT
+    $global:GowPerfGuardFixture.actualCaptureState = $env:GOW_GS_REPLAY_STATE
+    $global:GowPerfGuardFixture.actualCameraDiag = $env:GOW_CAMERA_DIAG
+    $global:GowPerfGuardFixture.actualVu1Thread = $env:PS2X_VU1_HILO
+    $global:GowPerfGuardFixture.actualGsFrontThread = $env:PS2X_GS_FRENTE
+    $global:GowPerfGuardFixture.actualFinishAsync = $env:GOW_GS_FINISH_ASINCRONO
+    $global:GowPerfGuardFixture.actualGpuProfile = $env:PS2X_GS_GPU_PROF
+    $global:GowPerfGuardFixture.actualHardwareLog = $env:PS2X_GS_HW_LOG
+    Set-Content -LiteralPath $RedirectStandardOutput -Value 'proceso simulado'
+    Set-Content -LiteralPath $RedirectStandardError -Value '[gow-perf] t=20.00 window=5.00 guest_flip_hz=10.00'
+    $global:GowPerfGuardFixture.process
+}
+function global:Stop-Process {
+    param([int]$Id,[switch]$Force,[string]$ErrorAction)
+    Assert-Guard ($Id -eq 4242) 'Se intento detener un proceso ajeno'
+    $global:GowPerfGuardFixture.stopped.Add($Id)
+    $global:GowPerfGuardFixture.process.HasExited = $true
+}
+try {
+    New-Item -ItemType Directory -Path (Join-Path $testRoot 'scripts') -Force | Out-Null
+    foreach ($script in @('common.ps1','ejecutar.ps1','probar_rendimiento.ps1')) {
+        Copy-Item -LiteralPath (Join-Path $testRepo "scripts/$script") -Destination (Join-Path $testRoot 'scripts')
+    }
+    $env:GOW_WORK = Join-Path $testRoot 'work'
+    $env:GOW_ELF = Join-Path $testRoot 'SCUS_973.99'
+    $env:GOW_PERF_DIAG = 'valor_previo'
+    $env:PS2X_GS_GPU_PROF = 'diagnostico_previo'
+    $env:PS2X_GS_DIRECT_PRESENT = '1'
+    $env:GOW_GS_REPLAY_STATE = '4'
+    $env:GOW_CAMERA_DIAG = '1'
+    $env:PS2X_VU1_HILO = '1'
+    $env:PS2X_GS_FRENTE = '1'
+    $env:GOW_GS_FINISH_ASINCRONO = '1'
+    $env:PS2X_GS_HW_LOG = '1'
+    New-Item -ItemType Directory -Path (Join-Path $env:GOW_WORK 'PS2Recomp/out/build') -Force | Out-Null
+    New-Item -ItemType File -Path $env:GOW_ELF | Out-Null
+    New-Item -ItemType File -Path (Join-Path $env:GOW_WORK 'PS2Recomp/out/build/ps2EntryRunner.exe') | Out-Null
+    $captureFixture = Join-Path $env:GOW_WORK 'PS2Recomp/out/build/gow_pad_test_preserve.ppm'
+    Set-Content -LiteralPath $captureFixture -Value 'captura preexistente'
+    foreach ($scenario in @('startup','cl','ps2EntryRunner','quiet')) {
+        $process = [pscustomobject]@{Id=4242;ProcessName='ps2EntryRunner';HasExited=$false;waits=0}
+        $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
+            param($milliseconds)
+            if ($null -eq $milliseconds) { $this.HasExited=$true;return }
+            $this.waits++
+            if ($this.waits -ge 2) { $this.HasExited=$true;return $true }
+            return $false
+        }
+        $global:GowPerfGuardFixture = @{
+            scenario=$scenario;process=$process;starts=0;snapshots=0
+            stopped=[Collections.Generic.List[int]]::new()
+        }
+        $caught = $null
+        try { & (Join-Path $testRoot 'scripts/probar_rendimiento.ps1') -Segundos 5 -Etiqueta $scenario }
+        catch { $caught = $_ }
+        Assert-Guard ($env:GOW_PERF_DIAG -eq 'valor_previo' -and $env:PS2X_GS_GPU_PROF -eq 'diagnostico_previo') 'No se restauro el entorno'
+        Assert-Guard ($env:PS2X_GS_DIRECT_PRESENT -eq '1') 'No se restauro la presentacion previa'
+        Assert-Guard ($env:GOW_GS_REPLAY_STATE -eq '4') 'No se restauro el estado de captura previo'
+        Assert-Guard ($env:GOW_CAMERA_DIAG -eq '1') 'No se restauro el diagnostico de camara'
+        Assert-Guard (Test-Path -LiteralPath $captureFixture) 'El perfil sin capturas borro una captura existente'
+        Assert-Guard ($env:PS2X_VU1_HILO -eq '1' -and $env:PS2X_GS_FRENTE -eq '1') 'No se restauraron los hilos previos'
+        Assert-Guard ($env:GOW_GS_FINISH_ASINCRONO -eq '1') 'No se restauro FINISH asincrono previo'
+        Assert-Guard ($env:PS2X_GS_HW_LOG -eq '1') 'No se restauro el registro de hardware previo'
+        if ($global:GowPerfGuardFixture.starts -gt 0) {
+            Assert-Guard ($global:GowPerfGuardFixture.actualPresentation -eq '0') 'La presentacion RAM heredo el entorno anterior'
+            Assert-Guard ([string]::IsNullOrEmpty($global:GowPerfGuardFixture.actualCaptureState)) 'El perfil heredo el estado de captura'
+            Assert-Guard ([string]::IsNullOrEmpty($global:GowPerfGuardFixture.actualCameraDiag)) 'El perfil heredo el diagnostico de camara'
+            Assert-Guard ($global:GowPerfGuardFixture.actualVu1Thread -eq '0' -and $global:GowPerfGuardFixture.actualGsFrontThread -eq '0') 'El perfil base heredo hilos activos'
+            Assert-Guard ($global:GowPerfGuardFixture.actualFinishAsync -eq '0') 'El perfil base heredo FINISH asincrono'
+            Assert-Guard ($global:GowPerfGuardFixture.actualGpuProfile -eq '0' -and $global:GowPerfGuardFixture.actualHardwareLog -eq '0') 'El perfil base heredo diagnosticos GPU'
+        }
+        $destination = Join-Path $testRoot "logs/perf_$scenario.log"
+        if ($scenario -eq 'startup') {
+            Assert-Guard ($null -ne $caught -and $global:GowPerfGuardFixture.starts -eq 0) 'No se rechazo la compilacion previa'
+            Assert-Guard (-not (Test-Path -LiteralPath $destination)) 'Se guardo un perfil que no empezo'
+        }
+        elseif ($scenario -eq 'quiet') {
+            Assert-Guard ($null -eq $caught -and $global:GowPerfGuardFixture.starts -eq 1) 'El PID propio invalido la pasada limpia'
+            Assert-Guard ($global:GowPerfGuardFixture.stopped.Count -eq 0) 'Se detuvo una partida ya terminada'
+            Assert-Guard ((Get-Content -LiteralPath $destination -Raw) -notmatch '\[gow-perf:invalid\]') 'Se marco la pasada limpia'
+        }
+        else {
+            Assert-Guard ($null -ne $caught -and $global:GowPerfGuardFixture.starts -eq 1) 'No se rechazo la carga que empezo durante el perfil'
+            Assert-Guard ($global:GowPerfGuardFixture.stopped.Count -eq 1 -and $global:GowPerfGuardFixture.stopped[0] -eq 4242) 'No se detuvo exclusivamente la instancia propia'
+            Assert-Guard ((Get-Content -LiteralPath $destination -Raw) -match '\[gow-perf:invalid\]') 'Falta la marca en el perfil conservado'
+        }
+        Write-Host "Control de vigilancia: $scenario OK"
+    }
+    # GOW-Port: la opcion compartida tambien debe reemplazar y restaurar el modo heredado.
+    $env:PS2X_GS_DIRECT_PRESENT = '0'
+    $global:GowPerfGuardFixture.process.HasExited = $false
+    $global:GowPerfGuardFixture.process.waits = 0
+    $global:GowPerfGuardFixture.snapshots = 0
+    & (Join-Path $testRoot 'scripts/probar_rendimiento.ps1') -Segundos 5 -Renderer opengl -Presentacion compartida `
+        -Vu1Hilo -GsFrente -FinishAsync -GpuProfile -HardwareLog -Etiqueta shared
+    Assert-Guard ($global:GowPerfGuardFixture.actualPresentation -eq '1') 'La presentacion compartida heredo RAM'
+    Assert-Guard ($global:GowPerfGuardFixture.actualVu1Thread -eq '1' -and $global:GowPerfGuardFixture.actualGsFrontThread -eq '1') 'No se activaron los hilos solicitados'
+    Assert-Guard ($global:GowPerfGuardFixture.actualFinishAsync -eq '1') 'No se activo FINISH asincrono solicitado'
+    Assert-Guard ($global:GowPerfGuardFixture.actualGpuProfile -eq '1' -and $global:GowPerfGuardFixture.actualHardwareLog -eq '1') 'No se activaron los diagnosticos GPU solicitados'
+    Assert-Guard ($env:PS2X_GS_DIRECT_PRESENT -eq '0') 'No se restauro RAM tras la opcion compartida'
+    Assert-Guard ($env:PS2X_VU1_HILO -eq '1' -and $env:PS2X_GS_FRENTE -eq '1') 'No se restauraron los hilos tras la opcion compartida'
+    Assert-Guard ($env:GOW_GS_FINISH_ASINCRONO -eq '1') 'No se restauro FINISH tras la opcion compartida'
+    Assert-Guard ($env:PS2X_GS_GPU_PROF -eq 'diagnostico_previo' -and $env:PS2X_GS_HW_LOG -eq '1') 'No se restauraron los diagnosticos GPU tras la opcion compartida'
+    $startsBefore = $global:GowPerfGuardFixture.starts
+    $caught = $null
+    try { & (Join-Path $testRoot 'scripts/probar_rendimiento.ps1') -GsFrente -Renderer opengl }
+    catch { $caught = $_ }
+    Assert-Guard ($null -ne $caught -and $global:GowPerfGuardFixture.starts -eq $startsBefore) 'Se acepto GS frontal sin hilo VU1'
+    foreach ($duration in @(0, -1)) {
+        $caught = $null
+        try { & (Join-Path $testRoot 'scripts/probar_rendimiento.ps1') -Segundos $duration }
+        catch { $caught = $_ }
+        Assert-Guard ($null -ne $caught -and $global:GowPerfGuardFixture.starts -eq $startsBefore) "Se acepto una duracion invalida: $duration"
+    }
+    $startsBefore = $global:GowPerfGuardFixture.starts
+    $caught = $null
+    try { & (Join-Path $testRoot 'scripts/probar_rendimiento.ps1') -Renderer cpu -Presentacion compartida }
+    catch { $caught = $_ }
+    Assert-Guard ($null -ne $caught -and $global:GowPerfGuardFixture.starts -eq $startsBefore) 'Se acepto presentacion compartida con CPU'
+    Write-Host 'Controles de presentacion: RAM, compartida y CPU incompatible OK'
+
+    # GOW-Port: las pruebas con captura deben seguir descartando archivos antiguos.
+    $staleCapture = Join-Path $env:GOW_WORK 'PS2Recomp/out/build/gow_pad_test_stale.ppm'
+    Set-Content -LiteralPath $staleCapture -Value 'captura antigua'
+    $env:GOW_PAD_TEST = '1'
+    Remove-Item Env:GOW_PAD_TEST_NO_CAPTURE -ErrorAction SilentlyContinue
+    $global:GowPerfGuardFixture.process.HasExited = $false
+    $global:GowPerfGuardFixture.process.waits = 0
+    & (Join-Path $testRoot 'scripts/ejecutar.ps1') -Segundos 5
+    Assert-Guard (-not (Test-Path -LiteralPath $staleCapture)) 'La prueba con capturas no limpio la captura antigua'
+    Write-Host 'Limpieza de capturas para pruebas con captura habilitada OK'
+}
+finally {
+    foreach ($name in $testPrevious.Keys) {
+        if ($null -eq $testPrevious[$name]) { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
+        else { [Environment]::SetEnvironmentVariable($name,$testPrevious[$name],'Process') }
+    }
+    Remove-Item Function:Get-Process,Function:Start-Process,Function:Stop-Process -ErrorAction SilentlyContinue
+    Remove-Variable GowPerfGuardFixture -Scope Global -ErrorAction SilentlyContinue
+    # Verificar el destino absoluto antes de limpiar unicamente el directorio temporal creado arriba.
+    $resolved = [IO.Path]::GetFullPath($testRoot)
+    $prefix = $testTempRoot.TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    if (-not $resolved.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) -or
+        (Split-Path -Leaf $resolved) -notmatch '^gow-perf-guard-[a-f0-9]{32}$') { throw 'Destino de limpieza no valido' }
+    if (Test-Path -LiteralPath $resolved) { Remove-Item -LiteralPath $resolved -Recurse -Force }
+}
