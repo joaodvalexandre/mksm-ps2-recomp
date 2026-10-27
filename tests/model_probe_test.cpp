@@ -1,4 +1,4 @@
-// GOW-Port: regresión de la transición y lecturas acotadas sin juego.
+// GOW-Port: regression of the transition and bounded reads without the game.
 #include "../src/gow_model_probe.h"
 #include <cstdio>
 #include <vector>
@@ -12,7 +12,7 @@ static bool test() {
     if(phases.take(3) || phases.take(0) || phases.take(4)!=1 || phases.take(11)!=1) return false;
     Timeline timeline;
     const auto t=Timeline::Clock::time_point{};
-    // Llenar la tabla del menú no impide registrar nuevos modelos en la intro.
+    // Filling the menu table does not prevent registering new models in the intro.
     for(uint32_t i=1;i<=64;++i) if(timeline.take(i,1,3,t)!=1) return false;
     if(timeline.take(65,1,3,t) || timeline.take(65,1,4,t)!=1) return false;
     if(timeline.take(65|0x80000000u,1,4,t+std::chrono::seconds(1))) return false;
@@ -57,7 +57,7 @@ static bool test() {
     put<uint32_t>(ram,skeleton+0x8c,0); if(capture(ram.data(),ram.size(),object).validRoot) return false;
     put<uint32_t>(ram,skeleton+0x60,0); if(capture(ram.data(),ram.size(),object).validRoot) return false;
     put<uint32_t>(ram,object+0x104,0); if(capture(ram.data(),ram.size(),object).validSkeleton) return false;
-    // La paleta completa alcanza las articulaciones finales y conserva sus bits crudos.
+    // The full palette reaches the final joints and keeps its raw bits.
     ram.resize(joints+256*64);
     for(uint32_t i=0;i<256;++i) for(size_t k=0;k<16;++k)
         put<uint32_t>(ram,joints+i*64+k*4,0x7fc00000u+i*16+uint32_t(k));

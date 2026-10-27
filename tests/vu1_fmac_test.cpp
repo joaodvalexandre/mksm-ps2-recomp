@@ -1,7 +1,7 @@
-// GOW-Port: compara el código compilado de VU1 con el intérprete en todas las operaciones FMAC (cada
-// variante de fuente, máscaras DEST y operaciones cruzadas) con valores límite: ceros con signo, subnormales,
-// FLT_MIN, FLT_MAX, Inf/NaN y valores aleatorios. Cada programa es la FMAC probada, otra FMAC que pisa sus
-// flags (flags muertos en el bloque) y el final del programa. Sin microcódigo del juego.
+// GOW-Port: compares the compiled VU1 code with the interpreter in every FMAC operation (each
+// source variant, DEST masks and cross operations) with boundary values: signed zeros, subnormals,
+// FLT_MIN, FLT_MAX, Inf/NaN and random values. Each program is the tested FMAC, another FMAC that overwrites its
+// flags (dead flags in the block) and the end of the program. No game microcode.
 // Uso: vu1_fmac_test --write <micromemoria.bin>  |  vu1_fmac_test [ensayos]
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu1.h"
@@ -69,7 +69,7 @@ std::vector<uint8_t> program()
     {
         const std::array<std::array<uint32_t, 2>, kPairsPerProgram> pairs{{
             {kLowerNop, list[k]},
-            {kLowerNop, upper(0x28u, 0xFu, 5u, 4u, 6u)}, // ADD vf6, vf4, vf5: pisa los flags de la anterior
+            {kLowerNop, upper(0x28u, 0xFu, 5u, 4u, 6u)}, // ADD vf6, vf4, vf5: overwrites the flags of the previous one
             {kLowerNop, kNop},
             {kLowerNop, kNop},
             {kLowerNop, kNop},
@@ -108,7 +108,7 @@ float pick(std::mt19937 &rng)
     case 2:
         return std::uniform_real_distribution<float>(-4.0f, 4.0f)(rng);
     default:
-        return bitsToFloat(static_cast<uint32_t>(rng())); // cualquier patrón de bits
+        return bitsToFloat(static_cast<uint32_t>(rng())); // any bit pattern
     }
 }
 
@@ -204,11 +204,11 @@ int main(int argc, char **argv)
                 ++cases;
             }
     }
-    std::printf("VU1 FMAC: %llu casos exactos (%zu instrucciones, %u ensayos con valores límite)\n", cases, list.size(),
+    std::printf("VU1 FMAC: %llu exact cases (%zu instructions, %u trials with boundary values)\n", cases, list.size(),
                 trials);
 #if GOW_FMAC_MXCSR
-    // GOW-Port: FTZ/DAZ puede dar cero redondeado sin cancelación exacta. La FMAC
-    // posterior pisa Z/S, pero el underflow U debe persistir en status (bit 8).
+    // GOW-Port: FTZ/DAZ can give a rounded zero without exact cancellation. The following
+    // FMAC overwrites Z/S, but the U underflow must persist in status (bit 8).
     _mm_setcsr(_mm_getcsr() | 0x8040u);
     unsigned ftzCases = 0;
     for (uint32_t sign1 : {0u, 0x80000000u})

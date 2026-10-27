@@ -1,4 +1,4 @@
-// GOW-Port: control de la DLL por su ABI, sin acceso a sus globals C++.
+// GOW-Port: check of the DLL through its ABI, without access to its C++ globals.
 #include "../tools/render/pcsx2_probe/module_api.h"
 #include "GS/GSRegs.h"
 #include "common/RedtapeWindows.h"
@@ -28,13 +28,13 @@ int main(int argc,char** argv){
         ok&=require(queryStream() && cursor.epoch==1 && cursor.input_events==0 && cursor.input_gif_bytes==0 &&
             cursor.last_vsync_events==0 && cursor.last_vsync_sequence==0 && cursor.last_vsync_field==0 &&
             (cursor.flags&GOW_GS_STREAM_HAS_VSYNC)==0 && (cursor.flags&GOW_GS_STREAM_INPUT_QWORD_ALIGNED)!=0 &&
-            cursor.reserved==0,"frontera inicial vacía y alineada");
+            cursor.reserved==0,"empty, aligned initial boundary");
         const auto initial=cursor;
         ok&=require(read_stream_info(handle,nullptr)==GOW_GS_BAD_ARGUMENT,"rechazar cursor nulo");
         cursor.size=sizeof(cursor)-1;
         const auto invalid=cursor;
         ok&=require(read_stream_info(handle,&cursor)==GOW_GS_BAD_ARGUMENT &&
-            std::memcmp(&cursor,&invalid,sizeof(cursor))==0,"tamaño inválido no escribe cursor");
+            std::memcmp(&cursor,&invalid,sizeof(cursor))==0,"an invalid size does not write the cursor");
         cursor=initial;
         uint32_t cursorThreadStatus=0;
         std::thread wrongCursor([&]{cursorThreadStatus=read_stream_info(handle,&cursor);});wrongCursor.join();
@@ -79,7 +79,7 @@ int main(int argc,char** argv){
         ok&=require(read_output(handle,reinterpret_cast<uint8_t*>(pixels.data()),8192,&info)==GOW_GS_OK,"readback explicito");
         for(unsigned i=0;i<2048;++i)ok&=pixels[i]==(color|0xff000000);
         ok&=require(pixels.back()==0xdeadbeef,"no escribir fuera del frame");
-        // GOW-Port: API original de snapshot y modo efectivo, separada de la textura cruda.
+        // GOW-Port: original snapshot and effective mode API, separate from the raw texture.
         GowGsVideoInfo video{};video.size=sizeof(video);
         ok&=require(read_video_info(handle,&video)==GOW_GS_OK && video.sequence==1 &&
             video.smode1==regs.SMODE1.U64 && video.syncv==regs.SYNCV.U64 && video.smode2==regs.SMODE2.U64 &&
@@ -93,7 +93,7 @@ int main(int argc,char** argv){
             const uint32_t height=aspect==GOW_GS_ASPECT_STRETCH?32:(aspect==GOW_GS_ASPECT_16_9?36:48);
             ok&=require(read_snapshot(handle,aspect,0,0,nullptr,0,&shot)==GOW_GS_BUFFER_SMALL &&
                 shot.width==64 && shot.height==height && shot.required_bytes==64u*height*4 && shot.sequence==1,
-                "proporciones originales en resolución interna");
+                "original proportions at internal resolution");
             std::vector<uint32_t> rgba(64u*height+1,0xdeadbeef);
             ok&=require(read_snapshot(handle,aspect,0,0,reinterpret_cast<uint8_t*>(rgba.data()),shot.required_bytes-1,&shot)==
                 GOW_GS_BUFFER_SMALL && rgba[0]==0xdeadbeef,"snapshot no escribe buffer insuficiente");
@@ -104,7 +104,7 @@ int main(int argc,char** argv){
         }
         GowGsFrameInfo shot{sizeof(shot),0,0,0,0,0};
         ok&=require(read_snapshot(handle,GOW_GS_ASPECT_AUTO,80,80,nullptr,0,&shot)==GOW_GS_BUFFER_SMALL &&
-            shot.width==80 && shot.height==80,"snapshot conserva tamaño de ventana");
+            shot.width==80 && shot.height==80,"snapshot keeps the window size");
         std::vector<uint32_t> padded(80u*80u);
         ok&=require(read_snapshot(handle,GOW_GS_ASPECT_AUTO,80,80,reinterpret_cast<uint8_t*>(padded.data()),padded.size()*4,&shot)==GOW_GS_OK,
             "snapshot con bandas originales");
@@ -112,12 +112,12 @@ int main(int argc,char** argv){
             ok&=padded[y*80+x]==(y>=10 && y<70?(color|0xff000000):0u);
         ok&=require(read_snapshot(handle,4,0,0,nullptr,0,&shot)==GOW_GS_BAD_ARGUMENT &&
             read_snapshot(handle,0,80,0,nullptr,0,&shot)==GOW_GS_BAD_ARGUMENT &&
-            read_snapshot(handle,0,2049,80,nullptr,0,&shot)==GOW_GS_BAD_ARGUMENT,"rechazar parámetros de snapshot");
+            read_snapshot(handle,0,2049,80,nullptr,0,&shot)==GOW_GS_BAD_ARGUMENT,"reject snapshot parameters");
         ok&=require(read_output(handle,reinterpret_cast<uint8_t*>(pixels.data()),8192,&info)==GOW_GS_OK,
             "snapshots conservan textura original");
         for(unsigned i=0;i<2048;++i)ok&=pixels[i]==(color|0xff000000);
-        // GOW-Port: un VSync no obliga a terminar el transporte ni las llamadas siguientes
-        // pertenecen a su prefijo. Un tag de cero loops sigue fragmentado entre VSync.
+        // GOW-Port: a VSync does not force the transport to finish nor do the following calls
+        // belong to its prefix. A zero-loop tag stays fragmented across VSync.
         std::array<uint8_t,16> emptyTag{};emptyTag[1]=0x80;
         ok&=require(submit(handle,1,emptyTag.data(),1)==GOW_GS_OK &&
             write_register(handle,0x3d,0)==GOW_GS_OK && queryStream() &&
@@ -129,7 +129,7 @@ int main(int argc,char** argv){
         for(unsigned i=0;i<2048;++i)ok&=pixels[i]==(color|0xff000000);
         ok&=require(submit(handle,3,nullptr,0)==GOW_GS_OK && queryStream() &&
             cursor.input_events==firstEvents+3 && cursor.input_gif_bytes==words.size()*8+1,
-            "submit vacío aceptado cuenta evento sin bytes");
+            "an accepted empty submit counts an event with no bytes");
         ok&=require(vsync(handle,1,reinterpret_cast<const uint8_t*>(&regs),sizeof(regs))==GOW_GS_OK &&
             read_snapshot(handle,GOW_GS_ASPECT_AUTO,80,80,reinterpret_cast<uint8_t*>(padded.data()),padded.size()*4,&shot)==GOW_GS_BAD_ARGUMENT,
             "VSync invalida snapshot antiguo");
@@ -141,7 +141,7 @@ int main(int argc,char** argv){
         ok&=require(submit(handle,1,emptyTag.data()+1,15)==GOW_GS_OK && queryStream() &&
             cursor.input_events==firstEvents+5 && cursor.input_gif_bytes==words.size()*8+16 &&
             cursor.last_vsync_events==firstEvents+4 && cursor.flags==7,
-            "completar fragmento cambia sólo el cursor de entrada");
+            "completing a fragment changes only the input cursor");
         const auto accepted=cursor;
         ok&=require(vsync(handle,2,reinterpret_cast<const uint8_t*>(&regs),sizeof(regs))==GOW_GS_BAD_ARGUMENT &&
             submit(handle,4,nullptr,0)==GOW_GS_BAD_ARGUMENT && write_register(handle,0x100,0)==GOW_GS_BAD_ARGUMENT &&
@@ -153,7 +153,7 @@ int main(int argc,char** argv){
         const std::array<uint64_t,2> pendingPayload{0,0x7f};
         ok&=require(submit(handle,2,reinterpret_cast<const uint8_t*>(pendingTag.data()),16)==GOW_GS_OK &&
             queryStream() && (cursor.flags&GOW_GS_STREAM_INPUT_QWORD_ALIGNED)!=0,
-            "alineación del transporte no exige fin del tag GIF");
+            "transport alignment does not require the end of the GIF tag");
         ok&=require(submit(handle,2,reinterpret_cast<const uint8_t*>(pendingPayload.data()),7)==GOW_GS_OK &&
             queryStream() && (cursor.flags&GOW_GS_STREAM_INPUT_QWORD_ALIGNED)==0,
             "fragmento pendiente antes del reset");
@@ -166,7 +166,7 @@ int main(int argc,char** argv){
         ok&=require(vsync(handle,0,reinterpret_cast<const uint8_t*>(&regs),sizeof(regs))==GOW_GS_OK &&
             vsync(handle,1,reinterpret_cast<const uint8_t*>(&regs),sizeof(regs))==GOW_GS_OK &&
             read_snapshot(handle,GOW_GS_ASPECT_AUTO,80,80,reinterpret_cast<uint8_t*>(padded.data()),padded.size()*4,&shot)==GOW_GS_BAD_ARGUMENT,
-            "reset/VSync no reutilizan caché anterior aunque vuelva la secuencia");
+            "reset/VSync do not reuse the previous cache even if the sequence returns");
         ok&=require(destroy(handle)==GOW_GS_OK && destroy(handle)==GOW_GS_BAD_HANDLE,"cierre y handle invalidado");
         old=handle;
     }

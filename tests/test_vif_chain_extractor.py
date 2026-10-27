@@ -1,4 +1,4 @@
-"""Pruebas sintéticas de selección DMA; no usan archivos ni paquetes del juego."""
+"""Synthetic DMA selection tests; they use no game files or packets."""
 import importlib.util
 from pathlib import Path
 import struct
@@ -6,8 +6,8 @@ import unittest
 from unittest.mock import patch
 
 
-RUTA = Path(__file__).resolve().parents[1] / 'tools' / 'render' / 'extraer_cadena_vif.py'
-SPEC = importlib.util.spec_from_file_location('extraer_cadena_vif', RUTA)
+RUTA = Path(__file__).resolve().parents[1] / 'tools' / 'render' / 'extract_vif_chain.py'
+SPEC = importlib.util.spec_from_file_location('extract_vif_chain', RUTA)
 extractor = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(extractor)
 
@@ -36,7 +36,7 @@ class SeleccionCadenaTests(unittest.TestCase):
         self.assertIn('0x100 -> END 0x100', texto)
         self.assertIn('0x200 -> END 0x200', texto)
         self.assertIn('--inicio', texto)
-        self.assertIn('no demuestra', texto)
+        self.assertIn('does not prove', texto)
 
     def test_eleccion_explicita_resuelve_ambiguedad(self):
         self.etiqueta(0x100)
@@ -48,7 +48,7 @@ class SeleccionCadenaTests(unittest.TestCase):
         self.assertEqual(extractor.seleccionar_cadena(self.ee, inicio=0x300), (0x300, 0x300, 1))
 
     def test_ninguna_cabecera_valida(self):
-        with self.assertRaisesRegex(ValueError, 'Ninguna cabecera'):
+        with self.assertRaisesRegex(ValueError, 'No frame header'):
             extractor.seleccionar_cadena(self.ee)
 
     def test_cabecera_explicita_invalida_no_recurre_a_otra(self):
@@ -67,7 +67,7 @@ class SeleccionCadenaTests(unittest.TestCase):
         self.etiqueta(0x100, tipo=2, destino=0x300)
         self.etiqueta(0x200, tipo=2, destino=0x300)
         self.etiqueta(0x300)
-        with self.assertRaisesRegex(ValueError, 'Selección ambigua'):
+        with self.assertRaisesRegex(ValueError, 'Ambiguous selection'):
             extractor.seleccionar_cadena(self.ee, fin=0x300)
         self.assertEqual(extractor.seleccionar_cadena(self.ee, inicio=0x200, fin=0x300),
                          (0x200, 0x300, 2))
@@ -89,7 +89,7 @@ class SeleccionCadenaTests(unittest.TestCase):
         self.assertEqual(extractor.recorrer(self.ee, 0x100, limite=3), (None, 3))
 
     def test_aplanar_conserva_tte_ref_call_y_ret(self):
-        # CALL -> REF -> RET -> END, con las cargas y TTE distintos en cada etiqueta.
+        # CALL -> REF -> RET -> END, with different payloads and TTE in each tag.
         self.etiqueta(0x100, tipo=5, destino=0x200, qwc=1, tte=0x1111)
         self.ee[0x110:0x120] = b'A' * 16
         self.etiqueta(0x120, tte=0x4444)

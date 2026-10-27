@@ -19,7 +19,7 @@ class Connection:
         self.sent.extend(data)
 
     def recv(self, size):
-        # Una cabecera y un valor pueden llegar en fragmentos de TCP separados.
+        # A header and a value can arrive in separate TCP fragments.
         count = min(size, 3, len(self.reply))
         result = bytes(self.reply[:count])
         del self.reply[:count]
@@ -71,7 +71,7 @@ class ReferenceTests(unittest.TestCase):
 
     def test_identity_requires_pause(self):
         connection = Connection(struct.pack("<I", 0))
-        with self.assertRaisesRegex(ValueError, "Pausa"):
+        with self.assertRaisesRegex(ValueError, "Pause"):
             reference.Pine(connection).identity()
         self.assertEqual(connection.sent, struct.pack("<I", 5) + b"\x0f")
 
@@ -82,7 +82,7 @@ class ReferenceTests(unittest.TestCase):
         for serial, crc in [("SCES-12345", "d6385328"), ("SCUS-97399", "00000000")]:
             pine = OtherGame(None)
             pine.serial, pine.crc = serial, crc
-            with self.assertRaisesRegex(ValueError, "Edición"):
+            with self.assertRaisesRegex(ValueError, "edition"):
                 pine.identity()
 
     def test_string_length_and_terminator(self):
@@ -96,7 +96,7 @@ class ReferenceTests(unittest.TestCase):
         self.assertEqual(len(ram), reference.RAM_SIZE)
         self.assertEqual(metadata["active_view"], "0x0")
         self.assertEqual(metadata["hierarchy_stamp"], 0)
-        with self.assertRaisesRegex(ValueError, "cambió"):
+        with self.assertRaisesRegex(ValueError, "changed"):
             reference.capture(SnapshotPine(changed=True))
 
     def test_tracked_directory_rejected(self):

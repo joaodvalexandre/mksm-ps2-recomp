@@ -1,4 +1,4 @@
-// GOW-Port: guion opcional de botones y stick izquierdo para controles funcionales.
+// GOW-Port: optional script of buttons and left stick for functional checks.
 #pragma once
 #include <cmath>
 #include <cstdint>
@@ -26,7 +26,7 @@ namespace gow_pad_script {
             {"l1",3,0x04,false},{"r1",3,0x08,false},
             {"triangulo",3,0x10,false},{"circulo",3,0x20,false},
             {"x",3,0x40,false},{"cuadrado",3,0x80,false},
-            // Stick izquierdo en el estado anfitrión; no son bits del D-pad.
+            // Left stick in the host state; they are not D-pad bits.
             {"mover_izquierda",6,0,true},{"mover_derecha",6,255,true},
             {"mover_arriba",7,0,true},{"mover_abajo",7,255,true}
         };

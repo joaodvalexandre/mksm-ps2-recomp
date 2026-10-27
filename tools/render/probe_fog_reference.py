@@ -1,4 +1,4 @@
-"""Control procedural optativo de FOG con la DLL GS original DX11; requiere Windows/GPU libre."""
+"""Optional procedural FOG check with the original DX11 GS DLL; requires Windows and a free GPU."""
 import argparse
 import ctypes as c
 import hashlib
@@ -26,7 +26,7 @@ def require(value, message):
 
 def run(module, resources, left_only=False):
     require(c.sizeof(CreateInfo) == c.sizeof(FrameInfo) == 32, 'Se requiere ABI Windows x64')
-    # GOW-Port: conservar la búsqueda de dependencias durante todas las llamadas a la DLL.
+    # GOW-Port: keep the dependency search active during all calls to the DLL.
     with os.add_dll_directory(str(module.parent)):
         dll = c.WinDLL(str(module))
         byte_pointer = c.POINTER(c.c_uint8)
@@ -46,7 +46,7 @@ def run(module, resources, left_only=False):
         rows = []
         try:
             registers = bytearray(8192)
-            # GOW-Port: layout privilegiado de GSRegs.h fijado; mismo PCRTC que el probe C++.
+            # GOW-Port: privileged layout of the pinned GSRegs.h; same PCRTC as the C++ probe.
             for offset, value in [(0x00, 1 | (1 << 5) | (1 << 7) | (255 << 8)), (0x10, 2 << 13),
                                   (0x70, 1 << 9), (0x80, (25 << 12) | (3 << 23) | (255 << 32) | (31 << 44))]:
                 struct.pack_into('<Q', registers, offset, value)
@@ -67,7 +67,7 @@ def run(module, resources, left_only=False):
                              (sum(v << (8 * i) for i, v in enumerate(fog_color)), 0x3d),
                              (fog << 56, 0x0a), (0, 5), (32 * 16 | ((32 * 16) << 16), 5),
                              (((fog + 17) % 255) << 56, 0x0a), (32 * 16, 5), (64 * 16 | ((32 * 16) << 16), 5)]
-                    # GOW-Port: dos sprites en un tag/lote con distinto FOG evitan el clear FOG=255.
+                    # GOW-Port: two sprites in a tag/batch with different FOG avoid the FOG=255 clear.
                     words = [len(pairs) | (1 << 15) | (1 << 60), 0x0e]
                     for data, register in pairs:
                         words.extend((data, register))
@@ -83,7 +83,7 @@ def run(module, resources, left_only=False):
                     require(dll.gow_gs_read_output(handle, output, 8192, c.byref(info)) == 0, 'Leer PCRTC')
                     pixels = bytes(output)
                     other_fog = (fog + 17) % 255
-                    # GOW-Port: la mitad derecha detecta que un clear hardware use el FOG del primer sprite.
+                    # GOW-Port: the right half detects a hardware clear using the FOG of the first sprite.
                     other_expected = tuple((s * other_fog + f * (256 - other_fog)) >> 8
                                            for s, f in zip(source, fog_color)) if enabled else source
                     halves = [(0, fog, expected, 'left')]
@@ -100,21 +100,21 @@ def run(module, resources, left_only=False):
             require(dll.gow_gs_destroy(handle) == 0, 'Cerrar GS DX11')
     return dict(module_sha256=hashlib.sha256(module.read_bytes()).hexdigest(), cases=rows,
                 scope='left_only' if left_only else 'both_halves',
-                limitation='Patrones sintéticos de RGB/PCRTC. No valida juego, interpolación variable, estabilidad ni FPS.')
+                limitation='Synthetic RGB/PCRTC patterns. It does not validate the game, variable interpolation, stability nor FPS.')
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--module', required=True, type=Path)
     parser.add_argument('--resources', required=True, type=Path)
-    parser.add_argument('--left-only', action='store_true', help='Reproducir los 14 controles históricos de la mitad izquierda')
+    parser.add_argument('--left-only', action='store_true', help='Reproduce the 14 historical checks of the left half')
     args = parser.parse_args()
     if os.name != 'nt':
         parser.error('El control requiere Windows x64 y hardware DX11')
     try:
         module, resources = args.module.resolve(strict=True), args.resources.resolve(strict=True)
         if not module.is_file() or not resources.is_dir():
-            raise ValueError('Se requieren DLL local y directorio de recursos')
+            raise ValueError('A local DLL and a resources directory are required')
         result = run(module, resources, args.left_only)
     except (OSError, ValueError, RuntimeError, AttributeError) as error:
         parser.exit(1, f'FOG DX11: {error}\n')

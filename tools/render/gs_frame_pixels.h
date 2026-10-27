@@ -1,4 +1,4 @@
-// GOW-Port: comparar/exportar la imagen visible, con el layout explícito de cada backend.
+// GOW-Port: compare/export the visible image, with the explicit layout of each backend.
 #pragma once
 #include "runtime/gs/gs_types.h"
 #include <cstddef>
@@ -22,7 +22,7 @@ inline bool normalize(const PresentationFrame& frame, std::vector<uint8_t>& out,
         if (frame.pixels.size() != packed) return false;
         stride = frame.width;
     } else if (layout == PixelLayout::HostRows640) {
-        // Contrato explícito de los backends locales: filas640 y altura visible
+        // Explicit contract of the local backends: rows of 640 and visible height
         // o reserva completa512. No adivinar si un buffer ambiguo usa filas width.
         if (frame.pixels.size() != size_t(640) * frame.height * 4 &&
             frame.pixels.size() != size_t(640) * 512 * 4) return false;

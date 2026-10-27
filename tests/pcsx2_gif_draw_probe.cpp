@@ -138,7 +138,7 @@ static bool frame(const std::vector<u32>& expected)
     regs.PMODE.MMOD = 1; regs.PMODE.ALP = 255; regs.PMODE.SLBG = 1;
     regs.SMODE1.CMOD = 2; regs.SMODE2.INT = 0;
     regs.DISP[0].DISPFB.FBW = 1; regs.DISP[0].DISPFB.PSM = 0;
-    // GOW-Port: NTSC usa cuatro ciclos horizontales por pixel en PCRTC.
+    // GOW-Port: NTSC uses four horizontal cycles per pixel in PCRTC.
     regs.DISP[0].DISPLAY.MAGH = 3;
     regs.DISP[0].DISPLAY.DW = 255; regs.DISP[0].DISPLAY.DH = 31;
     regs.DISP[0].DISPLAY.DY = 25; // Inicio activo NTSC de VideoModeOffsets original.
@@ -222,7 +222,7 @@ static bool texturedImage(bool checkFrame = false, unsigned seed = 0)
     if (!send(bridge, path, packet(textured)))
         return false;
     g_gs_renderer->Flush(GSState::GSFlushReason::DOWNLOADFIFO);
-    // GOW-Port: incluye un rectangulo que cruza bloques, con ultima QW parcial.
+    // GOW-Port: includes a rectangle that crosses blocks, with a partial last QW.
     for (const GSVector4i rect : {GSVector4i(0, 0, width, height), GSVector4i(11, 9, 24, 16)})
     {
         std::vector<u64> read;

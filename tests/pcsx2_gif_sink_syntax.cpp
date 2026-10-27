@@ -1,4 +1,4 @@
-// GOW-Port: compilar con las cabeceras reales fijadas; no necesita emulador, ventana o juego.
+// GOW-Port: build with the pinned real headers; it needs no emulator, window or game.
 #include "../tools/render/pcsx2_gif_sink.h"
 void checkPcsx2GifBinding()
 {

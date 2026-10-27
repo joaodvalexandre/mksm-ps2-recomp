@@ -1,4 +1,4 @@
-// GOW-Port: cola acotada, con copia propia y cierre sin descartar el prefijo.
+// GOW-Port: bounded queue, with its own copy and a close that does not discard the prefix.
 #pragma once
 #include <condition_variable>
 #include <cstddef>

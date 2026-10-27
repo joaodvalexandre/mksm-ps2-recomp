@@ -1,0 +1,257 @@
+# Data of the status map (docs/status/map.svg and docs/status/details.md).
+# After editing this file, regenerate with:  python tools/status/generate.py
+# (The "Status map" GitHub action does it by itself when changes are pushed to main.)
+#
+# Statuses: "ok" (works), "partial" (works with flaws or unverified), "pending" (does not work / not emulated).
+
+# ---------------------------------------------------------------------------------------------------------
+# Panel 1: static Sony SDK libraries linked into the game ELF.
+# Each function of config/funcmap.csv between `from` and `to` is a cell. A library starts at `start` and runs
+# until the start of the next one (the linker places them one after another). The starts come from the named
+# functions of config/recomp.template.toml. Several entries with the same `name` are merged.
+# ---------------------------------------------------------------------------------------------------------
+[libraries]
+from = 0x0026F228
+to = 0x0029BBA4
+
+[[libraries.group]]
+name = "libmpeg"
+start = 0x0026F228
+status = "partial"
+note = "Movies through native libmpeg2 with sound: 61 of 67 correct here; SEMO08 (drift), P04MP05 (stops) and BONUS20 (no audio) fail"
+
+[[libraries.group]]
+name = "libipu"
+start = 0x002792E8
+status = "partial"
+note = "sceIpuInit fixed; the software MPEG path works, but full IPU operation coverage is unverified"
+
+[[libraries.group]]
+name = "libgraph"
+start = 0x00279838
+status = "ok"
+
+[[libraries.group]]
+name = "libdma"
+start = 0x00279E50
+status = "ok"
+
+[[libraries.group]]
+name = "libcdvd"
+start = 0x0027A340
+status = "ok"
+note = "Reads the disc files extracted next to the ELF (.disc_layout); the ISO only with GOW_ISO"
+
+[[libraries.group]]
+name = "libdbc"
+start = 0x0027ACA8
+status = "partial"
+note = "Native controller and card services instead of the emulated SIO2"
+
+[[libraries.group]]
+name = "libpad2"
+start = 0x0027B7E8
+status = "partial"
+note = "Native controller service (keyboard and gamepad); pressures 0/255"
+
+[[libraries.group]]
+name = "libvib"
+start = 0x0027BF90
+status = "pending"
+note = "Native rumble from the Waffle565 runtime (XInput, DualShock 4/DualSense); not verified here"
+
+[[libraries.group]]
+name = "libmc2"
+start = 0x0027C100
+status = "partial"
+note = "Native memory card service (no SIO2); Waffle565 verified loading and saving; not repeated here after the migration"
+
+[[libraries.group]]
+name = "libscf"
+start = 0x00282FD8
+status = "ok"
+
+[[libraries.group]]
+name = "libgcc"
+start = 0x00283790
+status = "ok"
+
+[[libraries.group]]
+name = "C++ EH"
+start = 0x00285490
+status = "ok"
+
+[[libraries.group]]
+name = "libm"
+start = 0x00287378
+status = "ok"
+
+[[libraries.group]]
+name = "libc"
+start = 0x00289200
+status = "ok"
+
+[[libraries.group]]
+name = "libkernel"
+start = 0x002940B0
+status = "ok"
+
+[[libraries.group]]
+name = "sif"
+start = 0x00296518
+status = "ok"
+note = "SIF commands and RPC"
+
+[[libraries.group]]
+name = "fileio"
+start = 0x002976C8
+status = "ok"
+
+[[libraries.group]]
+name = "loadfile"
+start = 0x00298770
+status = "ok"
+note = "IOP heap and module loading"
+
+[[libraries.group]]
+name = "libkernel"
+start = 0x00299230
+status = "ok"
+
+[[libraries.group]]
+name = "libgcc"
+start = 0x0029ADE0
+status = "ok"
+
+# ---------------------------------------------------------------------------------------------------------
+# Panel 2: PS2 hardware. Each component is a rectangle of size `weight`.
+# `short` is the label that is drawn; `name` appears in the details table and on hover.
+# ---------------------------------------------------------------------------------------------------------
+[[hardware.group]]
+name = "EE"
+
+  [[hardware.group.component]]
+  short = "R5900"
+  name = "R5900 CPU (recompiled to C++)"
+  status = "ok"
+  weight = 5
+
+  [[hardware.group.component]]
+  short = "Kernel"
+  name = "Kernel: threads, semaphores and alarms"
+  status = "ok"
+  weight = 3
+
+  [[hardware.group.component]]
+  short = "FPU/MMI"
+  name = "FPU (COP1) and MMI instructions"
+  status = "ok"
+  weight = 2
+
+  [[hardware.group.component]]
+  short = "INTC"
+  name = "INTC: VSync and GS interrupt"
+  status = "ok"
+  weight = 2
+
+  [[hardware.group.component]]
+  short = "DMAC"
+  name = "DMA controller"
+  status = "ok"
+  weight = 2
+  note = "Native DMA service: chains go straight to VIF1/VU1 and the GS, with no controller model; reusable buffers"
+
+  [[hardware.group.component]]
+  short = "Timers"
+  name = "Timers"
+  status = "ok"
+  weight = 1
+  note = "Native EE clock: the recompiler turns timer reads into clock calls"
+
+[[hardware.group]]
+name = "GS / VU"
+
+  [[hardware.group.component]]
+  short = "GS"
+  name = "GS: primitives and framebuffer"
+  status = "partial"
+  weight = 3
+  note = "Native OpenGL render-target renderer (Waffle565), 2x internal resolution; menu, ship, combat and HUD correct here, 4 zones at Waffle565; a full playthrough is pending"
+
+  [[hardware.group.component]]
+  short = "VIF1/VU1"
+  name = "VIF1 and VU1"
+  status = "partial"
+  weight = 3
+  note = "Ahead-of-time native VU1 and fast UNPACK; ship combat at 60 Hz without dropped frames (8.9 ms median work, 15.8 max); with GOW_HZ=120, ~75 in combat (limit: the VU1)"
+
+  [[hardware.group.component]]
+  short = "Tex/CLUT"
+  name = "GS: textures, CLUT and fonts"
+  status = "partial"
+  weight = 2
+  note = "Native texture and CLUT store instead of a VRAM model; HUD and menu fonts correct in the captures"
+
+  [[hardware.group.component]]
+  short = "GIF"
+  name = "GIF (PATH1-3)"
+  status = "ok"
+  weight = 2
+
+  [[hardware.group.component]]
+  short = "IPU"
+  name = "IPU: FMV video"
+  status = "partial"
+  weight = 2
+  note = "No IPU: the native MPEG decoder takes the data from the PSS; Waffle565 verified every movie with sound"
+
+[[hardware.group]]
+name = "IOP"
+
+  [[hardware.group.component]]
+  short = "R3000A"
+  name = "R3000A CPU (IRX compiled to C++)"
+  status = "ok"
+  weight = 3
+  note = "The game's 8 IRX compiled ahead of time (optional, from a dump): gameplay at 21 s instead of 34 s; without a dump, interpreter"
+
+  [[hardware.group.component]]
+  short = "SPU2"
+  name = "SPU2: audio output"
+  status = "partial"
+  weight = 3
+  note = "Native sound engine driven by the game's LIBSD calls (Waffle565); a sustained listening check is pending here after the migration"
+
+  [[hardware.group.component]]
+  short = "IRX"
+  name = "Original IRX modules"
+  status = "ok"
+  weight = 2
+  note = "The original IRX, in the interpreter or compiled to C++"
+
+  [[hardware.group.component]]
+  short = "SIF"
+  name = "SIF: EE ↔ IOP RPC and DMA"
+  status = "ok"
+  weight = 2
+
+  [[hardware.group.component]]
+  short = "CDVD"
+  name = "CDVD: extracted disc files"
+  status = "ok"
+  weight = 2
+  note = "Each file at its original sector (.disc_layout); the ISO only with GOW_ISO"
+
+  [[hardware.group.component]]
+  short = "Pad"
+  name = "DualShock 2 controller"
+  status = "partial"
+  weight = 2
+  note = "Native controller service (keyboard and gamepad, no SIO2); pressures 0/255"
+
+  [[hardware.group.component]]
+  short = "MC"
+  name = "Memory card"
+  status = "partial"
+  weight = 2
+  note = "Native service (no SIO2); Waffle565 verified loading and saving; not repeated here after the migration"

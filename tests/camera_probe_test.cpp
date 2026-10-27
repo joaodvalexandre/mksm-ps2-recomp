@@ -1,4 +1,4 @@
-// GOW-Port: lectura de matrices con memoria sintética, sin juego ni runtime.
+// GOW-Port: reading matrices with synthetic memory, without the game or the runtime.
 #include "../src/gow_camera_probe.h"
 #include <cstdio>
 #include <vector>
@@ -35,7 +35,7 @@ static bool test() {
     constexpr uint32_t parent=0x900,skeleton=0xb00,palette=0xd00;
     put(ram,client+0x18,parent); put(ram,parent+0x104,skeleton);
     put(ram,skeleton+0x8c,palette);
-    put(ram,skeleton+0x60,uint32_t(0xf00)); // definición legible, count de skin=0
+    put(ram,skeleton+0x60,uint32_t(0xf00)); // readable definition, skin count=0
     put<uint64_t>(ram,parent+0x68,0x987654321abcdef0ull);
     put<uint64_t>(ram,skeleton+0x40,0xf0123456789abcdeull);
     for(size_t i=0;i<16;++i) put<uint32_t>(ram,palette+128+i*4,uint32_t(0x7fc00100u+i));
@@ -46,7 +46,7 @@ static bool test() {
        articulated.parentJointAddress!=palette+128 || articulated.parentTick!=0x987654321abcdef0ull ||
        articulated.parentSkeletonTick!=0xf0123456789abcdeull || ram!=parentBefore) return false;
     for(size_t i=0;i<16;++i) if(articulated.parentJointWorld[i]!=0x7fc00100u+i) return false;
-    // Count de skin ausente/0 no invalida la jerarquía de cámara; solo RAM legible.
+    // A missing/0 skin count does not invalidate the camera hierarchy; only readable RAM does.
     if(capture(ram.data(),palette+128+63,view).validParentJoint ||
        !capture(ram.data(),palette+128+64,view).validParentJoint) return false;
     put(ram,skeleton+0x8c,palette|0x80000000u);
@@ -76,12 +76,12 @@ static bool test() {
     for(uint32_t bad:{0u,0x1c51u,0xfffffff0u})
         if(capture(ram.data(),ram.size(),bad).validView) return false;
     if(capture(nullptr,ram.size(),view).validView || capture(ram.data(),0,view).validView) return false;
-    if(!capture(ram.data(),ram.size(),0x1c50).validView) return false; // límite exacto
+    if(!capture(ram.data(),ram.size(),0x1c50).validView) return false; // exact limit
     put(ram,node+8,uint32_t(0x1ef8));
     if(!capture(ram.data(),ram.size(),view).validCamera) return false;
     return true;
 }
 int main() {
-    if(!test()) { std::fprintf(stderr,"Lectura de cámara: fallo\n"); return 1; }
-    std::puts("Lectura de cámara: matrices, alias, ausencia, límites y memoria intacta OK");
+    if(!test()) { std::fprintf(stderr,"Camera read: failure\n"); return 1; }
+    std::puts("Camera read: matrices, aliases, absence, limits and intact memory OK");
 }

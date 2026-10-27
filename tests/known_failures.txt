@@ -1,0 +1,2 @@
+# Tests of ps2x_tests (PS2Recomp + patches/) that already failed; format "suite :: test".
+# tools/ci/check_tests.py does not fail for them, but it does for any other. Remove a line when it is fixed.

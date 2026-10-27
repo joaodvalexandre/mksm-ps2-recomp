@@ -1,4 +1,4 @@
-// GOW-Port: lectura opcional del estado de cámara retail SCUS-97399.
+// GOW-Port: optional read of the retail camera state of SCUS-97399.
 // Offsets comprobados en MIPS 0x1697F0: renView+0/0x40/0x100/0x240,
 // lista en +0x360 y camera::Client en nodo+8. No interpreta tipos Ghidra.
 #pragma once
@@ -38,7 +38,7 @@ namespace gow_camera_probe {
         std::memcpy(s.projection.data(),v+0x100,64);
         std::memcpy(s.world.data(),v+0x240,64);
         s.node=read<uint32_t>(v+0x360);
-        s.empty=s.node==view+0x360u; // beq compara direcciones completas, no alias físicos.
+        s.empty=s.node==view+0x360u; // beq compares full addresses, not physical aliases.
         if(s.empty) return s;
         const auto *node=span(ram,size,s.node,12);
         if(!node) return s;
@@ -48,11 +48,11 @@ namespace gow_camera_probe {
         s.validCamera=true; s.joint=read<uint16_t>(client+0x60);
         s.matrixTick=read<uint64_t>(client+0x68);
         s.inverseTick=read<uint64_t>(client+0xF0);
-        // lh == -1 selecciona matriz local; las demás articulaciones usan +0x70.
+        // lh == -1 selects the local matrix; the other joints use +0x70.
         std::memcpy(s.clientWorld.data(),client+(s.joint==0xFFFFu ? 0x20 : 0x70),64);
         std::memcpy(s.clientInverse.data(),client+0xB0,64);
-        // CalcWorldMatrix 0x1303D0: el cliente articula el array de su padre (+0x18).
-        // La jerarquía de cámara puede tener count de skin=0: no usarlo de límite.
+        // CalcWorldMatrix 0x1303D0: the client indexes the array of its parent (+0x18).
+        // The camera hierarchy can have a skin count of 0: do not use it as a limit.
         s.parent=read<uint32_t>(client+0x18);
         const auto *parent=span(ram,size,s.parent,0x108u);
         if(!parent) return s;

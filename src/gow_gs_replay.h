@@ -1,7 +1,7 @@
-// GOW-Port: diagnóstico opcional para repetir exactamente los comandos del backend GS.
-// La idea de capturar estado + comandos procede de Taylor N. Albarnaz / LightVelox,
+// GOW-Port: optional diagnostic to replay exactly the commands of the GS backend.
+// The idea of capturing state + commands comes from Taylor N. Albarnaz / LightVelox,
 // PS2Recomp sotc-port ac9efa070638ad3b3accd284de6f898d5ab271d1 (GPL-3.0).
-// Implementación propia; formato local del mismo ABI. Los volcados nunca se publican.
+// Own implementation; local format of the same ABI. The dumps are never published.
 #pragma once
 
 #include "runtime/gs/gs_backend_state.h"
@@ -24,7 +24,7 @@ namespace gow_gs_replay
 {
     constexpr uint64_t kLimit = 64ull << 20;
     constexpr uint32_t kRecordLimit = 16u << 20;
-    // GOW-Port: seleccionar un tramo tardío sin cambiar el límite del volcado.
+    // GOW-Port: select a late section without changing the dump limit.
     struct CaptureOptions { double after=150, seconds=3; bool atTextureFlush=false; };
     inline bool captureOptions(const char *after,const char *seconds,const char *texflush,
                                CaptureOptions &out,const char *&error) {
@@ -38,10 +38,10 @@ namespace gow_gs_replay
                parsed<minimum || parsed>maximum) return false;
             value=parsed; return true;
         };
-        if(!number(after,0,3600,candidate.after)) error="GOW_GS_REPLAY_AFTER: intervalo válido 0..3600 s";
-        else if(!number(seconds,0.1,60,candidate.seconds)) error="GOW_GS_REPLAY_SECONDS: intervalo válido 0.1..60 s";
+        if(!number(after,0,3600,candidate.after)) error="GOW_GS_REPLAY_AFTER: valid range 0..3600 s";
+        else if(!number(seconds,0.1,60,candidate.seconds)) error="GOW_GS_REPLAY_SECONDS: valid range 0.1..60 s";
         else if(texflush && std::strcmp(texflush,"0") && std::strcmp(texflush,"1"))
-            error="GOW_GS_REPLAY_TEXFLUSH: valores válidos 0 o 1";
+            error="GOW_GS_REPLAY_TEXFLUSH: valid values 0 or 1";
         if(error) return false;
         candidate.atTextureFlush=texflush && !std::strcmp(texflush,"1");
         out=candidate; return true;
@@ -101,7 +101,7 @@ namespace gow_gs_replay
             if(!file.read(reinterpret_cast<char*>(&op),1) ||
                !file.read(reinterpret_cast<char*>(&size),4)) { error="Volcado incompleto"; return false; }
             if(op<uint8_t(Op::Initial) || op>uint8_t(Op::End) || size>kRecordLimit ||
-               bytes+5+size>kLimit) { error="Registro o límite inválido"; return false; }
+               bytes+5+size>kLimit) { error="Invalid register or limit"; return false; }
             bytes+=5+size; out.op=Op(op); out.data.resize(size);
             if(size && !file.read(reinterpret_cast<char*>(out.data.data()),size)) {
                 error="Payload incompleto"; return false;
@@ -110,8 +110,8 @@ namespace gow_gs_replay
         }
     };
 
-    // Se instala únicamente al solicitar GOW_GS_REPLAY_TRACE. Serializa también
-    // presentación/readback para que la captura no mezcle comandos de dos hilos.
+    // It is installed only when GOW_GS_REPLAY_TRACE is requested. It also serializes
+    // presentation/readback so the capture does not mix commands from two threads.
     class Backend final: public GSRasterBackend, public GSBackendStateAccess {
         std::unique_ptr<GSRasterBackend> inner; PS2Memory *memory;
         std::ofstream file; mutable std::recursive_mutex mutex;
@@ -147,8 +147,8 @@ namespace gow_gs_replay
             const auto now=std::chrono::steady_clock::now();
             if(!active) {
                 if(waitForTextureFlush && !atTextureFlush) return false;
-                // El hilo de presentación no debe leer variables que escribe el EE.
-                // Solo empezar al recibir sus comandos de dibujo/transferencia.
+                // The presentation thread must not read variables that the EE writes.
+                // Only start when receiving its draw/transfer commands.
                 if(memory && !allowStart) return false;
                 uint32_t state=0;
                 if(memory && memory->getRDRAM()) std::memcpy(&state,memory->getRDRAM()+0x29E560u,4);
@@ -158,7 +158,7 @@ namespace gow_gs_replay
                 std::fprintf(stderr,"[gow-gs:replay] inicio state=%u host=%.3f texflush=%u\n",state,
                     std::chrono::duration<double>(now-created).count(),unsigned(atTextureFlush));
             }
-            // Reserva espacio para el estado final incluso con readback grande.
+            // Reserves space for the final state even with a large readback.
             if(std::chrono::duration<double>(now-started).count()>=duration ||
                nextSize>kRecordLimit || bytes+nextSize+32+(kRecordLimit+5)>kLimit) {
                 const bool ok=snapshot(Op::End); active=false; finished=true; file.close();
@@ -175,9 +175,9 @@ namespace gow_gs_replay
             :inner(std::move(backend)),memory(mem),file(path,std::ios::binary),after(delay),duration(seconds),
              waitForTextureFlush(atTextureFlush) {
             Header h{}; file.write(reinterpret_cast<const char*>(&h),sizeof(h)); finished=!file;
-            if(finished) std::fprintf(stderr,"[gow-gs:replay] no se pudo abrir el archivo\n");
+            if(finished) std::fprintf(stderr,"[gow-gs:replay] could not open the file\n");
         }
-        // Cierre explícito para sondas deterministas, sin esperar al reloj del host.
+        // Explicit close for deterministic probes, without waiting for the host clock.
         bool finish() {
             std::lock_guard lock(mutex); if(!active || finished) return false;
             const bool ok=snapshot(Op::End); active=false; finished=true; file.close(); return ok;
@@ -191,8 +191,8 @@ namespace gow_gs_replay
         void TextureFlush() override {
             std::lock_guard lock(mutex);
             if(waitForTextureFlush && !active) {
-                // GOW-Port: empezar DESPUÉS del TEXFLUSH recibido del juego. No añadir
-                // otro ni borrar la caché antes de tiempo; el snapshot sincroniza la cola.
+                // GOW-Port: start AFTER the TEXFLUSH received from the game. Do not add
+                // another one nor clear the cache too early; the snapshot synchronizes the queue.
                 inner->TextureFlush(); recording(0,true,true); return;
             }
             if(recording()) write(Op::TextureFlush,nullptr,0);

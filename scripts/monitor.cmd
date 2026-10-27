@@ -1,6 +1,6 @@
 @echo off
-rem Registra cada 30 s el uso de CPU/RAM de la compilacion en logs\monitor.log
+rem Logs the CPU/RAM use of the build every 30 s in logs\monitor.log
 cd /d "%~dp0.."
 if not exist logs mkdir logs
-echo Vigilando la compilacion cada 30 segundos (cierra esta ventana cuando quieras)...
+echo Watching the build every 30 seconds (close this window whenever you want)...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0monitor.ps1"

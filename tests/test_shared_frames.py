@@ -150,7 +150,7 @@ class SharedFramesTest(unittest.TestCase):
                 expected = dict(alternating=0, same=0, other=0)
                 expected[classification] = 1
                 self.assertEqual(result['content_return_parity'], expected)
-                self.assertIn('no acredita SMODE2', result['limitation'])
+                self.assertIn('does not prove SMODE2', result['limitation'])
 
     def test_content_return_parity_uses_acquired_ticks_and_ignores_retention(self):
         text = '\n'.join([frame(1, 11, host=100).replace('frameTick=8', 'frameTick=21'),

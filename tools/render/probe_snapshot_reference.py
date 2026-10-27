@@ -1,4 +1,4 @@
-"""Consultar snapshots/modo del GS original con un patrón sin assets; Windows/GPU libre."""
+"""Query snapshots/mode of the original GS with a pattern without assets; Windows and a free GPU."""
 import argparse
 import ctypes as c
 import hashlib
@@ -25,7 +25,7 @@ class StreamInfo(c.Structure):
 
 
 def stream_reader(dll, requested):
-    """Resolver el export sólo si se solicita; DLL anteriores siguen siendo válidas."""
+    """Resolve the export only if requested; earlier DLLs remain valid."""
     if not requested:
         return None
     function = dll.gow_gs_read_stream_info
@@ -75,7 +75,7 @@ def run(module, resources, output=None, include_stream=False):
                 words.extend((value, register))
             raw = struct.pack('<' + 'Q' * len(words), *words)
             packet = (c.c_uint8 * len(raw)).from_buffer_copy(raw)
-            require(dll.gow_gs_submit(handle, 3, packet, len(raw)) == 0, 'Enviar patrón CT32 uniforme')
+            require(dll.gow_gs_submit(handle, 3, packet, len(raw)) == 0, 'Send uniform CT32 pattern')
             if cursor_function:
                 stream['after_submit'] = read_stream(cursor_function, handle)
             registers = bytearray(8192)
@@ -83,7 +83,7 @@ def run(module, resources, output=None, include_stream=False):
                                   (0x80, (25 << 12) | (3 << 23) | (255 << 32) | (63 << 44))):
                 struct.pack_into('<Q', registers, offset, value)
             privileged = (c.c_uint8 * 8192).from_buffer_copy(registers)
-            require(dll.gow_gs_vsync(handle, 0, privileged, 8192) == 0, 'VSync progresivo sintético')
+            require(dll.gow_gs_vsync(handle, 0, privileged, 8192) == 0, 'Synthetic progressive VSync')
             if cursor_function:
                 stream['after_vsync'] = read_stream(cursor_function, handle)
             video = VideoInfo()
@@ -97,7 +97,7 @@ def run(module, resources, output=None, include_stream=False):
                                                    c.byref(frame)) == 7, 'Consultar snapshot')
                     require(0 < frame.required_bytes <= 64 << 20 and
                             frame.required_bytes == frame.width * frame.height * 4,
-                            'Dimensiones de snapshot inválidas')
+                            'Invalid snapshot dimensions')
                     pixels = (c.c_uint8 * frame.required_bytes)()
                     require(dll.gow_gs_read_snapshot(handle, aspect, width, height, pixels,
                                                    len(pixels), c.byref(frame)) == 0, 'Leer captura consultada')
@@ -112,17 +112,17 @@ def run(module, resources, output=None, include_stream=False):
             if cursor_function:
                 stream['after_snapshots'] = read_stream(cursor_function, handle)
                 require(stream['after_snapshots'] == stream['after_vsync'],
-                        'Las consultas/snapshots no deben avanzar ni cambiar el cursor')
+                        'Queries/snapshots must neither advance nor change the cursor')
         finally:
             require(dll.gow_gs_destroy(handle) == 0, 'Cerrar GS')
     result = dict(module_sha256=hashlib.sha256(module.read_bytes()).hexdigest(), video_info=settings, cases=rows,
-                limitation='Patrón sintético64x64: opciones y calculador del GS original, con filtro/bandas. '
-                           'No establece temporización/encuadre PS2 del juego, frontera del host, FPS ni estabilidad.')
+                limitation='Synthetic 64x64 pattern: options and calculator of the original GS, with filter/bands. '
+                           'It does not establish the game PS2 timing/framing, host boundary, FPS nor stability.')
     if include_stream:
         result['stream_info'] = stream
-        result['stream_limitation'] = ('Cursores locales de llamadas/bytes aceptados, no hashes de contenido. '
-                                      'Alineación QWORD no implica tag GIF terminado. El último VSync no '
-                                      'acredita composición nueva ni alineación con OpenGL.')
+        result['stream_limitation'] = ('Local cursors of accepted calls/bytes, not content hashes. '
+                                      'QWORD alignment does not imply a finished GIF tag. The last VSync does not '
+                                      'prove new composition nor alignment with OpenGL.')
     return result
 
 
@@ -130,9 +130,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--module', required=True, type=Path)
     parser.add_argument('--resources', required=True, type=Path)
-    parser.add_argument('--output', type=Path, help='Carpeta nueva para JSON y PNG del patrón; opcional')
+    parser.add_argument('--output', type=Path, help='New folder for JSON and PNG of the pattern; optional')
     parser.add_argument('--stream-info', action='store_true',
-                        help='Añadir fronteras de entrada/VSync; requiere el export optativo de la DLL')
+                        help='Add input/VSync boundaries; requires the optional export of the DLL')
     args = parser.parse_args()
     if os.name != 'nt':
         parser.error('Requiere Windows x64 y DX11')

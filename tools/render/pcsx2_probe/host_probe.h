@@ -1,4 +1,4 @@
-// GOW-Port: servicios de la prueba aislada; no son una API del runtime.
+// GOW-Port: services of the isolated test; they are not a runtime API.
 #pragma once
 bool gsProbeOpenWindow(unsigned width, unsigned height);
 void gsProbeCloseWindow();

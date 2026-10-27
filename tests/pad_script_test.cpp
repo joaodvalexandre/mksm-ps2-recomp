@@ -1,4 +1,4 @@
-// GOW-Port: entradas procedurales, sin datos del juego ni reloj real.
+// GOW-Port: procedural inputs, without game data or a real clock.
 #include "../src/gow_pad_script.h"
 #include "../src/gow_pad2_packet.h"
 #include <array>
@@ -11,7 +11,7 @@ bool test() {
         apply(script,seconds,state);
         return gow_pad2::makePacket(state);
     };
-    // La compatibilidad de botones usa todos los bits del paquete original.
+    // Button compatibility uses all the bits of the original packet.
     constexpr const char *names[]={"select","start","arriba","derecha","abajo","izquierda",
         "l2","r2","l1","r1","triangulo","circulo","x","cuadrado"};
     constexpr uint16_t bits[]={0x0001,0x0008,0x0010,0x0020,0x0040,0x0080,
@@ -20,14 +20,14 @@ bool test() {
         const auto script=parse(std::string("5:")+names[i]);
         if(script.size()!=1 || script[0].duration!=0.7) return false;
         const auto packet=sample(script,5.2);
-        // CONCAT11 del juego coloca primero el byte bajo del estado host.
+        // The game's CONCAT11 places the low byte of the host state first.
         const auto host=uint16_t(packet[0] | (uint16_t(packet[1])<<8));
         if(host!=uint16_t(0xFFFFu^bits[i])) return false;
         for(size_t k=2;k<6;++k) if(packet[k]!=128) return false;
         if(sample(script,4.999)!=sample({},0) || sample(script,5.7)!=sample({},0)) return false;
     }
     if(sample(parse("12:x"),12.7)!=sample({},0)) return false;
-    // D-pad y stick no se confunden; duración explícita se libera al terminar.
+    // D-pad and stick are not confused; an explicit duration is released when it ends.
     const auto script=parse("10:mover_izquierda:3,11:mover_arriba:1,11:cuadrado:0.5");
     const auto neutral=sample({},0), left=sample(script,10), combined=sample(script,11.1);
     if(left[0]!=255 || left[1]!=255 || left[4]!=0 || left[5]!=128) return false;
@@ -36,12 +36,12 @@ bool test() {
     if(sample(parse("10:izquierda:3"),11)[4]!=128) return false;
     if(sample(parse("1:mover_derecha,1:mover_abajo"),1.1)[4]!=255 ||
        sample(parse("1:mover_derecha,1:mover_abajo"),1.1)[5]!=255) return false;
-    // En un mismo eje prevalece la última entrada activa; no afecta al otro.
+    // On the same axis the last active input prevails; it does not affect the other.
     if(sample(parse("1:mover_izquierda:4,2:mover_derecha:1"),2.2)[4]!=255 ||
        sample(parse("1:mover_izquierda:4,2:mover_derecha:1"),3.2)[4]!=0) return false;
     if(!parse("nan:x,inf:x,-1:x,1oops:x,1:x:0,1:x:-2,1:x:nan,1:x:inf,1:x:2oops,1:x:1:2,1:unknown,:x,1:").empty()) return false;
     if(parse(",5:x,,7:mover_abajo:2,").size()!=2) return false;
-    // Aplicar el guion modifica solo las entradas activas, conserva el host.
+    // Applying the script modifies only the active inputs and keeps the host ones.
     uint8_t state[32]={1,0x73,0xEF,0xFF,12,34,56,78};
     apply(parse("1:mover_derecha,1:x"),1.2,state);
     if(state[0]!=1 || state[1]!=0x73 || state[2]!=0xEF || state[3]!=0xBF ||

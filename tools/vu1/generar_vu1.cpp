@@ -1,17 +1,17 @@
-// GOW-Port: genera C++ para el microcódigo de VU1 capturado con GOW_VU1_CAPTURA (micromemorias de 16 KB).
-// Uso: generar_vu1 <carpeta de salida> <micromemoria.bin>...  (escribe programa0.cpp ... programa12.cpp)
+// GOW-Port: generates C++ for the VU1 microcode captured with GOW_VU1_CAPTURA (16 KB micromemories).
+// Usage: generar_vu1 <output folder> <micromemory.bin>...  (writes programa0.cpp ... programa12.cpp)
 //
-// Cada par de instrucciones se escribe ya decodificado (como lo decodifica el intérprete) y se ejecuta con
-// VU1Interpreter::stepPairT, que hace los mismos pasos que el intérprete; el despachador comprueba en cada
-// par que las dos palabras de la micromemoria son las compiladas y, si no, interpreta ese par.
+// Each instruction pair is written already decoded (as the interpreter decodes it) and is run with
+// VU1Interpreter::stepPairT, which does the same steps as the interpreter; the dispatcher checks on each
+// pair that the two micromemory words are the compiled ones and, if not, interprets that pair.
 //
-// Bloques: desde cada cabecera (destino de salto o par siguiente a un final de bloque) hasta el hueco de
-// retardo del primer salto, el par siguiente a un bit E o un par con bit D/T. Un bloque solo se usa si sus
-// palabras coinciden todas, no hay un salto pendiente y queda presupuesto de ciclos de sobra. Dentro de un
-// bloque se conoce lo que viene después de cada par, así que se pueden omitir los flags MAC/estado de una
-// FMAC que otra FMAC posterior del bloque reemplaza antes de que nadie los lea (análisis de vida).
+// Blocks: from each header (jump target or pair following a block end) up to the delay slot of
+// the first jump, the pair following an E bit or a pair with a D/T bit. A block is only used if all its
+// words match, there is no pending jump and there is cycle budget to spare. Inside a
+// block what comes after each pair is known, so the MAC/status flags of an
+// FMAC can be omitted when a later FMAC of the block replaces them before anyone reads them (liveness analysis).
 //
-// La micromemoria y el C++ generado salen de los datos del juego: no se publican.
+// The micromemory and the generated C++ come from the game data: they are not published.
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu1.h"
 
@@ -103,7 +103,7 @@ namespace
 {
     using Pair = VU1CompiledGenerator::Pair;
 
-    // FMAC que deja flags MAC/estado en la cola (las mismas que trata upperT con updateFmacFlags).
+    // FMAC that leaves MAC/status flags in the queue (the same ones upperT handles with updateFmacFlags).
     bool writesFmacFlags(uint32_t upper)
     {
         const uint32_t op = upper & 0x3Fu;
@@ -152,11 +152,11 @@ int main(int argc, char **argv)
 {
     if (argc < 3)
     {
-        std::cerr << "Uso: generar_vu1 <carpeta de salida> <micromemoria.bin | carpeta>...\n";
+        std::cerr << "Usage: generar_vu1 <output folder> <micromemory.bin | folder>...\n";
         return 2;
     }
-    // GOW-Port: una carpeta cuenta como todas sus micromemorias (*.bin, por nombre). Miles de rutas no caben
-    // en la línea de órdenes de Windows (32 K caracteres).
+    // GOW-Port: a folder counts as all its micromemories (*.bin, by name). Thousands of paths do not fit
+    // in the Windows command line (32 K characters).
     std::vector<std::string> inputs;
     for (int a = 2; a < argc; ++a)
     {
@@ -203,7 +203,7 @@ int main(int argc, char **argv)
     constexpr size_t kParts = 12;
     std::vector<std::ostringstream> parts(kParts);
     std::ostringstream declarations;
-    // Par decodificado (pc, palabras) -> nombre del struct K; cada archivo define los que usa.
+    // Decoded pair (pc, words) -> name of the K struct; each file defines the ones it uses.
     std::map<std::tuple<uint32_t, uint32_t, uint32_t>, std::string> kNames;
     std::vector<std::set<std::string>> kInPart(kParts);
     const auto kStruct = [&](const Code &code, uint32_t pc, size_t part) -> std::string
@@ -232,7 +232,7 @@ int main(int argc, char **argv)
         return name;
     };
 
-    // Despacho par a par (sin flags muertos) para todas las palabras vistas.
+    // Pair-by-pair dispatch (without dead flags) for all the words seen.
     std::map<uint32_t, std::vector<std::string>> pairCases;
     std::set<std::tuple<uint32_t, uint32_t, uint32_t>> seenPairs;
     for (const Code &code : codes)
@@ -250,7 +250,7 @@ int main(int argc, char **argv)
         }
 
     // Bloques.
-    // Prueba de cada bloque en el despacho y sus sucesores conocidos al generar (para encadenar sin el switch).
+    // Test of each block in the dispatch and its known successors when generating (to chain without the switch).
     struct BlockCase
     {
         std::string test;
@@ -305,7 +305,7 @@ int main(int argc, char **argv)
                         pcs.push_back(pc + 8u);
                     break;
                 }
-                // Un salto en el par anterior (si se entra a mitad) lo cubre la comprobación de salto pendiente.
+                // A jump in the previous pair (if entered halfway) is covered by the pending jump check.
             }
             if (pcs.size() < 2u)
                 continue;
@@ -318,7 +318,7 @@ int main(int argc, char **argv)
             if (!seenBlocks.insert({head, words}).second)
                 continue;
 
-            // Vida de los flags de cada FMAC del bloque.
+            // Liveness of the flags of each FMAC of the block.
             const size_t length = pcs.size();
             std::vector<bool> dead(length, false);
             for (size_t i = 0; i < length; ++i)
@@ -329,7 +329,7 @@ int main(int argc, char **argv)
                 for (size_t j = i + 1u; j + 4u <= length; ++j)
                 {
                     if (readsMac(code.pairs[pcs[j] / 8u]))
-                        break; // un lector antes de la siguiente FMAC: vivos
+                        break; // a reader before the next FMAC: alive
                     if (!writesFmacFlags(code.upper(pcs[j])))
                         continue;
                     bool readerSoon = false;
@@ -342,8 +342,8 @@ int main(int argc, char **argv)
                 deadCount += dead[i] ? 1u : 0u;
             }
 
-            // El bloque es una sola función con los pasos en línea, en el mismo archivo que sus structs K.
-            // Los pares intermedios que no saltan ni terminan ("simples") no comprueban saltos ni finales.
+            // The block is a single function with the steps inline, in the same file as its K structs.
+            // The intermediate pairs that neither jump nor end ("simple") do not check jumps or ends.
             const std::string name = "b" + hex4(head) + "_" + std::to_string(blockCases[head].size());
             const size_t part = blockCount % kParts;
             std::ostringstream body;
@@ -370,8 +370,8 @@ int main(int argc, char **argv)
             std::ostringstream test;
             test << "                if (inRange(pc))\n                {\n                    const int r = " << name << "(vu, c);\n"
                  << "                    if (r == 2)\n                        return;\n                    if (r == 1)\n";
-            // Sucesores: tras el último par sigue el siguiente; si el bloque acaba en un salto con su hueco de
-            // retardo, también el destino (JR/JALR lo toman de un registro: solo el siguiente).
+            // Successors: after the last pair the next one follows; if the block ends in a jump with its delay
+            // slot, also the target (JR/JALR take it from a register: only the next one).
             std::vector<uint32_t> successors{(pcs.back() + 8u) & 0x3FFFu};
             if (pcs.size() >= 2u)
             {
@@ -391,18 +391,18 @@ int main(int argc, char **argv)
     }
 
     const std::string header =
-        "// Generado por tools/vu1/generar_vu1.cpp a partir del microcódigo del juego. No publicar.\n"
+        "// Generated by tools/vu1/generar_vu1.cpp from the game microcode. Do not publish.\n"
         "#include \"runtime/ps2_vu1.h\"\n#include \"ps2_vu1_compiled.inl\"\n#include <cstdio>\n#include <cstdlib>\n#include <cstring>\n\n"
-        "// Mismo modo de coma flotante que el intérprete de VU (MSVC no expande en línea entre modos distintos).\n"
+        "// Same floating-point mode as the VU interpreter (MSVC does not inline across different modes).\n"
         "#if defined(_MSC_VER)\n#pragma float_control(precise, on, push)\n#pragma fp_contract(off)\n#endif\n\n"
         "using P = VU1CompiledAccess::P;\nusing C = VU1CompiledAccess::C;\n\n"
         "namespace vu1c_gen\n{\n    inline unsigned long long g_blockPairs = 0;\n}\n\n"
-        "// Sin comprobaciones de desbordamiento de pila (/GS): los arreglos locales son de tamaño fijo.\n"
+        "// No stack overflow checks (/GS): the local arrays have a fixed size.\n"
         "#if defined(_MSC_VER)\n#define VU1C_FAST __declspec(safebuffers)\n#else\n#define VU1C_FAST\n#endif\n\n";
     const std::string footer = "\n#if defined(_MSC_VER)\n#pragma float_control(pop)\n#endif\n";
     const std::string base = argv[1];
-    // Solo se reescribe un archivo si cambia: así la compilación (Ninja con restat) no recompila el código
-    // generado cada vez que se reenlaza el generador.
+    // A file is only rewritten if it changes: that way the build (Ninja with restat) does not rebuild the code
+    // generated every time the generator is relinked.
     const auto writeIfChanged = [](const std::string &path, const std::string &text)
     {
         std::ifstream in(path, std::ios::binary);
@@ -419,8 +419,8 @@ int main(int argc, char **argv)
     std::ostringstream out;
     out << header
         << "namespace\n{\n"
-        << "    // GOW_VU1C_DIAG: pares compilados e interpretados al salir. GOW_VU1C_RANGO=inicio-fin (hex): solo usa el\n"
-        << "    // código compilado en ese rango de direcciones (para acotar una diferencia con el intérprete).\n"
+        << "    // GOW_VU1C_DIAG: compiled and interpreted pairs on exit. GOW_VU1C_RANGO=start-end (hex): only uses the\n"
+        << "    // compiled code in that address range (to narrow down a difference with the interpreter).\n"
         << "    // GOW_VU1C_SIN_BLOQUES: sin bloques (solo pares sueltos).\n"
         << "    struct Stats\n    {\n        unsigned long long compiled = 0, interpreted = 0;\n"
         << "        ~Stats()\n        {\n            if (std::getenv(\"GOW_VU1C_DIAG\"))\n"
@@ -451,8 +451,8 @@ int main(int argc, char **argv)
             out << "                if (g_range.blocks)\n                {\n";
             for (const BlockCase &t : it->second)
             {
-                // GOW-Port: si el bloque termina en un sucesor conocido con su propio case, se salta a él
-                // directamente (mismo trabajo que volver al principio del bucle, sin el switch).
+                // GOW-Port: if the block ends in a known successor with its own case, it jumps to it
+                // directly (the same work as returning to the top of the loop, without the switch).
                 out << t.test << "                    {\n                        pc = VU1CompiledAccess::pc(vu);\n";
                 for (const uint32_t next : t.successors)
                     if (allPcs.count(next) != 0u && next + 8u <= PS2_VU1_CODE_SIZE)
@@ -477,7 +477,7 @@ int main(int argc, char **argv)
         << "static const bool g_registered = (VU1Interpreter::registerCompiledProgram(&vu1c_gen::run), true);\n"
         << footer;
     writeIfChanged(base + "/programa0.cpp", out.str());
-    std::printf("[generar_vu1] %zu funciones de par, %zu bloques, %zu de %zu FMAC con flags muertos, %zu imagenes\n",
+    std::printf("[generar_vu1] %zu pair functions, %zu blocks, %zu of %zu FMAC with dead flags, %zu images\n",
                 pairFns.size(), blockCount, deadCount, fmacCount, codes.size());
     return 0;
 }

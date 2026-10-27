@@ -1,6 +1,6 @@
-// GOW-Port: formato GS dump/freeze v8 de PCSX2; serialización propia para el patrón procedural.
+// GOW-Port: PCSX2 GS dump/freeze v8 format; own serialization for the procedural pattern.
 // Referencia de formato: PCSX2 v2.8.2, GSState.cpp, GSRegs.h y GSDump.cpp (GPL-3.0+).
-// No contiene estado, comandos ni texels del juego. No serializa un GS arbitrario.
+// It contains no state, commands or texels of the game. It does not serialize an arbitrary GS.
 #pragma once
 #include <array>
 #include <bit>
@@ -22,7 +22,7 @@ namespace gow_gs_reference
         void zero(size_t count) { data.resize(data.size()+count); }
     };
 
-    // Estado inicial mínimo de los patrones procedurales: sin transferencias ni GIF pendientes.
+    // Minimal initial state of the procedural patterns: no pending transfers or GIF.
     inline bool patternDump(const std::filesystem::path &path,std::span<const uint8_t> seed,
                             const std::array<uint64_t,12> &contextRegisters,const Bytes &commands)
     {
@@ -36,7 +36,7 @@ namespace gow_gs_reference
         state.reg(0x3f80000080808080ull);state.reg(0); // RGBAQ y ST.
         state.word(0);state.word(0);state.reg(0); // GSVertex guarda UV/FOG en 32 bits, XYZ en 64.
         state.reg(0);state.word(0);state.word(0); // Registro obsoleto y cursor de transferencia.
-        state.raw(seed);state.zero(80);state.word(0x3f800000u); // Cuatro GIFPath vacíos y Q.
+        state.raw(seed);state.zero(80);state.word(0x3f800000u); // Four empty GIFPaths and Q.
         if(state.data.size()!=seed.size()+448) return false;
 
         Bytes registers;registers.zero(0x2000);
@@ -54,12 +54,12 @@ namespace gow_gs_reference
         output.close();return bool(output);
     }
 
-    // GOW-Port: separar invalidación de caché de un corte de lote por cambio de estado.
+    // GOW-Port: separate cache invalidation from a batch cut caused by a state change.
     enum class FeedbackBoundary { None, Texflush, Scissor };
     inline bool feedbackDump(const std::filesystem::path &path,std::span<const uint8_t> seed,bool disjoint,bool linear,
                              FeedbackBoundary boundary=FeedbackBoundary::None,unsigned height=416)
     {
-        // GOW-Port: mismos límites que el generador procedural.
+        // GOW-Port: same limits as the procedural generator.
         if(height<1 || height>416) return false;
         constexpr uint64_t frame=(8ull<<16)|(0xff000000ull<<32);
         constexpr uint64_t zbuf=104ull|(1ull<<24)|(1ull<<32);

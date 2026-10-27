@@ -1,5 +1,5 @@
 // GOW-Port: overrides de Waffle565/God-Of-War-Native-Port, main@34f30d5:port/overrides-usa/gow_overrides.cpp,
-// que parten de los de este repositorio al 2026-10-09.
+// which start from this repository's as of 2026-10-09.
 // GOW-Port: enlaces manuales para God of War (SCUS-97399).
 #include "runtime/ee_scheduler.h"
 #include "game_overrides.h"
@@ -395,7 +395,7 @@ namespace
                     std::fprintf(stderr, "[gow-pad2:test] RAM dumped to %s at %.2f s\n", path.c_str(), seconds);
                 }
             }
-            // GOW-Port: comprobar el estado durante el perfil sin escribir capturas ni volcados.
+            // GOW-Port: check the state during the profile without writing captures or dumps.
             static const bool noCapture = [] {
                 const char *value = std::getenv("GOW_PAD_TEST_NO_CAPTURE");
                 return value && std::strcmp(value, "1") == 0;
@@ -444,7 +444,7 @@ namespace
                              readGuest32(rdram, 0x29E5A0u), readGuest32(rdram, 0x29E584u),
                              readGuest32(rdram, 0x29CAB4u), readGuest32(rdram, 0x29C838u));
             }
-            // GOW_PAD_GUION="5:start,12:abajo,16:x": pulsaciones de 0,7 s en esos segundos (en lugar de la
+            // GOW_PAD_GUION="5:start,12:abajo,16:x": presses of 0.7 s at those seconds (instead of the
             // secuencia fija). Botones: start, select, arriba, abajo, izquierda, derecha, x, circulo, cuadrado,
             // triangulo, l1, r1, l2, r2.
             // GOW-Port: also left/right stick directions (lup, ldown, lleft, lright, rup, rdown, rleft, rright),
@@ -552,7 +552,7 @@ namespace
                     if (std::getenv("GOW_RENDER_DIAG"))
                     {
                         static bool renderDumped = false;
-                        // GOW_RENDER_DIAG_DESDE=<segundos>: volcar la primera captura en partida a partir de ese momento.
+                        // GOW_RENDER_DIAG_DESDE=<segundos>: dump the first in-game capture from that moment on.
                         static const double dumpFrom = []
                         {
                             const char *v = std::getenv("GOW_RENDER_DIAG_DESDE");
@@ -567,7 +567,7 @@ namespace
                             data.write(reinterpret_cast<const char *>(runtime->memory().getVU1Data()), 0x4000);
                             std::ofstream ram("gow_render_ram.bin", std::ios::binary);
                             ram.write(reinterpret_cast<const char *>(rdram), 0x02000000u);
-                            // Sincronizar la VRAM del backend GPU antes de leer el búfer host.
+                            // Synchronize the GPU backend VRAM before reading the host buffer.
                             runtime->gs().refreshDisplaySnapshot();
                             const auto gsState = runtime->gs().getDebugSnapshot();
                             std::ofstream vram("gow_render_vram.bin", std::ios::binary);
@@ -686,7 +686,7 @@ namespace
         padReturn(ctx, 1u);
     }
 
-    // Sectores de la capa 0 del DVD (donde empieza la capa 1). Medido en la ISO del usuario.
+    // Sectors of DVD layer 0 (where layer 1 starts). Measured on the user's ISO.
     constexpr uint32_t kLayer1StartLbn = 2080544u;
 
     void writeGuest32(uint8_t *rdram, uint32_t addr, uint32_t value)
@@ -704,7 +704,7 @@ namespace
 
     void gowDiagPathSelect(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        // GOW-Port: getenv recorre todo el entorno; en funciones llamadas a menudo se lee una vez.
+        // GOW-Port: getenv walks the whole environment; in functions called often it is read once.
         static const bool pathDiag = std::getenv("GOW_PATH_DIAG") != nullptr;
         if (ctx->pc == 0x00180E50u && pathDiag)
         {
@@ -1408,7 +1408,7 @@ namespace
         sub_001262C8_0x1262c8(rdram, ctx, runtime);
     }
 
-    // GOW-Port: observar el productor de posiciones, sin alterar buffers ni ejecución EE.
+    // GOW-Port: observe the position producer, without altering buffers or EE execution.
     void gowDiagInitUnpack(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         if (ctx->pc != 0x00141350u) { sub_00141350_0x141350(rdram, ctx, runtime); return; }
@@ -1425,8 +1425,8 @@ namespace
     std::array<GowPrimProbe,16> g_primProbes{};
     size_t g_nextPrimProbe=0;
 
-    // GOW-Port: observar la lista usada por ProcessServer antes de ejecutar el original.
-    // La lista de SCUS-97399 usa nodos en objeto+8 y termina en NULL (MIPS 0x141BF4/0x1421A4).
+    // GOW-Port: observe the list used by ProcessServer before running the original.
+    // The SCUS-97399 list uses nodes at object+8 and ends in NULL (MIPS 0x141BF4/0x1421A4).
     void gowDiagPrimContext(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         if (ctx->pc != 0x00141B78u) { sub_00141B78_0x141b78(rdram, ctx, runtime); return; }
@@ -1488,11 +1488,11 @@ namespace
                              readGuest32(rdram, p.object + 8u), readGuest32(rdram, p.object + 0xF0u), readGuest32(rdram, p.object + 0xF4u));
             }
         }
-        // Nunca escribir índices, posiciones ni registros: el original conserva también sus checkpoints.
+        // Never write indices, positions or registers: the original also keeps its checkpoints.
         sub_00141B78_0x141b78(rdram, ctx, runtime);
     }
 
-    // GOW-Port: seleccionar el contexto de modelos segun el MIPS retail, sin modificarlo.
+    // GOW-Port: select the model context according to the retail MIPS, without modifying it.
     void gowDiagModelServer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         if (ctx->pc != 0x00159C58u) { sub_00159C58_0x159c58(rdram, ctx, runtime); return; }
@@ -1506,7 +1506,7 @@ namespace
             const uint32_t table = validServer ? readGuest32(rdram, server + 0x24u) : 0u;
             const uint32_t group = validServer ? readGuest32(rdram, server + 0x44u) : 0u;
             const uint32_t slot = validServer ? readGuest32(rdram, server + 0xD4u) : 0u;
-            // Calculos en 64 bits para no envolver indices fuera de RAM.
+            // 64-bit calculations so indices outside RAM do not wrap around.
             const uint64_t row = (table & 0x1FFFFFFFu) + uint64_t(group) * 12u;
             const bool validRow = table && row < 0x02000000u && padBuffer(rdram, uint32_t(row), 12u);
             const uint32_t array = validRow ? readGuest32(rdram, uint32_t(row)) : 0u;
@@ -1523,14 +1523,14 @@ namespace
                          sample, state, server, validServer ? 1u : 0u, table, group, slot, array, context,
                          validContext ? 1u : 0u, vtable, methods ? 1u : 0u, int(adjustment), target);
         }
-        // La seleccion es una fotografia de entrada; el original conserva sus checkpoints y llamadas.
+        // The selection is a snapshot of the input; the original keeps its checkpoints and calls.
         sub_00159C58_0x159c58(rdram, ctx, runtime);
     }
 
     struct GowModelContextSamples { uint32_t physical = 0u; unsigned early = 0u, scene = 0u; };
 
-    // GOW-Port: el maestro es compartido por varios servidores; limitar cada contexto
-    // evita que los primeros servidores agoten las muestras del servidor de modelos.
+    // GOW-Port: the master is shared by several servers; limiting each context
+    // keeps the first servers from exhausting the samples of the model server.
     unsigned gowModelContextSample(std::array<GowModelContextSamples, 8> &probes, uint32_t context, uint32_t state)
     {
         const uint32_t physical = context & 0x1FFFFFFFu;
@@ -1546,7 +1546,7 @@ namespace
     }
 
     // GOW-Port: lista del maestro GROB segun el MIPS retail 0x151238-0x151334.
-    // Una fotografia de entrada no sustituye la ejecucion ni prueba un envio al GS.
+    // A snapshot of the input does not replace the execution nor prove a send to the GS.
     void gowDiagGrobMaster(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         if (ctx->pc != 0x001511F0u) { sub_001511F0_0x1511f0(rdram, ctx, runtime); return; }
@@ -1598,7 +1598,7 @@ namespace
         sub_001511F0_0x1511f0(rdram, ctx, runtime);
     }
 
-    // GOW-Port: filtros de la lista de modelos, comprobados en MIPS 0x1598A0-0x15991C.
+    // GOW-Port: filters of the model list, checked in MIPS 0x1598A0-0x15991C.
     void gowDiagModelContext(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         if (ctx->pc != 0x00159878u) { sub_00159878_0x159878(rdram, ctx, runtime); return; }
@@ -1650,8 +1650,8 @@ namespace
         sub_00159878_0x159878(rdram, ctx, runtime);
     }
 
-    // GOW-Port: entrada real de la rutina que procesa un modelo (MIPS 0x157A60).
-    // Su estructura coincide con ProcessModel de la referencia GoW 2; el mapa retail no la nombra.
+    // GOW-Port: real entry of the routine that processes a model (MIPS 0x157A60).
+    // Its structure matches ProcessModel of the GoW 2 reference; the retail map does not name it.
     void gowDiagProcessModel(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         if (ctx->pc != 0x00157A60u) { sub_00157A60_0x157a60(rdram, ctx, runtime); return; }
@@ -1684,7 +1684,7 @@ namespace
     }
 
     // GOW-Port: resultado del Clip llamado desde ProcessModel (MIPS 0x157FA8).
-    // Solo observar bits de argumentos y resultado; no cambiar la FPU ni el criterio del juego.
+    // Only observe argument and result bits; do not change the FPU nor the game's criterion.
     void gowDiagModelClip(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         if (ctx->pc != 0x00169120u) { sub_00169120_0x169120(rdram, ctx, runtime); return; }
@@ -1738,7 +1738,7 @@ namespace
         auto &samples=readGuest32(rdram,0x29E560u)==11u ? scene : early;
         if (type != 0u || samples >= (readGuest32(rdram,0x29E560u)==11u ? 256u : 64u)) return;
         ++samples;
-        // Un checkpoint no es un retorno: no interpretar v0 como dirección en ese caso.
+        // A checkpoint is not a return: do not interpret v0 as an address in that case.
         if (ctx->pc != caller)
         {
             std::fprintf(stderr,"[gow-eeprim:update] caller=%x this=%x checkpoint=%x\n",caller,object,ctx->pc);
@@ -1766,7 +1766,7 @@ namespace
         ctx->pc = GPR_U32(ctx, 31);
     }
 
-    // Volcado hex + ASCII de memoria del EE para el registro de comandos.
+    // Hex + ASCII dump of EE memory for the command log.
     void dumpGuestBytes(const uint8_t *rdram, uint32_t addr, uint32_t len)
     {
         for (uint32_t off = 0; off < len; off += 16u)
@@ -1784,14 +1784,14 @@ namespace
         }
     }
 
-    // sub_0026BF28(cmd, tamano, datos): envio de comandos al driver de sonido 989snd (version EE).
+    // sub_0026BF28(cmd, tamano, datos): sends commands to the 989snd sound driver (EE version).
     // El original hace sceSifCallRpc(sid 0x123456, rpc = cmd, envio = 0x305640 [tamano bytes],
-    // respuesta = 0x305600 [12 bytes]) y devuelve la palabra 1 de la respuesta.
-    // cmd 0x68 = mensaje para un plugin de 989snd (smpd, el cargador de datos): 'datos' apunta a
-    // {u32 a, u32 b, u32 len, u32 ptr} y se envian los 12 primeros bytes + len bytes copiados de ptr.
-    // Desde que el emulador del IOP ejecuta los IRX originales (989NOMID.IRX + SMPD_IOP.IRX, copiados en
-    // IOP_MOD/ junto al ELF), el comando se pasa al original; aqui solo registramos lo que pide el juego.
-    // Con GOW_SND_STUB=1 se vuelve al comportamiento antiguo (responder 0 sin pasar por el IOP).
+    // respuesta = 0x305600 [12 bytes]) and returns word 1 of the reply.
+    // cmd 0x68 = message for a 989snd plugin (smpd, the data loader): 'datos' points to
+    // {u32 a, u32 b, u32 len, u32 ptr} and the first 12 bytes + len bytes copied from ptr are sent.
+    // Since the IOP emulator runs the original IRX modules (989NOMID.IRX + SMPD_IOP.IRX, copied to
+    // IOP_MOD/ next to the ELF), the command is passed to the original; here we only log what the game asks for.
+    // With GOW_SND_STUB=1 the old behavior returns (answer 0 without going through the IOP).
     int g_sndCmdCount = 0;
     const bool g_sndStub = []
     {
@@ -1851,10 +1851,10 @@ namespace
         }
     }
 
-    // sceSifLoadStartModuleBuffer(iopAddr, argLen, args, int *result) usado por el juego para cargar un
-    // modulo IOP minimo embebido en el ELF ("ck01"). El runtime aun no puede ejecutar modulos cargados
-    // desde memoria del IOP, asi que respondemos como una consola retail: el modulo se carga (id valido)
-    // y termina con NO_RESIDENT_END (1), que es el valor con el que el juego continua normalmente.
+    // sceSifLoadStartModuleBuffer(iopAddr, argLen, args, int *result) used by the game to load a
+    // minimal IOP module embedded in the ELF ("ck01"). The runtime cannot yet run modules loaded
+    // from IOP memory, so we answer like a retail console: the module is loaded (valid id)
+    // and ends with NO_RESIDENT_END (1), the value with which the game continues normally.
     void gowLoadStartModuleBuffer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
     {
         writeGuest32(rdram, GPR_U32(ctx, 7), 1u);
@@ -2119,8 +2119,8 @@ namespace
         }
         configureGowCdImage();
         gow_gs_replay::configure(runtime.memory(),runtime.gs());
-        // El heap interno del runtime va bajo el ELF (memoria libre) para no pisar el heap propio del juego,
-        // que este crea con SetupHeap al final del .bss (patches/ps2recomp-heap.patch).
+        // The runtime's internal heap goes below the ELF (free memory) so as not to trample the game's own heap,
+        // which it creates with SetupHeap at the end of .bss (patches/ps2recomp-heap.patch).
         runtime.setPrivateGuestHeap(0x000A0000u, 0x000FF000u);
         runtime.replaceFunction(0x00279600u, gowIpuInit);
         runtime.replaceFunction(0x0028C0C8u, gowRand);
@@ -2207,11 +2207,11 @@ namespace
         runtime.replaceFunction(0x0027BB98u, gowPad2GetState);
         runtime.replaceFunction(0x0027BF90u, gowVibGetProfile);
         runtime.replaceFunction(0x0027C010u, gowVibSetActParam);
-        // El recompilador descarta estas dos funciones porque empiezan en el delay slot
-        // de un "jr ra" suelto de la funcion anterior.
+        // The recompiler drops these two functions because they start in the delay slot
+        // of a stray "jr ra" of the previous function.
         const bool a = ps2_game_overrides::bindAddressHandler(runtime, 0x00296C48u, "sceSifInitRpc");
         const bool b = ps2_game_overrides::bindAddressHandler(runtime, 0x00294990u, "iWakeupThread");
-        // Sin handler en el runtime: la version original espera al CDVD del IOP para siempre.
+        // No handler in the runtime: the original version waits for the IOP CDVD forever.
         const bool c = runtime.replaceFunction(0x0027AB00u, gowCdReadDvdDualInfo);
         const bool d = runtime.replaceFunction(0x0026BF28u, gowSnd989SendCommand);
         const bool e = runtime.replaceFunction(0x00298CE8u, gowLoadStartModuleBuffer);

@@ -1,10 +1,10 @@
-"""GOW-Port: el control debe ejecutar pares compilados reales, además de dar paridad."""
+"""GOW-Port: the check must run real compiled pairs, in addition to giving parity."""
 import os
 import re
 import subprocess
 import sys
 
-# GOW-Port: con el runtime de Waffle565 la VU1 nativa va primero; se apaga para ejercitar los pares compilados.
+# GOW-Port: with Waffle565's runtime the native VU1 goes first; it is turned off to exercise the compiled pairs.
 env = dict(os.environ, GOW_VU1C_DIAG="1", GOW_VU1_NATIVE_OFF="1")
 for name in ("GOW_VU1C_RANGO", "GOW_VU1C_SIN_BLOQUES", "GOW_VU1_SIN_COMPILAR"):
     env.pop(name, None)

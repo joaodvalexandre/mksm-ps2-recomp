@@ -1,4 +1,4 @@
-// GOW-Port: datos procedurales; ninguna matriz o estructura proviene del juego.
+// GOW-Port: procedural data; no matrix or structure comes from the game.
 #include "../src/gow_skin_probe.h"
 #include <cstdio>
 #include <vector>
@@ -9,7 +9,7 @@ template<class T> void put(std::vector<uint8_t> &ram,size_t at,T value) {
 bool test() {
     std::vector<uint8_t> ram(0x5000),scratch(0x4000);
     const Memory mem{ram.data(),scratch.data(),ram.size(),scratch.size()};
-    // Alias válidos; último byte de cada región; cruces y direcciones no mapeadas.
+    // Valid aliases; last byte of each region; crossings and unmapped addresses.
     for(uint32_t alias:{0u,0x20000000u,0x80000000u,0xA0000000u}) {
         if(mem.at(alias+0x4FFF,0,1)!=ram.data()+0x4FFF || mem.at(alias+0x4FFF,0,2) ||
            mem.at(alias+0x4FFF,1,1) || mem.at(alias+0x4FFF,0xFFFFFFFFFFFFFFFFull,1)) return false;
@@ -26,7 +26,7 @@ bool test() {
     put<uint32_t>(ram,sk+0x50,0x1000); put<uint32_t>(ram,sk+0x54,visibility);
     put<uint32_t>(ram,sk+0x58,records); put<uint32_t>(ram,sk+0x60,def);
     put<uint32_t>(ram,def+0x10,2); put<uint32_t>(ram,def+0xC,64);
-    put<uint32_t>(ram,def+32,5); // Slots 0 y 2: selección dispersa, no dos primeros.
+    put<uint32_t>(ram,def+32,5); // Slots 0 and 2: sparse selection, not the first two.
     for(uint32_t i=0;i<3;++i) {
         put<uint32_t>(ram,records+i*16,0x81000000u | (i==1 ? 0x6000u : 0u));
         put<int16_t>(ram,records+i*16+4,int16_t(i)-1);
@@ -34,7 +34,7 @@ bool test() {
         put<uint32_t>(ram,records+i*16+12,0x3F800000u+i);
         put<uint32_t>(ram,visibility+i*4,i==2 ? 0u : 1u);
     }
-    put<uint32_t>(ram,sk+0x68,2); // Máscara usa índice del record, no índice del slot.
+    put<uint32_t>(ram,sk+0x68,2); // The mask uses the record index, not the slot index.
     const auto l=layout(mem,sk);
     if(!l.valid || !l.selectionValid || l.count!=3 || l.selectedCount!=2 ||
        !selected(l,0) || selected(l,1) || !selected(l,2) || selected(l,3)) return false;
@@ -42,7 +42,7 @@ bool test() {
     if(!s.recordValid || s.flags!=0x81006000u || s.indexField!=0 || s.parent!=33 || !s.maskValid || !s.masked ||
        !s.visibilityValid || s.visibility!=1 || s.threshold!=0x3F800001u) return false;
     if(slot(mem,sk,l,3).recordValid || slot(mem,sk,l,2).masked) return false;
-    // Los flags no son el índice ni el umbral; no leer un record incompleto.
+    // The flags are neither the index nor the threshold; do not read an incomplete record.
     if(slot(mem,sk,l,0).flags!=0x81000000u) return false;
     auto truncated=l; truncated.records=0x4FF1u;
     if(slot(mem,sk,truncated,0).recordValid || slot(mem,sk,truncated,0).flags) return false;
@@ -64,7 +64,7 @@ bool test() {
     if(!mem.matrix(0x70003FC0,0,read) || read!=expected || mem.matrix(0x70003FC0,1,read) ||
        mem.matrix(0x70003FC0,0xFFFFFFFFu,read) || ram!=beforeRam || scratch!=beforeScratch) return false;
     Timeline t; const auto now=Timeline::Clock::time_point{};
-    // No gastar muestras ni ocupar combinaciones antes de la ventana solicitada.
+    // Do not spend samples nor occupy combinations before the requested window.
     Timeline delayed;
     for(uint32_t i=1;i<=200;++i) if(delayed.take(i,2,3,now,2999,3000)) return false;
     if(delayed.total || delayed.items[0].skeleton ||
@@ -79,7 +79,7 @@ bool test() {
     Timeline cap;
     for(unsigned i=0;i<128;++i) if(!cap.take(i/32+1,2,3,now+std::chrono::seconds(i))) return false;
     if(cap.take(10,2,3,now+std::chrono::seconds(200))) return false;
-    // Original una vez; before/after solo en entrada/retorno real.
+    // Original once; before/after only on real entry/return.
     unsigned originals=0,inputs=0,outputs=0;
     uint32_t pc=0x100;
     const auto in=[&]{++inputs;}; const auto out=[&]{++outputs;};

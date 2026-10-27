@@ -1,5 +1,5 @@
-# Instrucciones para Claude
+# Instructions for Claude
 
-Las convenciones del proyecto están en AGENTS.md, compartidas con los demás agentes:
+The project conventions are in AGENTS.md, shared with the other agents:
 
 @AGENTS.md

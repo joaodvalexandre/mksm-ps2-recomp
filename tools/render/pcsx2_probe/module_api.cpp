@@ -1,4 +1,4 @@
-// GOW-Port: módulo aislado opcional, independiente del runtime del juego.
+// GOW-Port: optional isolated module, independent of the game runtime.
 #include "module_api.h"
 #include "host_probe.h"
 #include "../pcsx2_gif_sink.h"
@@ -12,9 +12,9 @@
 #include <thread>
 #include <vector>
 
-// GOW-Port: precisión explícita para no heredar silenciosamente Basic de GSOptions.
+// GOW-Port: explicit precision so Basic is not silently inherited from GSOptions.
 #ifndef GOW_PCSX2_BLENDING
-#error GOW_PCSX2_BLENDING debe fijarse al compilar el módulo
+#error GOW_PCSX2_BLENDING must be set when building the module
 #endif
 #define GOW_STRINGIFY_IMPL(value) #value
 #define GOW_STRINGIFY(value) GOW_STRINGIFY_IMPL(value)
@@ -26,12 +26,12 @@ std::thread::id owner;
 bool failed=false;
 alignas(16) GSPrivRegSet regs{};
 std::unique_ptr<gow_pcsx2_gs::GifBridge> bridge;
-// GOW-Port: descarga optativa independiente de la textura cruda y de la presentación del juego.
+// GOW-Port: optional download independent of the raw texture and of the game presentation.
 std::vector<uint32_t> snapshotPixels;
 uint32_t snapshotWidth=0,snapshotHeight=0,snapshotAspect=0,snapshotWindowWidth=0,snapshotWindowHeight=0;
 uint64_t snapshotHandle=0,snapshotSequence=0;
 bool snapshotValid=false;
-// GOW-Port: ambos cursores son de este ABI; una entrada posterior no se atribuye al último VSync.
+// GOW-Port: both cursors belong to this ABI; a later entry is not attributed to the last VSync.
 GowGsStreamInfo streamInfo{};
 bool vsyncQwordAligned=false;
 
@@ -112,7 +112,7 @@ uint32_t gow_gs_vsync(uint64_t handle,uint32_t field,const uint8_t* privileged,u
     const auto status=access(handle);if(status)return status;
     if(!privileged || size!=sizeof(regs) || field>1)return GOW_GS_BAD_ARGUMENT;
     try {
-        // GOW-Port: copiar registros PS2 reales, no un struct del runtime con otro layout.
+        // GOW-Port: copy real PS2 registers, not a runtime struct with another layout.
         std::memcpy(&regs,privileged,sizeof(regs));
         // No exigir complete(): VSync puede interrumpir un paquete GIF.
         snapshotValid=false;

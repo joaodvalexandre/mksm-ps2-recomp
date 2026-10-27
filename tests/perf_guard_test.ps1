@@ -1,4 +1,4 @@
-# GOW-Port: ejecutar los scripts reales con procesos simulados; nunca arrancar ni detener el juego.
+# GOW-Port: run the real scripts with simulated processes; never start or stop the game.
 $ErrorActionPreference = 'Stop'
 $testRepo = Split-Path -Parent $PSScriptRoot
 $testTempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
@@ -12,7 +12,7 @@ function Assert-Guard([bool]$condition,[string]$message) {
     if (-not $condition) { throw $message }
 }
 
-# Los mocks solo sustituyen procesos. Rutas, redirecciones, scripts y restauracion del entorno son reales.
+# The mocks only replace processes. Paths, redirections, scripts and environment restoration are real.
 function global:Get-Process {
     param([string[]]$Name,[string]$ErrorAction)
     $global:GowPerfGuardFixture.snapshots++
@@ -49,7 +49,7 @@ function global:Stop-Process {
 }
 try {
     New-Item -ItemType Directory -Path (Join-Path $testRoot 'scripts') -Force | Out-Null
-    foreach ($script in @('common.ps1','ejecutar.ps1','probar_rendimiento.ps1')) {
+    foreach ($script in @('common.ps1','run.ps1','test_performance.ps1')) {
         Copy-Item -LiteralPath (Join-Path $testRepo "scripts/$script") -Destination (Join-Path $testRoot 'scripts')
     }
     $env:GOW_WORK = Join-Path $testRoot 'work'
@@ -82,84 +82,84 @@ try {
             stopped=[Collections.Generic.List[int]]::new()
         }
         $caught = $null
-        try { & (Join-Path $testRoot 'scripts/probar_rendimiento.ps1') -Segundos 5 -Etiqueta $scenario }
+        try { & (Join-Path $testRoot 'scripts/test_performance.ps1') -Seconds 5 -Label $scenario }
         catch { $caught = $_ }
-        Assert-Guard ($env:GOW_PERF_DIAG -eq 'valor_previo' -and $env:PS2X_GS_GPU_PROF -eq 'diagnostico_previo') 'No se restauro el entorno'
-        Assert-Guard ($env:PS2X_GS_DIRECT_PRESENT -eq '1') 'No se restauro la presentacion previa'
-        Assert-Guard ($env:GOW_GS_REPLAY_STATE -eq '4') 'No se restauro el estado de captura previo'
-        Assert-Guard ($env:GOW_CAMERA_DIAG -eq '1') 'No se restauro el diagnostico de camara'
-        Assert-Guard (Test-Path -LiteralPath $captureFixture) 'El perfil sin capturas borro una captura existente'
-        Assert-Guard ($env:PS2X_VU1_HILO -eq '1' -and $env:PS2X_GS_FRENTE -eq '1') 'No se restauraron los hilos previos'
-        Assert-Guard ($env:GOW_GS_FINISH_ASINCRONO -eq '1') 'No se restauro FINISH asincrono previo'
-        Assert-Guard ($env:PS2X_GS_HW_LOG -eq '1') 'No se restauro el registro de hardware previo'
+        Assert-Guard ($env:GOW_PERF_DIAG -eq 'valor_previo' -and $env:PS2X_GS_GPU_PROF -eq 'diagnostico_previo') 'The environment was not restored'
+        Assert-Guard ($env:PS2X_GS_DIRECT_PRESENT -eq '1') 'The previous presentation mode was not restored'
+        Assert-Guard ($env:GOW_GS_REPLAY_STATE -eq '4') 'The previous capture state was not restored'
+        Assert-Guard ($env:GOW_CAMERA_DIAG -eq '1') 'The camera diagnostic was not restored'
+        Assert-Guard (Test-Path -LiteralPath $captureFixture) 'The capture-less profile deleted an existing capture'
+        Assert-Guard ($env:PS2X_VU1_HILO -eq '1' -and $env:PS2X_GS_FRENTE -eq '1') 'The previous threads were not restored'
+        Assert-Guard ($env:GOW_GS_FINISH_ASINCRONO -eq '1') 'The previous async FINISH setting was not restored'
+        Assert-Guard ($env:PS2X_GS_HW_LOG -eq '1') 'The previous hardware log setting was not restored'
         if ($global:GowPerfGuardFixture.starts -gt 0) {
-            Assert-Guard ($global:GowPerfGuardFixture.actualPresentation -eq '0') 'La presentacion RAM heredo el entorno anterior'
-            Assert-Guard ([string]::IsNullOrEmpty($global:GowPerfGuardFixture.actualCaptureState)) 'El perfil heredo el estado de captura'
-            Assert-Guard ([string]::IsNullOrEmpty($global:GowPerfGuardFixture.actualCameraDiag)) 'El perfil heredo el diagnostico de camara'
+            Assert-Guard ($global:GowPerfGuardFixture.actualPresentation -eq '0') 'RAM presentation inherited the previous environment'
+            Assert-Guard ([string]::IsNullOrEmpty($global:GowPerfGuardFixture.actualCaptureState)) 'The profile inherited the capture state'
+            Assert-Guard ([string]::IsNullOrEmpty($global:GowPerfGuardFixture.actualCameraDiag)) 'The profile inherited the camera diagnostic'
             Assert-Guard ($global:GowPerfGuardFixture.actualVu1Thread -eq '0' -and $global:GowPerfGuardFixture.actualGsFrontThread -eq '0') 'El perfil base heredo hilos activos'
             Assert-Guard ($global:GowPerfGuardFixture.actualFinishAsync -eq '0') 'El perfil base heredo FINISH asincrono'
             Assert-Guard ($global:GowPerfGuardFixture.actualGpuProfile -eq '0' -and $global:GowPerfGuardFixture.actualHardwareLog -eq '0') 'El perfil base heredo diagnosticos GPU'
         }
         $destination = Join-Path $testRoot "logs/perf_$scenario.log"
         if ($scenario -eq 'startup') {
-            Assert-Guard ($null -ne $caught -and $global:GowPerfGuardFixture.starts -eq 0) 'No se rechazo la compilacion previa'
-            Assert-Guard (-not (Test-Path -LiteralPath $destination)) 'Se guardo un perfil que no empezo'
+            Assert-Guard ($null -ne $caught -and $global:GowPerfGuardFixture.starts -eq 0) 'The earlier build was not rejected'
+            Assert-Guard (-not (Test-Path -LiteralPath $destination)) 'A profile that never started was saved'
         }
         elseif ($scenario -eq 'quiet') {
-            Assert-Guard ($null -eq $caught -and $global:GowPerfGuardFixture.starts -eq 1) 'El PID propio invalido la pasada limpia'
-            Assert-Guard ($global:GowPerfGuardFixture.stopped.Count -eq 0) 'Se detuvo una partida ya terminada'
-            Assert-Guard ((Get-Content -LiteralPath $destination -Raw) -notmatch '\[gow-perf:invalid\]') 'Se marco la pasada limpia'
+            Assert-Guard ($null -eq $caught -and $global:GowPerfGuardFixture.starts -eq 1) 'The own PID invalidated the clean pass'
+            Assert-Guard ($global:GowPerfGuardFixture.stopped.Count -eq 0) 'A game that had already finished was stopped'
+            Assert-Guard ((Get-Content -LiteralPath $destination -Raw) -notmatch '\[gow-perf:invalid\]') 'The clean pass was marked'
         }
         else {
-            Assert-Guard ($null -ne $caught -and $global:GowPerfGuardFixture.starts -eq 1) 'No se rechazo la carga que empezo durante el perfil'
-            Assert-Guard ($global:GowPerfGuardFixture.stopped.Count -eq 1 -and $global:GowPerfGuardFixture.stopped[0] -eq 4242) 'No se detuvo exclusivamente la instancia propia'
-            Assert-Guard ((Get-Content -LiteralPath $destination -Raw) -match '\[gow-perf:invalid\]') 'Falta la marca en el perfil conservado'
+            Assert-Guard ($null -ne $caught -and $global:GowPerfGuardFixture.starts -eq 1) 'The load that started during the profile was not rejected'
+            Assert-Guard ($global:GowPerfGuardFixture.stopped.Count -eq 1 -and $global:GowPerfGuardFixture.stopped[0] -eq 4242) 'The own instance was not the only one stopped'
+            Assert-Guard ((Get-Content -LiteralPath $destination -Raw) -match '\[gow-perf:invalid\]') 'The mark is missing from the kept profile'
         }
-        Write-Host "Control de vigilancia: $scenario OK"
+        Write-Host "Watch check: $scenario OK"
     }
-    # GOW-Port: la opcion compartida tambien debe reemplazar y restaurar el modo heredado.
+    # GOW-Port: the shared option must also replace and restore the inherited mode.
     $env:PS2X_GS_DIRECT_PRESENT = '0'
     $global:GowPerfGuardFixture.process.HasExited = $false
     $global:GowPerfGuardFixture.process.waits = 0
     $global:GowPerfGuardFixture.snapshots = 0
-    & (Join-Path $testRoot 'scripts/probar_rendimiento.ps1') -Segundos 5 -Renderer opengl -Presentacion compartida `
-        -Vu1Hilo -GsFrente -FinishAsync -GpuProfile -HardwareLog -Etiqueta shared
-    Assert-Guard ($global:GowPerfGuardFixture.actualPresentation -eq '1') 'La presentacion compartida heredo RAM'
-    Assert-Guard ($global:GowPerfGuardFixture.actualVu1Thread -eq '1' -and $global:GowPerfGuardFixture.actualGsFrontThread -eq '1') 'No se activaron los hilos solicitados'
-    Assert-Guard ($global:GowPerfGuardFixture.actualFinishAsync -eq '1') 'No se activo FINISH asincrono solicitado'
-    Assert-Guard ($global:GowPerfGuardFixture.actualGpuProfile -eq '1' -and $global:GowPerfGuardFixture.actualHardwareLog -eq '1') 'No se activaron los diagnosticos GPU solicitados'
-    Assert-Guard ($env:PS2X_GS_DIRECT_PRESENT -eq '0') 'No se restauro RAM tras la opcion compartida'
-    Assert-Guard ($env:PS2X_VU1_HILO -eq '1' -and $env:PS2X_GS_FRENTE -eq '1') 'No se restauraron los hilos tras la opcion compartida'
-    Assert-Guard ($env:GOW_GS_FINISH_ASINCRONO -eq '1') 'No se restauro FINISH tras la opcion compartida'
-    Assert-Guard ($env:PS2X_GS_GPU_PROF -eq 'diagnostico_previo' -and $env:PS2X_GS_HW_LOG -eq '1') 'No se restauraron los diagnosticos GPU tras la opcion compartida'
+    & (Join-Path $testRoot 'scripts/test_performance.ps1') -Seconds 5 -Renderer opengl -Presentation shared `
+        -Vu1Thread -GsFront -FinishAsync -GpuProfile -HardwareLog -Label shared
+    Assert-Guard ($global:GowPerfGuardFixture.actualPresentation -eq '1') 'Shared presentation inherited RAM'
+    Assert-Guard ($global:GowPerfGuardFixture.actualVu1Thread -eq '1' -and $global:GowPerfGuardFixture.actualGsFrontThread -eq '1') 'The requested threads were not enabled'
+    Assert-Guard ($global:GowPerfGuardFixture.actualFinishAsync -eq '1') 'The requested async FINISH was not enabled'
+    Assert-Guard ($global:GowPerfGuardFixture.actualGpuProfile -eq '1' -and $global:GowPerfGuardFixture.actualHardwareLog -eq '1') 'The requested GPU diagnostics were not enabled'
+    Assert-Guard ($env:PS2X_GS_DIRECT_PRESENT -eq '0') 'RAM was not restored after the shared option'
+    Assert-Guard ($env:PS2X_VU1_HILO -eq '1' -and $env:PS2X_GS_FRENTE -eq '1') 'Threads were not restored after the shared option'
+    Assert-Guard ($env:GOW_GS_FINISH_ASINCRONO -eq '1') 'FINISH was not restored after the shared option'
+    Assert-Guard ($env:PS2X_GS_GPU_PROF -eq 'diagnostico_previo' -and $env:PS2X_GS_HW_LOG -eq '1') 'GPU diagnostics were not restored after the shared option'
     $startsBefore = $global:GowPerfGuardFixture.starts
     $caught = $null
-    try { & (Join-Path $testRoot 'scripts/probar_rendimiento.ps1') -GsFrente -Renderer opengl }
+    try { & (Join-Path $testRoot 'scripts/test_performance.ps1') -GsFront -Renderer opengl }
     catch { $caught = $_ }
-    Assert-Guard ($null -ne $caught -and $global:GowPerfGuardFixture.starts -eq $startsBefore) 'Se acepto GS frontal sin hilo VU1'
+    Assert-Guard ($null -ne $caught -and $global:GowPerfGuardFixture.starts -eq $startsBefore) 'GS front was accepted without a VU1 thread'
     foreach ($duration in @(0, -1)) {
         $caught = $null
-        try { & (Join-Path $testRoot 'scripts/probar_rendimiento.ps1') -Segundos $duration }
+        try { & (Join-Path $testRoot 'scripts/test_performance.ps1') -Seconds $duration }
         catch { $caught = $_ }
-        Assert-Guard ($null -ne $caught -and $global:GowPerfGuardFixture.starts -eq $startsBefore) "Se acepto una duracion invalida: $duration"
+        Assert-Guard ($null -ne $caught -and $global:GowPerfGuardFixture.starts -eq $startsBefore) "An invalid duration was accepted: $duration"
     }
     $startsBefore = $global:GowPerfGuardFixture.starts
     $caught = $null
-    try { & (Join-Path $testRoot 'scripts/probar_rendimiento.ps1') -Renderer cpu -Presentacion compartida }
+    try { & (Join-Path $testRoot 'scripts/test_performance.ps1') -Renderer cpu -Presentation shared }
     catch { $caught = $_ }
-    Assert-Guard ($null -ne $caught -and $global:GowPerfGuardFixture.starts -eq $startsBefore) 'Se acepto presentacion compartida con CPU'
-    Write-Host 'Controles de presentacion: RAM, compartida y CPU incompatible OK'
+    Assert-Guard ($null -ne $caught -and $global:GowPerfGuardFixture.starts -eq $startsBefore) 'Shared presentation was accepted with the CPU renderer'
+    Write-Host 'Presentation checks: RAM, shared and CPU-incompatible OK'
 
-    # GOW-Port: las pruebas con captura deben seguir descartando archivos antiguos.
+    # GOW-Port: tests with capture must keep discarding old files.
     $staleCapture = Join-Path $env:GOW_WORK 'PS2Recomp/out/build/gow_pad_test_stale.ppm'
     Set-Content -LiteralPath $staleCapture -Value 'captura antigua'
     $env:GOW_PAD_TEST = '1'
     Remove-Item Env:GOW_PAD_TEST_NO_CAPTURE -ErrorAction SilentlyContinue
     $global:GowPerfGuardFixture.process.HasExited = $false
     $global:GowPerfGuardFixture.process.waits = 0
-    & (Join-Path $testRoot 'scripts/ejecutar.ps1') -Segundos 5
-    Assert-Guard (-not (Test-Path -LiteralPath $staleCapture)) 'La prueba con capturas no limpio la captura antigua'
-    Write-Host 'Limpieza de capturas para pruebas con captura habilitada OK'
+    & (Join-Path $testRoot 'scripts/run.ps1') -Seconds 5
+    Assert-Guard (-not (Test-Path -LiteralPath $staleCapture)) 'The capture-enabled test did not clean the old capture'
+    Write-Host 'Capture cleanup for capture-enabled tests OK'
 }
 finally {
     foreach ($name in $testPrevious.Keys) {
@@ -168,10 +168,10 @@ finally {
     }
     Remove-Item Function:Get-Process,Function:Start-Process,Function:Stop-Process -ErrorAction SilentlyContinue
     Remove-Variable GowPerfGuardFixture -Scope Global -ErrorAction SilentlyContinue
-    # Verificar el destino absoluto antes de limpiar unicamente el directorio temporal creado arriba.
+    # Verify the absolute target before cleaning only the temporary directory created above.
     $resolved = [IO.Path]::GetFullPath($testRoot)
     $prefix = $testTempRoot.TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
     if (-not $resolved.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) -or
-        (Split-Path -Leaf $resolved) -notmatch '^gow-perf-guard-[a-f0-9]{32}$') { throw 'Destino de limpieza no valido' }
+        (Split-Path -Leaf $resolved) -notmatch '^gow-perf-guard-[a-f0-9]{32}$') { throw 'Invalid cleanup target' }
     if (Test-Path -LiteralPath $resolved) { Remove-Item -LiteralPath $resolved -Recurse -Force }
 }

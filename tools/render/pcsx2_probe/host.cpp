@@ -9,8 +9,8 @@
 #include "imgui.h"
 #include <cstdio>
 #include <cstdlib>
-// GOW-Port: estado procedural para referencias estaticas de las cabeceras.
-// No se ejecuta ninguna instruccion EE ni se importa memoria del juego.
+// GOW-Port: procedural state for static references of the headers.
+// No EE instruction is run and no game memory is imported.
 alignas(16) cpuRegistersPack _cpuRegistersPack{};
 alignas(__pagealignsize) u8 eeHw[Ps2MemSize::Hardware]{};
 unsigned gsProbeWindowRequests=0;
@@ -78,7 +78,7 @@ void AddIconOSDMessage(std::string,const char*,std::string_view message,float){
     std::fprintf(stderr,"OSD: %.*s\n",int(message.size()),message.data());
 }
 bool IsFullscreen(){return false;}
-void SetFullscreen(bool enabled){if(enabled){std::fprintf(stderr,"Fullscreen no admitido en el fixture\n");std::abort();}}
+void SetFullscreen(bool enabled){if(enabled){std::fprintf(stderr,"Fullscreen is not supported in the fixture\n");std::abort();}}
 void RunOnCPUThread(std::function<void()> function,bool){function();}
 }
 namespace EmuFolders {

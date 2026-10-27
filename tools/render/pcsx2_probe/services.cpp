@@ -35,7 +35,7 @@ bool BeginCapture(float,GSVector2i,float,std::string){unavailable("Capture begin
 #include "common/RedtapeWindows.h"
 
 bool GSreopen(bool,bool,GSRendererType,std::optional<const Pcsx2Config::GSOptions*>){unavailable("GS reopen");return false;}
-bool FMVstarted=false; // No hay ejecutable ni reproduccion de FMV en este control.
+bool FMVstarted=false; // There is no executable nor FMV playback in this check.
 namespace Host {
 void AddKeyedOSDMessage(std::string,std::string message,float){std::fprintf(stderr,"OSD: %s\n",message.c_str());}
 bool GetBaseBoolSettingValue(const char*,const char*,bool fallback){return fallback;}
@@ -74,7 +74,7 @@ REJECT_DUMP_FACTORY(CreateXzDump)
 REJECT_DUMP_FACTORY(CreateZstDump)
 bool GSDumpBase::VSync(int,bool,const GSPrivRegSet*){unavailable("GS dump VSync");return false;}
 bool RGBA8Image::SaveToFile(const char*,u8) const {unavailable("Image file save");return false;}
-// GOW-Port: reserva real de codigo para el rasterizador SW original.
+// GOW-Port: real code reservation for the original SW rasterizer.
 // Se limita a esa region; no representa memoria EE/VU.
 namespace SysMemory {
 u8* GetCodePtr(size_t offset){

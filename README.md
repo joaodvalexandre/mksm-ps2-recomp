@@ -2,16 +2,19 @@
 
 # God of War — PS2 Static Recompilation
 
-**English** · [Español](README.es.md) · [Português (Brasil)](README.pt-BR.md)
-
 **A native PC port of *God of War* (PS2, NTSC-U `SCUS-97399`) built by statically recompiling MIPS R5900 code to C++.**
+
+> [!NOTE]
+> This repository is being adapted into a port of *Mortal Kombat: Shaolin Monks* (PS2, PAL `SLES-53524`) on top of
+> the same runtime. The text below still describes the God of War base; the Shaolin Monks work is tracked in
+> [`docs/MKSM.md`](docs/MKSM.md).
 
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20Linux%20x64-0078D6)
 ![Language](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)
 ![Build](https://img.shields.io/badge/build-CMake%20%2B%20Ninja-064F8C?logo=cmake&logoColor=white)
 ![Based on](https://img.shields.io/badge/based%20on-PS2Recomp-8A2BE2)
 ![Status](https://img.shields.io/badge/status-experimental-orange)
-[![Tests](https://github.com/KIexster/god-of-war-recomp/actions/workflows/pruebas.yml/badge.svg)](https://github.com/KIexster/god-of-war-recomp/actions/workflows/pruebas.yml)
+[![Tests](https://github.com/KIexster/god-of-war-recomp/actions/workflows/tests.yml/badge.svg)](https://github.com/KIexster/god-of-war-recomp/actions/workflows/tests.yml)
 [![Listed on PlayPorted](https://playported.com/badge.svg)](https://playported.com/ports/337-god-of-war/)
 
 </div>
@@ -65,9 +68,9 @@ This repository contains everything specific to God of War:
 
 ## Current status
 
-<a href="docs/estado/detalle.en.md"><img src="docs/estado/mapa.en.svg" alt="Port status map: Sony SDK library functions and PS2 hardware components, colored by status" width="100%"></a>
+<a href="docs/status/details.md"><img src="docs/status/map.svg" alt="Port status map: Sony SDK library functions and PS2 hardware components, colored by status" width="100%"></a>
 
-Per-library and per-component breakdown: [`docs/estado/detalle.en.md`](docs/estado/detalle.en.md). Regenerated from `docs/estado/datos.toml` by `tools/estado/generar.py` (and automatically on push to `main`).
+Per-library and per-component breakdown: [`docs/status/details.md`](docs/status/details.md). Regenerated from `docs/status/data.toml` by `tools/status/generate.py` (and automatically on push to `main`).
 
 Native Windows build on a Ryzen 7 5800XT with an RX 5700 XT (GS captures at 1024×894):
 
@@ -93,33 +96,33 @@ Native Windows build on a Ryzen 7 5800XT with an RX 5700 XT (GS captures at 1024
 The game plays like Waffle565's port: it boots, loads its data from the extracted disc and reaches gameplay with
 keyboard or controller. Performance in heavy scenes does not reach 60 on this machine yet; the critical path of each
 frame is the VU1 and GS work (~11–13 ms). An intermittent hang of the window thread (the game keeps running) is
-being investigated. See [`docs/ESTADO.md`](docs/ESTADO.md) for the measurements and their limits.
+being investigated.
 
 ## Repository layout
 
 ```
 .
-├── .github/workflows/            # CI: tests (pruebas.yml) and status map (estado.yml)
+├── .github/workflows/            # CI: tests (tests.yml) and status map (status.yml)
 ├── AGENTS.md                     # Project conventions for contributors and agents
 ├── config/
 │   ├── funcmap.csv               # Function map (name, start, end, size)
 │   └── recomp.template.toml      # PS2Recomp configuration (@ELF@, @MAP@, @OUT@)
 ├── docs/                         # Technical documentation
 │   ├── capturas/                 # Screenshots for this page
-│   └── estado/                   # Status map data and generated SVG/tables
+│   └── status/                   # Status map data and generated SVG/tables
 ├── game/                         # YOUR extracted disc goes here: SCUS_973.99, IRX, PAK, .disc_layout (git-ignored)
 ├── patches/
 │   ├── ps2recomp-waffle-runtime.patch   # Waffle565's runtime on PS2Recomp @ c5a9d02
-│   ├── ps2recomp-*.patch         # Our fixes on top, in scripts/compilar.ps1 order
+│   ├── ps2recomp-*.patch         # Our fixes on top, in scripts/build.ps1 order
 │   └── anteriores/               # Patch stack from before the migration (reference, not applied)
 ├── scripts/
-│   ├── 1_instalar_herramientas.cmd
-│   ├── 2_compilar.cmd            # Full pipeline (GOW_IOP_MODULOS: native IOP)
-│   ├── 2_recompilar_rapido.cmd   # Rebuilds only src/gow_overrides.cpp (~1 min)
-│   ├── 3_ejecutar.cmd            # Runs for 60 s and saves logs (extracts the disc the first time)
-│   ├── 3_ejecutar_manual.cmd     # Runs with no time limit
-│   ├── probar_menu.ps1           # Menu test with GS captures
-│   ├── probar_pad2.cmd           # Builds and runs the libpad2 packet test
+│   ├── 1_install_tools.cmd
+│   ├── 2_build.cmd            # Full pipeline (GOW_IOP_MODULOS: native IOP)
+│   ├── 2_rebuild_fast.cmd   # Rebuilds only src/gow_overrides.cpp (~1 min)
+│   ├── 3_run.cmd            # Runs for 60 s and saves logs (extracts the disc the first time)
+│   ├── 3_run_manual.cmd     # Runs with no time limit
+│   ├── test_menu.ps1           # Menu test with GS captures
+│   ├── test_pad2.cmd           # Builds and runs the libpad2 packet test
 │   └── *.ps1                     # Script logic
 ├── src/
 │   ├── gow_overrides.cpp         # Game-specific overrides (from Waffle565)
@@ -127,7 +130,7 @@ being investigated. See [`docs/ESTADO.md`](docs/ESTADO.md) for the measurements 
 ├── tests/                        # Game-independent tests and known suite failures
 └── tools/
     ├── ci/                       # CI helpers (patch order, config, tests)
-    ├── estado/generar.py         # Status map generator
+    ├── status/generate.py        # Status map generator
     ├── iop/iopn_gen.py           # Compiles the game's IRX to C++ (native IOP)
     ├── vu1/vu1n_gen.py           # Compiles the VU1 microcode to C++ (native VU1)
     └── iso_extract.py            # Extracts the disc keeping its original sectors (--layout)
@@ -142,7 +145,7 @@ being investigated. See [`docs/ESTADO.md`](docs/ESTADO.md) for the measurements 
 - ~20 GB of free space (the extracted disc takes ~8.5 GB); 16 GB of RAM recommended (the build uses every core)
 - Your own copy of **God of War (NTSC-U, SCUS-97399)**
 
-`scripts\1_instalar_herramientas.cmd` installs Git and the Build Tools with `winget`.
+`scripts\1_install_tools.cmd` installs Git and the Build Tools with `winget`.
 
 ## Building and running
 
@@ -155,43 +158,43 @@ python tools\iso_extract.py "D:\God of War.iso" game --layout
 
 This leaves the executable `SCUS_973.99`, the `.IRX` modules, `PART1.PAK`/`PART2.PAK` (both DVD layers) and the
 `.disc_layout` index in `game\`. If the ELF is somewhere else, point `GOW_ELF` at it; the disc files must sit next
-to it. `scripts\ejecutar.ps1` extracts the disc by itself on first run if it finds `God of War.iso` in the folder
+to it. `scripts\run.ps1` extracts the disc by itself on first run if it finds `God of War.iso` in the folder
 above the ELF's, and `GOW_ISO=<path>` makes the runtime read the image directly.
 
 **2. Install the tools** (first time only):
 
 ```bat
-scripts\1_instalar_herramientas.cmd
+scripts\1_install_tools.cmd
 ```
 
 **3. Build** (20–40 min the first time):
 
 ```bat
-scripts\2_compilar.cmd
+scripts\2_build.cmd
 ```
 
-The script clones PS2Recomp into `<drive>:\gowport` (a short path to avoid the 260-character limit;
-configurable with `GOW_WORK`), pins commit `c5a9d02`, applies the patches in `patches/`, generates the C++ code and builds
-`ps2EntryRunner.exe`. The log is written to `logs\2_compilar.log`.
+The script clones PS2Recomp into `mksm-work` inside the Recomps folder that holds this repository (a short path to
+avoid the 260-character limit; configurable with `GOW_WORK`), pins commit `c5a9d02`, applies the patches in `patches/`, generates the C++ code and builds
+`ps2EntryRunner.exe`. The log is written to `logs\2_build.log`.
 
 Release builds disable function and IOP RPC traces by default. For diagnostics, use
-`scripts\2_compilar.cmd -Trazas`. To measure game `vid::Flip` calls separately from window refreshes,
-run `powershell -File scripts\probar_rendimiento.ps1`; see [the profiling notes](docs/ESTADO.md#medicion-de-rendimiento-2026-10-05).
+`scripts\2_build.cmd -Traces`. To measure game `vid::Flip` calls separately from window refreshes,
+run `powershell -File scripts\test_performance.ps1`.
 
 **4. Run:**
 
 ```bat
-scripts\3_ejecutar.cmd          :: 60 seconds, output in logs\
-scripts\3_ejecutar_manual.cmd   :: no time limit
+scripts\3_run.cmd          :: 60 seconds, output in logs\
+scripts\3_run_manual.cmd   :: no time limit
 ```
 
-**F2** shows an FPS meter (also with `GOW_FPS=1`); see [`docs/CONTROLES.md`](docs/CONTROLES.md#medidor-de-fps).
+**F2** shows an FPS meter (also with `GOW_FPS=1`).
 The game starts in borderless fullscreen; **F11** switches to a window and back (`GOW_PANTALLA_COMPLETA=0` starts
 windowed). **F1** opens the runtime debugger.
 `GOW_PANORAMICO=ampliado` uses the enhanced widescreen (a wider view instead of cropping top and bottom, an idea by
 nemesis2000 and CRASHARKI); it draws more and costs performance.
 `GOW_HZ=120` (experimental) lets the game logic run above 60 frames per second (up to 120, depending on the scene and
-the computer) and presents up to 120 pictures per second; see [`docs/CONTROLES.md`](docs/CONTROLES.md#120-hz).
+the computer) and presents up to 120 pictures per second.
 
 **5. Native IOP (optional, as in Waffle565's port).** Compiles the game's 8 IRX modules ahead of time and
 shortens loading (gameplay starts at ~21 s instead of ~34 s). One run dumps the modules and the next build
@@ -199,10 +202,10 @@ uses them:
 
 ```bat
 set PS2X_IOP_DUMP_MODULES=%CD%\logs\iop_modulos
-scripts\3_ejecutar.cmd
+scripts\3_run.cmd
 set PS2X_IOP_DUMP_MODULES=
 set GOW_IOP_MODULOS=%CD%\logs\iop_modulos
-scripts\2_compilar.cmd
+scripts\2_build.cmd
 ```
 
 ## How it works
@@ -222,18 +225,13 @@ flowchart LR
     F <--> G
 ```
 
-More details in [`docs/ARQUITECTURA.md`](docs/ARQUITECTURA.md).
+More details in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Documentation
 
-The technical documentation is currently written in Spanish:
-
-- [`docs/ARQUITECTURA.md`](docs/ARQUITECTURA.md) — pipeline, overrides, runtime patches and CI
-- [`docs/CONTROLES.md`](docs/CONTROLES.md) — controls and menu/input tests
-- [`docs/RENDERIZADO.md`](docs/RENDERIZADO.md) — optional CPU/threaded CPU/OpenGL renderers and comparisons
-- [`docs/RENDIMIENTO.md`](docs/RENDIMIENTO.md) — performance measurements, optional threads and VU1 optimizations
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — pipeline, overrides, runtime patches and CI
 - [`AGENTS.md`](AGENTS.md) — project conventions for contributors and coding agents
-- [`docs/ESTADO.md`](docs/ESTADO.md) — current status, investigation log, known issues and next steps
+- [`docs/MKSM.md`](docs/MKSM.md) — Mortal Kombat: Shaolin Monks port: disc, executable, differences and next steps
 
 ## Credits and license
 

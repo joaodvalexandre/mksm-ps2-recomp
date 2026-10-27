@@ -1,5 +1,5 @@
 # GOW-Port: copiado de Waffle565/God-Of-War-Native-Port, main@34f30d5:tools/vu1/vu1n_gen.py.
-# Genera los bloques de la VU1 nativa (ps2recomp-vu1-native.patch).
+# Generates the blocks of the native VU1 (ps2recomp-vu1-native.patch).
 """Native VU1 block generator.
 
 usage: python -I tools/vu1/vu1n_gen.py <out dir> <micro-memory dir or .bin files...> [--heads heads.txt] [--parts N]

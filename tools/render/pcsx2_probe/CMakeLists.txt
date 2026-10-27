@@ -1,4 +1,4 @@
-# GOW-Port: módulo GS procedural Windows. No compila ni necesita el juego.
+# GOW-Port: procedural GS module for Windows. It neither builds nor needs the game.
 cmake_minimum_required(VERSION 3.24)
 project(gow_pcsx2_probe LANGUAGES C CXX)
 if(NOT WIN32 OR NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
@@ -6,8 +6,8 @@ if(NOT WIN32 OR NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
 endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-# GOW-Port: el espejo debe declarar su precisión; Basic conserva los controles históricos.
-set(GOW_PCSX2_BLENDING "Maximum" CACHE STRING "Precisión de mezcla del espejo: Basic o Maximum")
+# GOW-Port: the mirror must declare its precision; Basic keeps the historical checks.
+set(GOW_PCSX2_BLENDING "Maximum" CACHE STRING "Blending precision of the mirror: Basic or Maximum")
 set_property(CACHE GOW_PCSX2_BLENDING PROPERTY STRINGS Basic Maximum)
 if(NOT GOW_PCSX2_BLENDING STREQUAL "Basic" AND NOT GOW_PCSX2_BLENDING STREQUAL "Maximum")
   message(FATAL_ERROR "GOW_PCSX2_BLENDING debe ser Basic o Maximum")
@@ -21,7 +21,7 @@ endif()
 execute_process(COMMAND git -C "${PCSX2_SOURCE}" rev-parse HEAD
   OUTPUT_VARIABLE source_revision RESULT_VARIABLE git_result OUTPUT_STRIP_TRAILING_WHITESPACE)
 if(NOT git_result EQUAL 0 OR NOT source_revision STREQUAL "2954ebe6965669219f1bbd256e958fbd8f83a85d")
-  message(FATAL_ERROR "PCSX2 no coincide con la revisión fijada")
+  message(FATAL_ERROR "PCSX2 does not match the pinned revision")
 endif()
 execute_process(COMMAND git -C "${PCSX2_SOURCE}" diff --exit-code --quiet "${source_revision}" --
   RESULT_VARIABLE git_result)
@@ -78,8 +78,8 @@ target_compile_definitions(gow_pcsx2_probe PUBLIC _M_X86=1 __SSE4_1__=1 UNICODE 
 target_compile_definitions(gow_pcsx2_probe PRIVATE GOW_PROBE_RESOURCES="${PCSX2_SOURCE}/bin/resources")
 target_compile_options(gow_pcsx2_probe PUBLIC /O2 /Gy /Gw /arch:AVX2 /EHsc /utf-8 /Zc:preprocessor /Zc:__cplusplus)
 
-# Solo SM4/5 para DX11: DXC se retrasa y no se necesita al ejecutar estos tests.
-# Se genera la import library a partir del ABI público, sin copiar una DLL.
+# Only SM4/5 for DX11: DXC is delayed and not needed when running these tests.
+# The import library is generated from the public ABI, without copying a DLL.
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/dxc.def" "LIBRARY dxcompiler.dll\nEXPORTS\n DxcCreateInstance\n")
 add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/dxc.lib"
   COMMAND "${CMAKE_AR}" /nologo "/def:${CMAKE_CURRENT_BINARY_DIR}/dxc.def"
@@ -123,4 +123,4 @@ target_include_directories(gs_module_gpu_probe PRIVATE "${PCSX2_SOURCE}" "${PCSX
   "${PCSX2_SOURCE}/3rdparty/fmt/include")
 target_compile_definitions(gs_module_gpu_probe PRIVATE _M_X86=1 __SSE4_1__=1)
 target_compile_options(gs_module_gpu_probe PRIVATE /O2 /EHsc /utf-8 /arch:AVX2)
-# Los dos controles GPU se ejecutan expresamente en un equipo con hardware.
+# The two GPU checks are run explicitly on a machine with hardware.

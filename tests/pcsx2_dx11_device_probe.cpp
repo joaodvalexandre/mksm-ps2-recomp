@@ -1,5 +1,5 @@
 // GOW-Port: control procedural del dispositivo DX11 original de PCSX2.
-// No ejecuta el juego ni sustituye el parser/rasterizador del GS.
+// It does not run the game nor replace the GS parser/rasterizer.
 #include "GS/GS.h"
 #include "GS/Renderers/DX11/GSDevice11.h"
 #include <cstdio>
@@ -58,8 +58,8 @@ static bool checkDevice(unsigned cycle)
         }
     if (!source->Update(GSVector4i(0, 0, width, height), padded.data(), (width + padding) * sizeof(u32)))
         return false;
-    // GOW-Port: pasa por los shaders originales; copiar con DXGI directamente
-    // no comprobaria el estado ni la conversion del dispositivo de PCSX2.
+    // GOW-Port: goes through the original shaders; copying with DXGI directly
+    // would not check the state nor the conversion of the PCSX2 device.
     g_gs_device->StretchRectAuto(source.get(), target.get(), Nearest);
     return compare(target.get(), expected, "Shader COPY");
 }
@@ -72,7 +72,7 @@ int main()
     for (unsigned cycle = 0; cycle < 2; ++cycle)
     {
         success = checkDevice(cycle);
-        // GOW-Port: las texturas locales ya estan destruidas al cerrar device.
+        // GOW-Port: the local textures are already destroyed when the device is closed.
         if (g_gs_device)
         {
             g_gs_device->Destroy();

@@ -1,4 +1,4 @@
-// GOW-Port: muestreo y lectura de modelos retail SCUS-97399, sin escribir RAM.
+// GOW-Port: sampling and reading of retail SCUS-97399 models, without writing RAM.
 #pragma once
 #include "gow_camera_probe.h"
 #include <array>
@@ -11,8 +11,8 @@ namespace gow_model_probe {
             return n<64u ? ++n : 0u;
         }
     };
-    // Cada fase tiene su propia tabla: ni los objetos ni las vistas del menú
-    // consumen las plazas de la intro. Tiempo explícito para probar los límites.
+    // Each phase has its own table: neither the objects nor the menu views
+    // consume the intro slots. Explicit time to test the limits.
     struct Timeline {
         using Clock=std::chrono::steady_clock;
         struct Item { uint32_t model=0,view=0; unsigned count=0; Clock::time_point next{}; };
@@ -41,7 +41,7 @@ namespace gow_model_probe {
         // Primeras ocho articulaciones: lectura acotada, sin copiar toda la paleta.
         std::array<Joint,8> firstJoints{};
     };
-    // GOW-Port: límite de salida del diagnóstico, no límite de la jerarquía del juego.
+    // GOW-Port: output limit of the diagnostic, not a limit of the game hierarchy.
     struct PaletteRead { uint32_t read=0; bool complete=false; };
     template<class Visitor> inline PaletteRead visitPalette(const uint8_t *ram,size_t size,
         uint32_t palette,uint32_t count,Visitor visitor) {
@@ -67,7 +67,7 @@ namespace gow_model_probe {
         if(!o) return p;
         p.validObject=true;
         // CalcWorldMatrix 0x1303D0: matriz local +0x20, mundo +0x70,
-        // articulación +0x60 y sello +0x68; aquí no se fuerza su actualización.
+        // joint +0x60 and stamp +0x68; its update is not forced here.
         p.joint=read<uint16_t>(o+0x60); p.objectTick=read<uint64_t>(o+0x68);
         std::memcpy(p.local.data(),o+0x20,64); std::memcpy(p.world.data(),o+0x70,64);
         p.skeleton=read<uint32_t>(o+0x104);
@@ -77,7 +77,7 @@ namespace gow_model_probe {
         p.skeletonTick=read<uint64_t>(s+0x40); p.joints=read<uint32_t>(s+0x8C);
         const auto *definition=span(ram,size,read<uint32_t>(s+0x60),0x14u);
         if(!definition) return p;
-        // CalcSkinHierarchy 0x137558 toma el número de articulaciones de +0x10;
+        // CalcSkinHierarchy 0x137558 takes the number of joints from +0x10;
         // CalcWorldMatrix 0x1306E4 indexa matrices de 64 bytes desde skeleton+0x8C.
         p.jointCount=read<uint32_t>(definition+0x10);
         if(p.joints) for(size_t i=0;i<p.firstJoints.size() && i<p.jointCount;++i) {

@@ -1,0 +1,46 @@
+# Regenerates the status map (docs/status/) when its data changes and pushes the result.
+name: Status map
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/status/data.toml
+      - config/funcmap.csv
+      - tools/status/**
+      - .github/workflows/status.yml
+  pull_request:
+    paths:
+      - docs/status/**
+      - config/funcmap.csv
+      - tools/status/**
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # On a PR it only warns if the generated files are not up to date
+      - name: Check
+        if: github.event_name == 'pull_request'
+        run: python tools/status/generate.py --check
+
+      - name: Generate and push
+        if: github.event_name != 'pull_request'
+        run: |
+          python tools/status/generate.py
+          if [ -n "$(git status --porcelain docs/status)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add docs/status
+            git commit -m "Update the status map"
+            git push
+          fi

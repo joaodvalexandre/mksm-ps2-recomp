@@ -1,4 +1,4 @@
-// GOW-Port: datos copiados, FIFO entre eventos, presión y cierre con drenaje.
+// GOW-Port: copied data, FIFO between events, pressure and close with drain.
 #include "../src/gow_gs_pcsx2_queue.h"
 #include <chrono>
 #include <future>
@@ -24,5 +24,5 @@ int main(){
     blocked.close();
     if(pending.get())return 1;
     unsigned value=0;if(!blocked.pop(value) || value!=1 || blocked.pop(value))return 1;
-    std::puts("Cola GS: copia, orden, presión, rechazo de exceso y cierre con drenaje correctos");
+    std::puts("GS queue: copy, order, pressure, overflow rejection and close with drain correct");
 }

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """GOW-Port: extraer dependencias GS originales para el control Windows aislado.
 
-No descarga archivos, limpia árboles ni lee el juego. Los extractos conservan
-la licencia de PCSX2; la revisión y el árbol fuente deben coincidir exactamente.
+It does not download files, clean trees nor read the game. The excerpts keep
+the PCSX2 license; the revision and the source tree must match exactly.
 """
 import argparse
 import json
@@ -13,7 +13,7 @@ import subprocess
 REVISION = "2954ebe6965669219f1bbd256e958fbd8f83a85d"
 NOTICE = """// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
-// GOW-Port: extractos de PCSX2 2954ebe para el módulo de prueba aislado.
+// GOW-Port: excerpts of PCSX2 2954ebe for the isolated test module.
 """
 
 
@@ -36,11 +36,11 @@ def prepare(source: Path, output: Path) -> None:
         raise ValueError(f"PCSX2 debe estar en {REVISION}; encontrado {actual}")
     subprocess.run(["git", "-C", str(source), "diff", "--exit-code", "--quiet", REVISION, "--"], check=True)
     if output == source or output in source.parents or source in output.parents or output == Path(__file__).resolve().parent:
-        raise ValueError("El destino debe ser un directorio separado de las fuentes")
+        raise ValueError("The destination must be a directory separate from the sources")
     marker = output / "pcsx2-probe.json"
     if output.exists() and any(output.iterdir()):
         if not marker.exists() or json.loads(marker.read_text(encoding="utf-8")).get("revision") != REVISION:
-            raise ValueError("El destino no está vacío ni pertenece a este control")
+            raise ValueError("The destination is neither empty nor belongs to this check")
     output.mkdir(parents=True, exist_ok=True)
 
     def read(path: str) -> str:
@@ -60,7 +60,7 @@ def prepare(source: Path, output: Path) -> None:
                      config.index("Pcsx2Config EmuConfig;")]
     constructors = re.findall(r"^Pcsx2Config::(?:\w+::)?\w+\(\)", config, re.M)
     if len(constructors) != 15:
-        raise ValueError("La lista de constructores de configuración no coincide")
+        raise ValueError("The list of configuration constructors does not match")
     for signature in constructors + [
         "bool Pcsx2Config::GSOptions::ShouldDump", "TraceLogFilters::TraceLogFilters()",
         "TraceLogsEE::TraceLogsEE()", "TraceLogsIOP::TraceLogsIOP()", "TraceLogsMISC::TraceLogsMISC()",
@@ -88,18 +88,18 @@ static HANDLE s_fh = NULL;
 '''
     result += function(gs, "void* GSAllocateWrappedMemory")
     free = function(gs, "void GSFreeWrappedMemory")
-    # Al conservar placeholders, MEM_RELEASE sobre ptr solo libera la primera
-    # vista. Unirlas primero conserva el rango completo de la reserva original.
-    free = free.replace("\tVirtualFreeEx(GetCurrentProcess(), ptr, 0, MEM_RELEASE);", '''\t// GOW-Port: unir todos los placeholders antes de liberar el rango completo.
+    # When keeping placeholders, MEM_RELEASE on ptr only frees the first
+    # view. Joining them first keeps the full range of the original reservation.
+    free = free.replace("\tVirtualFreeEx(GetCurrentProcess(), ptr, 0, MEM_RELEASE);", '''\t// GOW-Port: join all the placeholders before freeing the full range.
 \tif (repeat > 1 && !VirtualFreeEx(GetCurrentProcess(), ptr, size * repeat, MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS))
 \t{
-\t\tConsole.Error("No se pudieron unir las vistas GS: %u", GetLastError());
+\t\tConsole.Error("Could not join the GS views: %u", GetLastError());
 \t\tstd::abort();
 \t}
 \tVirtualFreeEx(GetCurrentProcess(), ptr, 0, MEM_RELEASE);''')
-    # GOW-Port: el módulo independiente debe cerrar también el handle del mapa.
-    # El original solo borra s_fh; la prueba de ciclos detecta esa fuga.
-    free = free.replace("\ts_fh = NULL;", "\t// GOW-Port: cerrar el handle después de desmapear sus vistas.\n\tCloseHandle(s_fh);\n\ts_fh = NULL;")
+    # GOW-Port: the independent module must also close the handle of the map.
+    # The original only clears s_fh; the cycle test detects that leak.
+    free = free.replace("\ts_fh = NULL;", "\t// GOW-Port: close the handle after unmapping its views.\n\tCloseHandle(s_fh);\n\ts_fh = NULL;")
     result += free
     for signature in ["std::string GetDefaultAdapter()", "u32 GSGetMaxUpscaleMultiplier",
                       "std::pair<u8, u8> GSGetRGBA8AlphaMinMax"]:

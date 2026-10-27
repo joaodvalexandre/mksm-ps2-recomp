@@ -1,6 +1,6 @@
-// GOW-Port: escrituras de stubs sin inventar un PATH ni perder cursores GIF.
-// El índice 0 legado está reservado a estos paquetes A+D completos; el puente
-// continuo usa 3/1/2. Conservar Q: una escritura directa no es un tag del juego.
+// GOW-Port: stub writes without inventing a PATH nor losing GIF cursors.
+// Legacy index 0 is reserved for these complete A+D packets; the continuous
+// bridge uses 3/1/2. Keep Q: a direct write is not a game tag.
 #pragma once
 #include <array>
 #include <cstdint>

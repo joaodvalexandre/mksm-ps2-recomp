@@ -1,4 +1,4 @@
-// GOW-Port: comprobar FINISH opcional y la barrera de lectura sin GPU ni datos del juego.
+// GOW-Port: check the optional FINISH and the read barrier without a GPU or game data.
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/gs_threaded_backend.h"
 #include "runtime/ps2_memory.h"
@@ -60,7 +60,7 @@ namespace {
 int main(int argc,char **argv) {
     if(argc!=2 || (std::string_view(argv[1])!="default" && std::string_view(argv[1])!="async")) return 2;
     const bool async=std::string_view(argv[1])=="async";
-    // Procesos separados: el runtime lee esta opción una sola vez.
+    // Separate processes: the runtime reads this option only once.
     option("GOW_GS_FINISH_ASINCRONO",async?"1":"0");
     option("PS2X_GS_GPU","0"); option("PS2X_GS_THREAD","0");
     Recording recording;
@@ -81,13 +81,13 @@ int main(int argc,char **argv) {
         std::cerr<<"FINISH opcional no devuelve antes del backend\n"; valid=false;
     }
     if(!async && entered.wait_for(5s)!=std::future_status::ready) {
-        std::cerr<<"FINISH default no llegó al backend\n"; valid=false;
+        std::cerr<<"Default FINISH did not reach the backend\n"; valid=false;
     }
-    // En modo async, la lectura publica el bloque abierto y fuerza su ejecución.
-    // En modo default, FINISH ya publicó el bloque. Ambos deben esperar al gate.
+    // In async mode, the read publishes the open block and forces its execution.
+    // In default mode, FINISH already published the block. Both must wait for the gate.
     auto read=std::async(std::launch::async,[&] { return raw->ReadVram(0,0,1,0,0); });
     if(entered.wait_for(5s)!=std::future_status::ready) {
-        std::cerr<<"FINISH no llegó al hilo del GS\n"; valid=false;
+        std::cerr<<"FINISH did not reach the GS thread\n"; valid=false;
     }
     const bool returned=finish.wait_for(0s)==std::future_status::ready;
     const bool signaled=(registers.csr.load()&2)!=0;
@@ -95,16 +95,16 @@ int main(int argc,char **argv) {
         std::cerr<<"Retorno/bit FINISH no respetan el modo seleccionado\n"; valid=false;
     }
     if(read.wait_for(0s)==std::future_status::ready) {
-        std::cerr<<"La lectura de VRAM adelantó el FINISH pendiente\n"; valid=false;
+        std::cerr<<"The VRAM read got ahead of the pending FINISH\n"; valid=false;
     }
-    // Liberar siempre antes de recoger futures y destruir la cola, incluso si falla.
+    // Always release before collecting futures and destroying the queue, even on failure.
     recording.release.set_value();
     finish.get();
     if(read.get()!=42 || (registers.csr.load()&2)==0) valid=false;
     raw->Flush();
     { std::lock_guard lock(recording.mutex);
       if(recording.events!=std::vector<int>({1,2,3,4})) {
-          std::cerr<<"Se alteró el orden dibujos -> FINISH -> lectura\n"; valid=false;
+          std::cerr<<"The order draws -> FINISH -> read was altered\n"; valid=false;
       }
     }
     if(valid) std::cout<<"FINISH "<<argv[1]<<": retorno, CSR, orden y lectura sincronizada: OK\n";

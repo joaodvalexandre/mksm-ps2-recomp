@@ -1,4 +1,4 @@
-// GOW-Port: contrastar offsets del espejo con los headers originales fijados.
+// GOW-Port: compare the mirror offsets with the pinned original headers.
 #include "GS/GSRegs.h"
 #include <cstddef>
 static_assert(sizeof(GSPrivRegSet)==8192);

@@ -1,5 +1,5 @@
 // GOW-Port: espejo privilegiado PS2 para el consumidor GS externo.
-// El llamante debe leer registros coherentes en el hilo dueño/sincronizado.
+// The caller must read coherent registers on the owner/synchronized thread.
 #pragma once
 #include <array>
 #include <atomic>
@@ -8,8 +8,8 @@
 namespace gow_pcsx2_mirror {
 using Bytes=std::array<uint8_t,8192>;
 template<class Registers> Bytes pack(const Registers& regs){
-    // GSRegisters del runtime es compacto y contiene vsyncTick entre CSR/IMR.
-    // Los offsets son de hardware PS2, no del struct anfitrion.
+    // The runtime's GSRegisters is compact and contains vsyncTick between CSR/IMR.
+    // The offsets are PS2 hardware ones, not those of the host struct.
     const uint64_t values[]={regs.pmode,regs.smode1,regs.smode2,regs.srfsh,
         regs.synch1,regs.synch2,regs.syncv,regs.dispfb1,regs.display1,
         regs.dispfb2,regs.display2,regs.extbuf,regs.extdata,regs.extwrite,

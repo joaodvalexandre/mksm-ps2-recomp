@@ -1,5 +1,5 @@
-// GOW-Port: programa procedural de VU1, sin microcódigo del juego. Se compila con el generador real
-// para comparar bloques, pares, fallback por palabras modificadas y cortes/reanudaciones por presupuesto.
+// GOW-Port: procedural VU1 program, without game microcode. It is built with the real generator
+// to compare blocks, pairs, fallback for modified words and budget cuts/resumptions.
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu1.h"
 #include "runtime/gs/gs_frontend.h"
@@ -52,7 +52,7 @@ std::vector<uint8_t> program() {
         {lowerNop,nop},
     }};
     std::memcpy(code.data(),pairs.data(),sizeof(pairs));
-    // GOW-Port: los 16 selectores de DIV, Q antes/despues de WAITQ y flags D/I.
+    // GOW-Port: the 16 DIV selectors, Q before/after WAITQ and D/I flags.
     for(uint32_t selector=0;selector<16u;++selector) {
         std::array<std::array<uint32_t,2>,divPairs> div{};
         for(auto &pair:div) pair={lowerNop,nop};
@@ -64,8 +64,8 @@ std::vector<uint8_t> program() {
         div[12]={lowerNop,nop|e};
         std::memcpy(code.data()+divStart+selector*divBytes,div.data(),sizeof(div));
     }
-    // GOW-Port: ITOF/FTOI/ABS (con SSE en el código compilado), SQ con DEST parcial, lectores de flags que el
-    // código compilado trata en línea (FCAND, FCGET, FMAND, FMEQ) y BAL, JR y JALR.
+    // GOW-Port: ITOF/FTOI/ABS (with SSE in the compiled code), SQ with partial DEST, flag readers that the
+    // compiled code handles inline (FCAND, FCGET, FMAND, FMEQ) and BAL, JR and JALR.
     constexpr uint32_t base = specialStart/8u;
     const std::array<std::array<uint32_t,2>,30> sp{{
         {iaddiu(4u,0x7fffu),special(0x15u,0xfu,6u,1u)},  // FTOI4 vf6,vf1
@@ -78,7 +78,7 @@ std::vector<uint8_t> program() {
         {sq(0x9u,9u,5u),special(0x11u,0xfu,13u,3u)},     // ITOF4 vf13,vf3 | SQ.xw vf9
         {sq(0xfu,10u,6u),special(0x16u,0x6u,14u,1u)},    // FTOI12.yz vf14,vf1 | SQ vf10
         {sq(0x6u,11u,7u),special(0x1fu,0xeu,2u,1u)},     // CLIPw.xyz vf1,vf2 | SQ.yz vf11
-        {(0x12u<<25)|0x3fu,nop},                         // FCAND vi1,0x3f: el CLIP aún no es visible
+        {(0x12u<<25)|0x3fu,nop},                         // FCAND vi1,0x3f: the CLIP is not visible yet
         {(0x1cu<<25)|(2u<<16),upper(0x2au,0xfu,2u,1u,15u)}, // FCGET vi2 | MUL vf15,vf1,vf2
         {lowerNop,nop},{lowerNop,nop},{lowerNop,nop},
         {(0x1au<<25)|(3u<<16)|(4u<<11),nop},             // FMAND vi3,vi4
@@ -98,7 +98,7 @@ std::vector<uint8_t> program() {
         {lowerNop,nop},
     }};
     std::memcpy(code.data()+specialStart,sp.data(),sizeof(sp));
-    // Bloque largo con lecturas solo de registros de entrada: debe tomar la ruta sin comprobaciones por par.
+    // Long block reading only input registers: it must take the path with no per-pair checks.
     for (uint32_t i=0; i<9u; ++i) {
         std::array<uint32_t,2> pair{lowerNop,upper(0x28u,8u,2u,1u,3u)};
         if (i==8u) pair[1] |= e;
@@ -109,7 +109,7 @@ std::vector<uint8_t> program() {
         {lowerNop,nop},
     }};
     std::memcpy(code.data()+delayedTimingStart,delayed.data(),sizeof(delayed));
-    // Dos tramos rápidos separados por una dependencia VF interna que debe conservar su espera dinámica.
+    // Two fast sections separated by an internal VF dependency that must keep its dynamic wait.
     for(uint32_t i=0;i<10u;++i) {
         std::array<uint32_t,2> pair{lowerNop,upper(0x28u,4u,3u,2u,5u)};
         if(i==4u) pair[1]=upper(0x28u,1u,3u,2u,1u); // escribe vf1
@@ -217,12 +217,12 @@ bool divCases() {
                     got.state.status,di,got.budget); return false;
             }
             if(zeroDen && bits(got.state.q)!=(((num^den)&0x80000000u)|0x7f7fffffu)) {
-                std::fprintf(stderr,"DIV por cero sin saturacion con signo\n"); return false;
+                std::fprintf(stderr,"DIV by zero without signed saturation\n"); return false;
             }
             for(unsigned c=0;c<4u;++c)
                 if(bits(got.state.vf[3][c])!=bits(3.25f) || bits(got.state.vf[5][c])!=bits(3.25f) ||
                    bits(got.state.vf[6][c])!=bits(got.state.q)) {
-                    std::fprintf(stderr,"DIV: Q visible antes de tiempo o WAITQ sin resultado\n"); return false;
+                    std::fprintf(stderr,"DIV: Q visible too early or WAITQ without a result\n"); return false;
                 }
         }
         ++cases; return true;
@@ -274,7 +274,7 @@ bool specialCases() {
 #else
     constexpr unsigned modes=1u;
 #endif
-    // Cero con signo, subnormales, 1, ±2^31 y vecinos (saturación de FTOI), máximos, Inf, NaN y enteros límite.
+    // Signed zero, subnormals, 1, ±2^31 and neighbors (FTOI saturation), maxima, Inf, NaN and boundary integers.
     const uint32_t limits[]={0u,0x80000000u,0x00000001u,0x807fffffu,0x00800000u,0x3f800000u,0xbfc00000u,
         0x4effffffu,0x4f000000u,0xceffffffu,0xcf000000u,0xcf000001u,0x46fffe00u,0x7f7fffffu,0xff7fffffu,
         0x7f800000u,0xff800000u,0x7fc00000u,0xffffffffu,0x7fffffffu,0x01000001u,0x00ffffffu};
@@ -371,11 +371,11 @@ int main(int argc,char **argv) {
     const auto splitRef=run(false,false,0u,65536u,false,splitTimingStart);
     const auto splitGot=run(true,false,0u,65536u,false,splitTimingStart);
     if(!same(splitRef,splitGot)) {
-        std::fprintf(stderr,"VU1 tramos rápidos con hazard interno distintos: ciclos=%llu/%llu\n",
+        std::fprintf(stderr,"VU1 fast sections with different internal hazard: cycles=%llu/%llu\n",
             static_cast<unsigned long long>(splitRef.state.cycles),static_cast<unsigned long long>(splitGot.state.cycles));
         return 1;
     }
-    std::printf("VU1 temporizacion estatica: dos tramos rápidos conservan el hazard interno\n");
+    std::printf("VU1 static timing: two fast sections keep the internal hazard\n");
     if(!divCases()) return 1;
     if(!specialCases()) return 1;
     return 0;

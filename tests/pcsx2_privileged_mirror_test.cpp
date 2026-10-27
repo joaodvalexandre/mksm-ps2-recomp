@@ -1,4 +1,4 @@
-// GOW-Port: registros con valores distintos, offsets PS2 y huecos en cero.
+// GOW-Port: registers with distinct values, PS2 offsets and zeroed gaps.
 #include "../src/gow_gs_pcsx2_mirror.h"
 #include <cstdio>
 struct Compact {

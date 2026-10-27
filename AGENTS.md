@@ -1,110 +1,108 @@
-# Guía para agentes y colaboradores
+# Guide for agents and contributors
 
-Port de *God of War* (PS2, `SCUS-97399`) por recompilación estática con
-[PS2Recomp](https://github.com/ran-j/PS2Recomp). Este repositorio no contiene archivos del juego ni el C++
-generado: solo lo específico de God of War. Estado e investigación: [`docs/ESTADO.md`](docs/ESTADO.md).
-Arquitectura y CI: [`docs/ARQUITECTURA.md`](docs/ARQUITECTURA.md).
+Port of *Mortal Kombat: Shaolin Monks* (PS2, PAL `SLES-53524`) by static recompilation with
+[PS2Recomp](https://github.com/ran-j/PS2Recomp). The repository started from a *God of War* port and keeps its
+runtime patch stack; game-specific files that still say `gow` are being replaced. This repository does not
+contain game files or the generated C++: only what is specific to the game. MKSM notes and research:
+[`docs/MKSM.md`](docs/MKSM.md). Architecture and CI: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-Varios agentes trabajan a la vez sobre `main`. Antes de empezar, `git pull`; antes de subir, vuelve a
-traer `main` e integra los cambios (merge, nunca reescribas historia publicada).
+Several agents work on `main` at the same time. `git pull` before starting; before pushing, fetch `main` again
+and integrate the changes (merge, never rewrite published history).
 
-## Dónde va cada cosa
+## Where each change goes
 
-| Cambio | Dónde |
+| Change | Where |
 |---|---|
-| Reemplazos y diagnósticos de funciones del juego | `src/gow_overrides.cpp` (`applyGowOverrides`) |
-| Cambios al runtime/IOP de PS2Recomp | un parche por tema en `patches/` |
-| Funciones, stubs y entry points del recompilador | `config/recomp.template.toml`, `config/funcmap.csv` |
-| Pruebas independientes del juego | `tests/` (las del runtime van dentro del parche, en `ps2xTest/`) |
-| Estado del port (mapa del README) | `docs/estado/datos.toml` |
-| Registro de la investigación | `docs/ESTADO.md` y `docs/CONTROLES.md` |
+| Replacements and diagnostics for game functions | `src/gow_overrides.cpp` (`applyGowOverrides`) |
+| Changes to the PS2Recomp runtime/IOP | one patch per topic in `patches/` |
+| Recompiler functions, stubs and entry points | `config/recomp.template.toml`, `config/funcmap.csv` |
+| Game-independent tests | `tests/` (runtime tests go inside the patch, in `ps2xTest/`) |
+| Port status (README map) | `docs/status/data.toml` |
+| Research log | `docs/MKSM.md` |
 
-## Parches de PS2Recomp
+## PS2Recomp patches
 
-- Se aplican sobre el commit fijado en `scripts/common.ps1` (`$PS2RecompCommit`), **en el orden de
-  `scripts/compilar.ps1`**, con `git apply --ignore-whitespace`. Cada parche se genera contra el árbol con
-  los anteriores ya aplicados.
-- **Parche nuevo:** añade en `scripts/compilar.ps1` su variable (`$xxxPatch = Join-Path $RepoRoot
-  'patches\ps2recomp-xxx.patch'`) y su línea `Run $git @('apply', ...)`. La CI lee la lista de ahí
-  (`tools/ci/parches.py`) y falla si un `patches/*.patch` no se aplica.
-- Prefiere un parche nuevo por tema a ampliar `ps2recomp-runtime.patch`: los cambios de otros agentes
-  chocan menos.
-- **Editar un parche existente** (`N` = el que cambias), desde la raíz del repositorio (`PS2Recomp/` está en
+- They are applied on top of the commit pinned in `scripts/common.ps1` (`$PS2RecompCommit`), **in the order of
+  `scripts/build.ps1`**, with `git apply --ignore-whitespace`. Each patch is generated against the tree with the
+  previous ones already applied.
+- **New patch:** add its variable to `scripts/build.ps1` (`$xxxPatch = Join-Path $RepoRoot
+  'patches\ps2recomp-xxx.patch'`) and its `Run $git @('apply', ...)` line. CI reads the list from there
+  (`tools/ci/patches.py`) and fails if a `patches/*.patch` does not apply.
+- Prefer a new patch per topic over extending `ps2recomp-runtime.patch`: changes from other agents conflict less.
+- **Editing an existing patch** (`N` = the one you change), from the repository root (`PS2Recomp/` is in
   `.gitignore`):
 
   ```sh
-  git clone https://github.com/ran-j/PS2Recomp.git PS2Recomp   # solo la primera vez
-  git -C PS2Recomp checkout -qf <commit fijado> && git -C PS2Recomp clean -fdq
-  # aplica, en orden, los parches anteriores a N y haz un commit "base"
-  git -C PS2Recomp apply --ignore-whitespace "$PWD/patches/<parche anterior>"   # uno por parche
+  git clone https://github.com/ran-j/PS2Recomp.git PS2Recomp   # first time only
+  git -C PS2Recomp checkout -qf <pinned commit> && git -C PS2Recomp clean -fdq
+  # apply, in order, the patches before N and make a "base" commit
+  git -C PS2Recomp apply --ignore-whitespace "$PWD/patches/<previous patch>"   # one per patch
   git -C PS2Recomp -c user.name=x -c user.email=x commit -qam base
   git -C PS2Recomp apply --ignore-whitespace "$PWD/patches/<N>"
-  # ... edita ...
+  # ... edit ...
   git -C PS2Recomp diff > patches/<N>
   ```
 
-  Después comprueba que los parches posteriores a `N` siguen aplicando.
-- Marca los cambios con un comentario `// GOW-Port:` para distinguirlos del código original.
-- Un cambio de comportamiento del runtime lleva una prueba de regresión en `ps2xTest/` que falle sin el
-  cambio. Si cambias a propósito algo que una prueba existente comprobaba, ajusta la prueba y explica por qué.
-- Los cambios en parches requieren `scripts\2_compilar.cmd`; `2_recompilar_rapido.cmd` solo copia
-  `src/gow_overrides.cpp` y `src/*.h`.
+  Then check that the patches after `N` still apply.
+- Mark changes with a `// GOW-Port:` comment to tell them apart from the original code.
+- A runtime behavior change comes with a regression test in `ps2xTest/` that fails without the change. If you
+  deliberately change something an existing test checked, adjust the test and explain why.
+- Patch changes require `scripts\2_build.cmd`; `2_rebuild_fast.cmd` only copies `src/gow_overrides.cpp` and
+  `src/*.h`.
 
 ## Overrides (`src/gow_overrides.cpp`)
 
-- Llama a la función original para todo lo que no reemplaces, y respeta las reanudaciones tras un
-  checkpoint (`ctx->pc` distinto de la dirección de entrada: llama al original sin más).
-- Los diagnósticos son opcionales: actívalos con una variable de entorno (`GOW_*_DIAG`) o con un límite de
-  mensajes, y usa una etiqueta `[gow-xxx]` en el registro. Documenta la variable en `docs/ESTADO.md` o
-  `docs/CONTROLES.md`, y retira el diagnóstico cuando el problema esté resuelto.
-- Si usas una función nueva del runtime, debe existir en algún parche: la CI compila `src/*.cpp` contra el
-  runtime parcheado.
+- Call the original function for everything you do not replace, and honor resumptions after a checkpoint
+  (`ctx->pc` different from the entry address: just call the original).
+- Diagnostics are optional: enable them with an environment variable (`GOW_*_DIAG`) or with a message limit, and
+  use a `[gow-xxx]` tag in the log. Document the variable in `docs/MKSM.md`, and remove the diagnostic once the
+  problem is solved.
+- If you use a new runtime function, it must exist in some patch: CI compiles `src/*.cpp` against the patched
+  runtime.
 
-## Comprobaciones (CI: `.github/workflows/pruebas.yml`)
+## Checks (CI: `.github/workflows/tests.yml`)
 
-En cada push a `main` y en cada PR, sin el juego. Deben quedar en verde:
+On every push to `main` and every PR, without the game. They must stay green:
 
-- `python3 tools/ci/validar_config.py`: `funcmap.csv` y `recomp.template.toml`.
-- `pwsh -File tools/ci/analizar_ps1.ps1`: sintaxis de los `.ps1`.
-- `tests/pad2_packet_test.cpp` (en Windows: `scripts\probar_pad2.cmd`).
-- Los parches aplican, cada stub tiene handler en el runtime, `src/*.cpp` compila contra el runtime
-  parcheado y la suite `ps2x_tests` pasa entera. `tests/fallos_conocidos.txt` está vacío: no añadas una
-  prueba ahí para tapar una regresión, arréglala.
+- `python3 tools/ci/validate_config.py`: `funcmap.csv` and `recomp.template.toml`.
+- `pwsh -File tools/ci/analyze_ps1.ps1`: syntax of the `.ps1` files.
+- `tests/pad2_packet_test.cpp` (on Windows: `scripts\test_pad2.cmd`).
+- The patches apply, every stub has a handler in the runtime, `src/*.cpp` compiles against the patched runtime
+  and the whole `ps2x_tests` suite passes. `tests/known_failures.txt` is empty: do not add a test there to hide a
+  regression, fix it.
 
-La suite se puede reproducir en Linux (o WSL): aplica los parches como arriba y luego
+The suite can be reproduced on Linux (or WSL): apply the patches as above and then
 
 ```sh
 cmake -S PS2Recomp -B PS2Recomp/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPS2X_BUILD_STUDIO=OFF \
   -DCMAKE_C_FLAGS=-march=x86-64-v2 -DCMAKE_CXX_FLAGS=-march=x86-64-v2
 ninja -C PS2Recomp/build ps2x_tests
-(cd PS2Recomp && ./build/ps2xTest/ps2x_tests 2>/dev/null) | python3 tools/ci/comprobar_pruebas.py tests/fallos_conocidos.txt
+(cd PS2Recomp && ./build/ps2xTest/ps2x_tests 2>/dev/null) | python3 tools/ci/check_tests.py tests/known_failures.txt
 ```
 
-La suite se ejecuta desde `PS2Recomp/`, como en la CI: algunas pruebas leen fuentes con rutas relativas
-(por ejemplo `VU0 macro mappings cover all S1/S2 enums`) y fallan si se lanzan desde la raíz.
+The suite runs from `PS2Recomp/`, as in CI: some tests read sources through relative paths (for example
+`VU0 macro mappings cover all S1/S2 enums`) and fail if launched from the root.
 
-(paquetes de Ubuntu: los de "Instalar dependencias" en `pruebas.yml`).
+(Ubuntu packages: the ones under "Install dependencies" in `tests.yml`.)
 
-## Probar con el juego (Windows)
+## Testing with the game (Windows)
 
-Lo que la CI no puede comprobar: hace falta el ELF, los IRX y la ISO (ver README).
+What CI cannot check: it needs the ELF, the IRX modules and the ISO (see the README).
 
-1. `scripts\2_compilar.cmd` (o `2_recompilar_rapido.cmd` si solo cambiaste `src/`).
-2. `scripts\probar_menu.ps1 -Segundos 115`: avanza por el menú y guarda capturas del GS en `logs\`.
-3. Revisa `logs\ejecutar_err.log` y las capturas. Una captura no negra o un registro limpio no prueban que
-   se pueda jugar: anota en `docs/ESTADO.md` exactamente qué se verificó.
+1. `scripts\2_build.cmd` (or `2_rebuild_fast.cmd` if you only changed `src/`).
+2. `scripts\test_menu.ps1 -Seconds 115`: walks through the menu and saves GS captures in `logs\`.
+3. Review `logs\run_err.log` and the captures. A non-black capture or a clean log does not prove the game is
+   playable: record in `docs/MKSM.md` exactly what was verified.
 
-## Documentación y estado
+## Documentation and status
 
-- `docs/ESTADO.md` es el registro de la investigación: añade lo que se probó, con qué resultado y los
-  próximos pasos. No borres hallazgos; corrígelos si resultan equivocados.
-- Si un componente o librería cambia de estado (funciona / parcial / pendiente), actualiza
-  `docs/estado/datos.toml` y ejecuta `python tools/estado/generar.py` (la acción "Mapa de estado" lo hace
-  también al subir a `main`).
-- Los tres README (`README.md`, `README.es.md`, `README.pt-BR.md`) deben decir lo mismo.
-- Documentación y comentarios en español; los commits pueden ir en español o en inglés.
+- `docs/MKSM.md` is the research log: add what was tried, with what result, and the next steps. Do not delete
+  findings; correct them if they turn out to be wrong.
+- If a component or library changes state (working / partial / pending), update `docs/status/data.toml` and run
+  `python tools/status/generate.py` (the "Status map" action also does it on pushes to `main`).
+- Documentation and comments are written in English; commits too.
 
 ## Legal
 
-Nunca subas archivos del juego (ELF, IRX, ISO, `.PAK`, `.WAD`), código generado a partir de él, capturas de
-RAM/VRAM ni volcados del microcódigo. `game/` y `logs/` están en `.gitignore`.
+Never commit game files (ELF, IRX, ISO, `.WAD`, `.SFD`), code generated from them, RAM/VRAM captures or
+microcode dumps. `game/` and `logs/` are in `.gitignore`.

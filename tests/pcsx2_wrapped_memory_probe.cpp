@@ -1,4 +1,4 @@
-// GOW-Port: vistas VRAM repetidas y cierre del handle del módulo aislado.
+// GOW-Port: repeated VRAM views and closing the handle of the isolated module.
 #include "GS/GS.h"
 #include "GS/GSExtra.h"
 #include "common/RedtapeWindows.h"
@@ -23,7 +23,7 @@ int main()
         GSFreeWrappedMemory(memory, bytes, repeat);
         if (!alias)
         {
-            std::fprintf(stderr, "VRAM: las vistas no comparten los mismos bytes\n");
+            std::fprintf(stderr, "VRAM: the views do not share the same bytes\n");
             return 1;
         }
         for (size_t view = 0; view < repeat; ++view)

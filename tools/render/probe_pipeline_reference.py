@@ -1,4 +1,4 @@
-"""Control optativo de profundidad y FOG/mezcla por ABI DX11, sin archivos del juego."""
+"""Optional depth and FOG/blend check through the DX11 ABI, without game files."""
 import argparse
 import ctypes as c
 import hashlib
@@ -39,7 +39,7 @@ def fixture():
             sprite(x, 8, 50, 0x804020F0, test=test)
             sprite(x, 8, 75, 0x8000FF00, test=0x50000, zmask=True)
     for i, fog in enumerate((0, 1, 77, 128, 201, 255, 128, 255)):
-        # ALPHA=(Cs-Cd)*As/128+Cd, As=64; primero FOG, después mezcla.
+        # ALPHA=(Cs-Cd)*As/128+Cd, As=64; FOG first, then blending.
         sprite(i * 8, 16, 100, 0x404020F0, fog=fog, zmask=True, fge=i < 6, abe=True)
     words = [len(pairs) | (1 << 15) | (1 << 60), 0x0E]
     for data, register in pairs:
@@ -71,7 +71,7 @@ def run(module, resources):
             packet = (c.c_uint8 * len(raw)).from_buffer_copy(raw)
             require(dll.gow_gs_submit(handle, 3, packet, len(raw)) == 0, 'Enviar GIF procedural')
             registers = bytearray(8192)
-            # Mismo PCRTC no entrelazado del control FOG: alpha de salida siempre 255.
+            # Same non-interlaced PCRTC as the FOG check: output alpha is always 255.
             for offset, value in [(0, 1 | (1 << 5) | (1 << 7) | (255 << 8)), (0x10, 2 << 13),
                                   (0x70, 1 << 9), (0x80, (25 << 12) | (3 << 23) | (255 << 32) | (31 << 44))]:
                 struct.pack_into('<Q', registers, offset, value)
@@ -96,8 +96,8 @@ def run(module, resources):
         finally:
             require(dll.gow_gs_destroy(handle) == 0, 'Cerrar GS DX11')
     return dict(module_sha256=hashlib.sha256(module.read_bytes()).hexdigest(), cases=rows,
-                limitation='24 celdas sintéticas de 8x8. RGB/profundidad/FOG+mezcla; no prueba alpha framebuffer, '
-                           'interpolación variable, escena, prefijo del juego, estabilidad ni FPS.')
+                limitation='24 synthetic 8x8 cells. RGB/depth/FOG+blend; it does not test alpha framebuffer, '
+                           'variable interpolation, a scene, the game prefix, stability nor FPS.')
 
 
 def main():
@@ -110,7 +110,7 @@ def main():
     try:
         module, resources = args.module.resolve(strict=True), args.resources.resolve(strict=True)
         if not module.is_file() or not resources.is_dir():
-            raise ValueError('Se requieren DLL local y directorio de recursos')
+            raise ValueError('A local DLL and a resources directory are required')
         result = run(module, resources)
     except (OSError, ValueError, RuntimeError, AttributeError) as error:
         parser.exit(1, f'Pipeline DX11: {error}\n')

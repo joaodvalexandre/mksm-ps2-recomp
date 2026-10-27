@@ -1,4 +1,4 @@
-"""Control Windows de transición con directorios privados y estado de la ventana propia."""
+"""Windows transition check with private directories and the state of its own window."""
 import argparse
 import hashlib
 import json
@@ -26,19 +26,19 @@ def settings_for(case, folder, iso, shader_cache, vu1_thread='0', gs_front='0', 
                  capture_acquired=0, presentation_diagnostics='hash', perf='off', pad_script=None,
                  gpu_profile=False, gpu_stats=False):
     if case not in CASES or vu1_thread not in ('0', '1') or gs_front not in ('0', '1'):
-        raise ValueError('Caso o modo de hilos inválido')
+        raise ValueError('Invalid case or thread mode')
     if gs_front == '1' and vu1_thread != '1':
         raise ValueError('El frente GS requiere el hilo VU1')
     if type(diag_from_tick) is not int or not 0 <= diag_from_tick <= 0xffffffffffffffff:
-        raise ValueError('El inicio del diagnóstico debe ser un tick uint64')
+        raise ValueError('The diagnostic start must be a uint64 tick')
     if type(capture_acquired) is not int or not 0 <= capture_acquired <= 16:
-        raise ValueError('La captura adquirida requiere un cupo de 0..16')
+        raise ValueError('The acquired capture requires a quota of 0..16')
     if capture_acquired and not case.endswith('shared'):
-        raise ValueError('La captura adquirida requiere presentación compartida')
+        raise ValueError('The acquired capture requires shared presentation')
     if presentation_diagnostics not in ('hash', 'sequence', 'off') or perf not in ('off', 'frames', 'timing'):
-        raise ValueError('Modo de diagnóstico o perfil inválido')
+        raise ValueError('Invalid diagnostic or profile mode')
     if type(gpu_profile) is not bool or type(gpu_stats) is not bool:
-        raise ValueError('El perfil y estadísticas GPU deben ser opciones booleanas')
+        raise ValueError('The profile and GPU statistics must be boolean options')
     settings = {
         'GOW_ISO': str(iso), 'GOW_MC0': str(folder / 'Mcd001.ps2'), 'GOW_MC1': '0',
         'GOW_GS_FINISH_ASINCRONO': '1' if case.startswith('async') else '0',
@@ -70,7 +70,7 @@ def settings_for(case, folder, iso, shader_cache, vu1_thread='0', gs_front='0', 
 
 
 def isolated_environment(inherited, settings):
-    # Algunos diagnósticos se activan por presencia, incluso con valor "0".
+    # Some diagnostics are enabled by presence, even with the value "0".
     env = {k: v for k, v in inherited.items()
            if not k.upper().startswith(('GOW_', 'PS2X_'))}
     env.update(settings)
@@ -88,17 +88,17 @@ def private_output(directory):
     directory = Path(directory).resolve()
     repo = Path(__file__).resolve().parents[2]
     if directory.is_relative_to(repo) and not directory.is_relative_to(repo/'logs'):
-        raise ValueError('Dentro del repositorio, usa logs/ para conservar privado el control')
+        raise ValueError('Inside the repository, use logs/ to keep the check private')
     return directory
 
 
 def pcsx2_settings(args, folder):
-    """Espejo opcional: identidad explícita, captura privada y hilos aislados."""
+    """Optional mirror: explicit identity, private capture and isolated threads."""
     module = getattr(args, 'pcsx2_gs_module', None)
     if module is None:
         return {}, None
     if args.vu1_thread != '0' or args.gs_front != '0':
-        raise ValueError('El espejo PCSX2 requiere VU1 y frente GS sin hilos')
+        raise ValueError('The PCSX2 mirror requires VU1 and GS front without threads')
     count, tick = args.pcsx2_capture_count, args.pcsx2_from_tick
     interval = getattr(args, 'pcsx2_capture_interval', 120)
     if type(count) is not int or not 0 <= count <= 16:
@@ -128,7 +128,7 @@ def pcsx2_settings(args, folder):
 
 
 class WindowsApi:
-    """Monitor y cierre optativo del hijo propio; no activa ventanas ni manda entradas de juego."""
+    """Monitor and optional close of the own child; it does not activate windows nor send game inputs."""
     def __init__(self):
         import ctypes
         from ctypes import wintypes
@@ -174,7 +174,7 @@ class WindowsApi:
 
 
 def window_state(api, pid):
-    # Filtrar por PID antes de leer visibilidad/minimización; no registrar otras apps.
+    # Filter by PID before reading visibility/minimization; do not record other apps.
     own = next((handle for handle in api.windows()
                 if api.pid(handle) == pid and api.visible(handle)), None)
     return dict(window_found=own is not None, visible=own is not None,
@@ -210,7 +210,7 @@ class WindowMonitor:
 
 
 def stop_child(child):
-    # Popen conserva el proceso creado por este control; nunca buscar uno por nombre.
+    # Popen keeps the process created by this check; never look one up by name.
     if child.poll() is None:
         child.terminate()
         try:
@@ -221,7 +221,7 @@ def stop_child(child):
 
 
 def request_child_window_close(child):
-    # Popen conserva el hijo exacto; no buscar ni detener procesos por nombre.
+    # Popen keeps the exact child; do not look up nor stop processes by name.
     start = time.monotonic()
     attempted = child.poll() is None
     sent = forced = False
@@ -246,7 +246,7 @@ def request_child_window_close(child):
             stop_child(child)
     return dict(pid=child.pid, attempted=attempted, wm_close_sent=sent, forced_fallback=forced,
                 exit_code=child.poll(), seconds=time.monotonic()-start, error=error,
-                note='Cierre solicitado de ventana propia; no final del juego ni salida espontánea.')
+                note='Requested close of the own window; not the end of the game nor a spontaneous exit.')
 
 
 def wait_for_control(child, seconds, stop_file, stopper=None):
@@ -274,9 +274,9 @@ def wait_for_control(child, seconds, stop_file, stopper=None):
 
 def prepare_case(args):
     if not re.fullmatch('[a-z0-9_]+', args.label or args.case):
-        raise ValueError('La etiqueta solo admite a..z, 0..9 y guion bajo')
+        raise ValueError('The label only allows a..z, 0..9 and underscore')
     if not 1 <= args.seconds <= 1800:
-        raise ValueError('La duración debe estar entre 1 y 1800 segundos')
+        raise ValueError('The duration must be between 1 and 1800 seconds')
     runner, elf, iso, modules = (Path(p).resolve(strict=True)
                                  for p in (args.runner, args.elf, args.iso, args.iop_mod))
     if not all(p.is_file() for p in (runner, elf, iso)) or not modules.is_dir():
@@ -286,18 +286,18 @@ def prepare_case(args):
         raise ValueError('El manifiesto debe ser un objeto JSON')
     commit = build.get('commit')
     if not isinstance(commit, str) or not re.fullmatch('[0-9a-fA-F]{40}', commit):
-        raise ValueError('El manifiesto debe registrar el commit completo de la compilación')
+        raise ValueError('The manifest must record the full commit of the build')
     if digest(runner) != manifest_digest(build, 'exe_sha256'):
-        raise ValueError('El ejecutable no coincide con el manifiesto de compilación')
+        raise ValueError('The executable does not match the build manifest')
     if digest(elf) != EXPECTED_ELF_SHA256 or manifest_digest(build, 'elf_sha256') != EXPECTED_ELF_SHA256:
-        raise ValueError('El ELF no corresponde a SCUS_973.99 o al manifiesto')
+        raise ValueError('The ELF does not correspond to SCUS_973.99 or to the manifest')
     card_source = Path(args.initial_card).resolve(strict=True) if args.initial_card else None
     if card_source is not None and not card_source.is_file():
-        raise ValueError('La tarjeta inicial debe ser un archivo')
+        raise ValueError('The initial card must be a file')
     root = private_output(args.output_root)
     folder = root / (args.label or args.case)
     if folder.is_relative_to(modules):
-        raise ValueError('La salida no puede estar dentro del IOP_MOD de origen')
+        raise ValueError('The output cannot be inside the source IOP_MOD')
     settings = settings_for(args.case, folder, iso, root/'shader_cache',
                             args.vu1_thread, args.gs_front, args.diag_from_tick, args.capture_acquired,
                             getattr(args, 'presentation_diagnostics', 'hash'), getattr(args, 'perf', 'off'),
@@ -305,7 +305,7 @@ def prepare_case(args):
                             getattr(args, 'gpu_stats', False))
     external_settings, external_identity = pcsx2_settings(args, folder)
     settings.update(external_settings)
-    # No reutilizar una carpeta: evita sobrescribir una pasada o una tarjeta original.
+    # Do not reuse a folder: it avoids overwriting a pass or an original card.
     folder.mkdir(parents=True, exist_ok=False)
     if args.capture_acquired:
         (folder/'acquired').mkdir()
@@ -331,7 +331,7 @@ def prepare_case(args):
         acquired_readback=bool(args.capture_acquired),
         gpu_profile=getattr(args, 'gpu_profile', False), gpu_stats=getattr(args, 'gpu_stats', False),
         close_mode='window_then_force' if getattr(args, 'request_window_close', False) else 'force',
-        guest_flip_hz='Entradas a vid::Flip por segundo; no cuadros únicos mostrados.',
+        guest_flip_hz='Entries to vid::Flip per second; not unique frames shown.',
         host_hz='Iteraciones completadas de renderFrame/EndDrawing por segundo; pueden repetir textura.')
     if external_identity is not None:
         result['pcsx2'] = external_identity
@@ -350,28 +350,28 @@ def main():
     parser.add_argument('--vu1-thread', choices=('0', '1'), default='0')
     parser.add_argument('--gs-front', choices=('0', '1'), default='0')
     parser.add_argument('--diag-from-tick', type=int, default=0,
-                        help='Primer tick host registrado; no modifica la presentación ni su cupo')
+                        help='First recorded host tick; it does not modify the presentation nor its quota')
     parser.add_argument('--capture-acquired', type=int, choices=range(17), default=0,
-                        help='Capturas explícitas de la textura adquirida desde diag-from-tick; 0 desactiva')
+                        help='Explicit captures of the acquired texture from diag-from-tick; 0 disables')
     parser.add_argument('--presentation-diagnostics', choices=('hash', 'sequence', 'off'), default='hash',
-                        help='hash: secuencias y hash GPU; sequence: solo metadatos; off: sin ambos')
+                        help='hash: sequences and GPU hash; sequence: metadata only; off: neither')
     parser.add_argument('--perf', choices=('off', 'frames', 'timing'), default='off',
-                        help='Contar entradas Flip/iteraciones host; timing añade tiempos transcurridos por ámbito')
-    parser.add_argument('--pad-script', help='Guion explícito GOW_PAD_GUION; sustituye las pulsaciones predeterminadas')
+                        help='Count Flip entries/host iterations; timing adds elapsed times per scope')
+    parser.add_argument('--pad-script', help='Explicit GOW_PAD_GUION script; replaces the default presses')
     parser.add_argument('--gpu-profile', action='store_true',
                         help='Timestamps GPU optativos; ventanas de compositor, muestras incompletas posibles')
-    parser.add_argument('--gpu-stats', action='store_true', help='Estadísticas optativas del backend GPU')
+    parser.add_argument('--gpu-stats', action='store_true', help='Optional GPU backend statistics')
     parser.add_argument('--request-window-close', action='store_true',
-                        help='Al detener el control, WM_CLOSE sólo al hijo; espera15s antes de forzar si no termina')
+                        help='When stopping the check, WM_CLOSE only to the child; waits 15 s before forcing if it does not end')
     parser.add_argument('--pcsx2-gs-module', type=Path, help='DLL opcional del espejo GS original DX11')
-    parser.add_argument('--pcsx2-resources', type=Path, help='Recursos/shaders de la revisión PCSX2 fijada')
+    parser.add_argument('--pcsx2-resources', type=Path, help='Resources/shaders of the pinned PCSX2 revision')
     parser.add_argument('--pcsx2-capture-count', type=int, choices=range(17), default=8)
     parser.add_argument('--pcsx2-from-tick', type=int, default=900)
     parser.add_argument('--pcsx2-capture-interval', type=int, default=120,
-                        help='Ticks entre capturas PCRTC: 1..600; 1 permite una ráfaga limitada')
+                        help='Ticks between PCRTC captures: 1..600; 1 allows a limited burst')
     args = parser.parse_args()
     if os.name != 'nt':
-        parser.error('La ejecución del juego y el monitor de ventana requieren Windows')
+        parser.error('Running the game and the window monitor require Windows')
     try:
         folder, runner, card, result = prepare_case(args)
     except (OSError, ValueError) as error:

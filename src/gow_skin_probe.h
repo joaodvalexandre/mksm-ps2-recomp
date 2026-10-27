@@ -1,5 +1,5 @@
 // GOW-Port: lectura del destino real de skinning retail SCUS-97399.
-// No ejecuta matemáticas del juego ni modifica memoria o registros.
+// It does not run the game's math nor modify memory or registers.
 #pragma once
 #include <array>
 #include <chrono>
@@ -13,8 +13,8 @@ namespace gow_skin_probe {
     struct Memory {
         const uint8_t *ram=nullptr, *scratch=nullptr;
         size_t ramSize=0, scratchSize=0;
-        // Resolver una sola región y comprobar offset/rango antes de sumar.
-        // Nunca usar RAM_MASK para convertir una dirección inválida en una válida.
+        // Resolve a single region and check offset/range before adding.
+        // Never use RAM_MASK to turn an invalid address into a valid one.
         const uint8_t *at(uint32_t address,uint64_t offset,size_t count) const {
             if(!address) return nullptr;
             const uint8_t *base=nullptr;
@@ -52,7 +52,7 @@ namespace gow_skin_probe {
     inline Layout layout(const Memory &memory,uint32_t skeleton) {
         Layout l;
         // MIPS 0x1375E8/EC, 0x137704/710 y variante 0x137B44/0x137CFC.
-        // +0x5C limita slots de destino; definición+0x10 cuenta selección, no slots.
+        // +0x5C limits destination slots; definition+0x10 counts selection, not slots.
         if(!memory.read(skeleton,0x5Cu,l.count) || l.count>maxSlots ||
            !memory.read(skeleton,0x50u,l.source) || !memory.read(skeleton,0x54u,l.visibility) ||
            !memory.read(skeleton,0x58u,l.records) || !memory.read(skeleton,0x60u,l.definition)) return l;
@@ -77,12 +77,12 @@ namespace gow_skin_probe {
         if(p) {
             s.recordValid=true;
             // GOW-Port: 0x1378AC/0x137EBC; bits 0x6000 llaman a la
-            // transformación adicional de 0x136870 después del producto.
+            // additional transform of 0x136870 after the product.
             std::memcpy(&s.flags,p,4);
             std::memcpy(&s.indexField,p+4,2); std::memcpy(&s.parent,p+8,2);
             std::memcpy(&s.threshold,p+12,4);
-            // El juego indexa la máscara por signed lh; un índice negativo no se
-            // convierte en lectura gigantesca o alias. Se informa como desconocido.
+            // The game indexes the mask by signed lh; a negative index is not
+            // turned into a gigantic read or an alias. It is reported as unknown.
             if(s.parent>=0 && s.parent<int(maxSlots)) {
                 uint32_t word=0;
                 s.maskValid=memory.read(skeleton,0x64u+uint32_t(s.parent/32)*4u,word);
@@ -96,8 +96,8 @@ namespace gow_skin_probe {
         return l.valid && l.selectionValid && index<l.count &&
                ((l.selection[index/32u]>>(index%32u)) & 1u);
     }
-    // Las matrices de definición siguen el orden de bits activos, no index*64.
-    // MIPS 0x137738/740 y 0x1377A8/B4 avanza el ordinal solo por selección.
+    // The definition matrices follow the order of active bits, not index*64.
+    // MIPS 0x137738/740 y 0x1377A8/B4 advances the ordinal only by selection.
     inline bool bind(const Memory &memory,const Layout &l,uint32_t index,Matrix &matrix,uint32_t &ordinal) {
         if(!selected(l,index) || !l.selectedCount || l.selectedCount>maxSlots) return false;
         ordinal=0;
@@ -111,7 +111,7 @@ namespace gow_skin_probe {
         unsigned total=0;
         unsigned take(uint32_t skeleton,uint32_t view,uint32_t entry,Clock::time_point now,
                       uint64_t videoTick=0,uint64_t fromTick=0) {
-            // GOW-Port: esperar la ventana solicitada sin gastar el cupo en la intro.
+            // GOW-Port: wait for the requested window without spending the quota on the intro.
             if(videoTick<fromTick || !skeleton || total>=128u) return 0;
             Item *found=nullptr;
             for(auto &item:items) if(item.skeleton==skeleton && item.view==view && item.entry==entry) {
@@ -125,8 +125,8 @@ namespace gow_skin_probe {
             return ++total;
         }
     };
-    // Las reanudaciones llaman al original. No guardar argumentos de otra llamada
-    // ni interpretar una pausa (incluida una llamada anidada) como retorno completo.
+    // Resumptions call the original. Do not keep arguments of another call
+    // nor interpret a pause (including a nested call) as a complete return.
     template<class Original,class Before,class After>
     inline void observe(uint32_t &pc,uint32_t entry,uint32_t caller,Original original,Before before,After after) {
         const bool started=pc==entry;

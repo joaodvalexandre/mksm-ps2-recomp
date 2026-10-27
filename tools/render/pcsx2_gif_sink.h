@@ -1,6 +1,6 @@
 // GOW-Port: enlace opcional con GSState de PCSX2 2954ebe6965669219f1bbd256e958fbd8f83a85d.
-// Compilar dentro del módulo GS aislado, con sus includes y bibliotecas. El GS
-// real debe estar abierto; este archivo no crea un dispositivo ni una ventana.
+// Build inside the isolated GS module, with its includes and libraries. The
+// real GS must be open; this file creates no device or window.
 #pragma once
 #include "pcsx2_gif_bridge.h"
 #include "GS/Renderers/Common/GSRenderer.h"
@@ -10,10 +10,10 @@ namespace gow_pcsx2_gs
     inline Sink pcsx2TransferSink() {
         return {nullptr,[](void *,Path path,const uint8_t *bytes,uint32_t qwc)->bool {
             if(!g_gs_renderer) return false;
-            // PATH1 usa la entrada continua de GSgifTransfer (índice 3). El
-            // índice 0 legado corta en EOP y descarta nloop si acaba el span:
-            // rompería tanto fragmentos como varios paquetes en un mismo lote.
-            // Los índices 1/2 conservan cursores propios para PATH2/3.
+            // PATH1 uses the continuous entry of GSgifTransfer (index 3). The
+            // legacy index 0 cuts at EOP and discards nloop if the span ends:
+            // it would break both fragments and several packets in the same batch.
+            // Indices 1/2 keep their own cursors for PATH2/3.
             switch(path) {
             case Path::Path1: g_gs_renderer->Transfer<3>(bytes,qwc); break;
             case Path::Path2: g_gs_renderer->Transfer<1>(bytes,qwc); break;

@@ -113,7 +113,7 @@ class TransitionControlTest(unittest.TestCase):
             path.write_bytes(b'procedural-'+path.name.encode())
         modules = root/'modules'
         modules.mkdir()
-        (modules/'procedural.txt').write_text('sin datos del juego', encoding='utf-8')
+        (modules/'procedural.txt').write_text('no game data', encoding='utf-8')
         manifest = root/'build.json'
         manifest.write_text(json.dumps(dict(commit='a'*40, exe_sha256=control.digest(runner),
                                             elf_sha256=control.digest(elf))), encoding='utf-8')
@@ -387,12 +387,12 @@ class TransitionControlTest(unittest.TestCase):
         self.assertEqual(child.returncode, 17)
         self.assertEqual((child.terminated, child.killed), (0, 0))
 
-    @unittest.skipUnless(os.name == 'nt', 'El lanzador completo usa STARTUPINFO y Win32')
+    @unittest.skipUnless(os.name == 'nt', 'The full launcher uses STARTUPINFO and Win32')
     def test_windows_launcher_records_a_procedural_child_without_game_or_window(self):
         with tempfile.TemporaryDirectory(prefix='gow_transition_test_') as name:
             root = Path(name)
             args = self.fixture(root)
-            # Python ejecuta una entrada procedural que termina enseguida; nunca arrancar el juego.
+            # Python runs a procedural entry that ends right away; never start the game.
             args.runner = Path(sys.executable)
             args.elf.write_text('import os\nassert "GOW_GS_REPLAY_TRACE" not in os.environ\n'
                                 'assert os.environ["GOW_PAD_SOLO_GUION"] == "1"\n'

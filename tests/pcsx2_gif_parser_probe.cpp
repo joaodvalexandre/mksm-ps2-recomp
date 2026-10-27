@@ -1,4 +1,4 @@
-// GOW-Port: solo estado/transferencias del GS original, no es un renderer.
+// GOW-Port: only state/transfers of the original GS, it is not a renderer.
 #include "GS/GSState.h"
 #include "../tools/render/pcsx2_gif_bridge.h"
 #include "../tools/render/pcsx2_register_adapter.h"
@@ -44,7 +44,7 @@ int main(){
     require(gs.m_path[3].nloop==0 && gs.rgbaq()==a[0],"registro PATH1 correcto");
     std::array<uint64_t,8> both{tag[0],tag[1],a[0],a[1],tag[0],tag[1],b[0],b[1]};
     require(bridge.submit(gow_pcsx2_gs::Path::Path1,reinterpret_cast<const uint8_t*>(both.data()),sizeof(both)),"dos paquetes con EOP");
-    require(gs.rgbaq()==b[0],"EOP no pierde el segundo paquete de un lote");
+    require(gs.rgbaq()==b[0],"EOP does not lose the second packet of a batch");
     require(bridge.submit(gow_pcsx2_gs::Path::Path2,reinterpret_cast<const uint8_t*>(tag.data()),7),"fragmento tag PATH2");
     require(bridge.submit(gow_pcsx2_gs::Path::Path3,reinterpret_cast<const uint8_t*>(tag.data()),16),"tag PATH3 intercalado");
     require(bridge.submit(gow_pcsx2_gs::Path::Path2,reinterpret_cast<const uint8_t*>(tag.data())+7,9),"completar tag PATH2");
@@ -53,13 +53,13 @@ int main(){
     require(gs.rgbaq()==a[0] && gs.m_path[2].nloop==1,"PATH2 no consume PATH3");
     require(bridge.submit(gow_pcsx2_gs::Path::Path3,reinterpret_cast<const uint8_t*>(b.data()),16),"payload PATH3");
     require(gs.rgbaq()==b[0] && bridge.complete(),"PATH3 y transporte completos");
-    // GOW-Port: referencia original para el atributo FOG entre XYZF y XYZ, también sin dibujo.
+    // GOW-Port: original reference for the FOG attribute between XYZF and XYZ, also without drawing.
     const auto packed=[&](uint64_t descriptor,uint64_t high){
         const std::array<uint64_t,4> packet{tag[0],descriptor,0,high};
         require(bridge.submit(gow_pcsx2_gs::Path::Path3,
                               reinterpret_cast<const uint8_t*>(packet.data()),sizeof(packet)),"paquete FOG/XYZ");
     };
-    gs.writeDirect(0x00,0); // PRIM_POINT: instalar handlers XYZ de una primitiva válida.
+    gs.writeDirect(0x00,0); // PRIM_POINT: install XYZ handlers of a valid primitive.
     gs.writeDirect(0x0a,13ull<<56);
     packed(0x0c,201ull<<36);
     require(gs.fog()==201,"XYZF3 PACKED actualiza FOG");
@@ -73,7 +73,7 @@ int main(){
     require(gs.fog()==77,"XYZF3 A+D actualiza FOG");
     gs.writeDirect(0x0d,0);
     require(gs.fog()==77,"XYZ3 A+D conserva FOG");
-    require(gsProbeWindowRequests==0,"no se abrió dispositivo o ventana");
-    require(gs.draws==0,"no se declara dibujo de píxeles en esta prueba");
+    require(gsProbeWindowRequests==0,"no device or window was opened");
+    require(gs.draws==0,"no pixel drawing is declared in this test");
     std::puts("Parser PCSX2 real: PATH, fragmentos, EOP, RGBAQ y FOG retenido entre XYZF/XYZ: OK");
 }
