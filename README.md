@@ -107,6 +107,7 @@ Per-library and per-component breakdown: [`docs/status/details.md`](docs/status/
 │   ├── 2_rebuild_fast.cmd        # Rebuilds only src/ (~1 min)
 │   ├── 3_run.cmd                 # Runs for 60 s and saves logs
 │   ├── 3_run_manual.cmd          # Runs with no time limit
+│   ├── 4_diagnose.cmd            # Runs for 30 s with diagnostics (logs\diag-*)
 │   └── *.ps1                     # Script logic (common.ps1, build.ps1, run.ps1…)
 ├── src/
 │   ├── mksm_overrides.cpp        # Game-specific overrides
@@ -171,10 +172,11 @@ After changing only `src/`, `scripts\2_rebuild_fast.cmd` rebuilds in about a min
 ```bat
 scripts\3_run.cmd          :: 60 seconds, output in logs\
 scripts\3_run_manual.cmd   :: no time limit
+scripts\4_diagnose.cmd     :: 30 seconds with GS/DMA diagnostics: captures and summary.txt in logs\diag-*\
 ```
 
-The game starts in borderless fullscreen: **F11** switches to a window and back, **F1** opens the runtime debugger
-and **F2** shows an FPS meter.
+The game starts in a 720×540 (4:3) window (`set MKSM_WINDOW=960x720` before running picks another size; `set MKSM_ASPECT=16:9` stretches the picture for a widescreen TV): **F11**
+switches to borderless fullscreen and back, **F1** opens the runtime debugger and **F2** shows an FPS meter.
 
 **Native IOP (optional).** The game's IRX modules can be compiled ahead of time instead of running in the IOP
 interpreter. One run dumps the modules and the next build uses them:

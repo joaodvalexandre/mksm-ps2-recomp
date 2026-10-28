@@ -1,0 +1,79 @@
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+index 9c94cd1..96decbe 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+@@ -1724,6 +1724,10 @@ namespace
+     {
+         if (!runtime || !runtime->syncCoreSubsystems())
+             return;
++        // MKSM-Port: the flip goes after the GS work queued before it, like the other GS writes from the EE. On the
++        // console the frame is drawn long before the game flips at the next field; with the VIF1/GIF worker the display
++        // switched to a buffer whose last draws were still queued (Shaolin Monks' text flickered and vanished).
++        runtime->memory().syncGsWorker("sceGsPutDispEnv");
+         auto &regs = runtime->memory().gs();
+         regs.pmode = env.pmode;
+         regs.smode2 = env.smode2;
+diff --git a/ps2xTest/src/ps2_gs_tests.cpp b/ps2xTest/src/ps2_gs_tests.cpp
+index 36b5f5c..43e8460 100644
+--- a/ps2xTest/src/ps2_gs_tests.cpp
++++ b/ps2xTest/src/ps2_gs_tests.cpp
+@@ -763,6 +763,59 @@ void register_ps2_gs_tests()
+             t.Equals(frame2Fbp(), 0x80u, "a ref tag with the SPR bit should take its data from the scratchpad");
+         });
+ 
++        // MKSM-Port: a flip waits for the GS work queued before it, like the other GS writes from the EE. With the
++        // VIF1/GIF worker the display switched to a buffer whose last draws were still queued: Shaolin Monks' text, drawn
++        // last in each frame, flickered and vanished.
++        tc.Run("sceGsPutDispEnv applies after the GS work queued before it", [](TestCase &t)
++        {
++            struct ScopedGsWorker
++            {
++                static void set(const char *value)
++                {
++#ifdef _WIN32
++                    _putenv_s("PS2X_GS_WORKER", value);
++#else
++                    if (value[0] != '\0') setenv("PS2X_GS_WORKER", value, 1);
++                    else unsetenv("PS2X_GS_WORKER");
++#endif
++                }
++                ScopedGsWorker() { set("1"); }
++                ~ScopedGsWorker() { set(""); }
++            } worker;
++            PS2Runtime runtime;
++            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
++            t.IsTrue(runtime.syncCoreSubsystems(), "the GS should be bound to memory");
++            uint8_t *rdram = runtime.memory().getRDRAM();
++
++            // Eight 256x504 CT32 uploads (~4 MB) for the worker, then the flip.
++            constexpr uint32_t kLpAddr = 0x4000u, kEnvAddr = 0x6000u, kSrcAddr = 0x100000u;
++            R5900Context ctx{};
++            for (uint32_t i = 0; i < 8u; ++i)
++            {
++                setRegU32(ctx, 4, kLpAddr);
++                setRegU32(ctx, 5, 0x800u * i); // DBP
++                setRegU32(ctx, 6, 4u);         // DBW
++                setRegU32(ctx, 7, static_cast<uint32_t>(GS_PSM_CT32));
++                setRegU32(ctx, 8, 0u);
++                setRegU32(ctx, 9, 0u);
++                setRegU32(ctx, 10, 256u);
++                setRegU32(ctx, 11, 504u);
++                ps2_stubs::sceGsSetDefLoadImage(rdram, &ctx, &runtime);
++                setRegU32(ctx, 4, kLpAddr);
++                setRegU32(ctx, 5, kSrcAddr);
++                ps2_stubs::sceGsExecLoadImage(rdram, &ctx, &runtime);
++            }
++            const uint64_t env[5] = {0x66ull, 0x3ull, 0x1450ull, 0xFF27F00000000ull, 0ull}; // PMODE ... BGCOLOR
++            std::memcpy(rdram + kEnvAddr, env, sizeof(env));
++            setRegU32(ctx, 4, kEnvAddr);
++            ps2_stubs::sceGsPutDispEnv(rdram, &ctx, &runtime);
++
++            const GSDebugSnapshot snap = runtime.gs().getDebugSnapshot();
++            t.Equals(snap.bitbltbuf.dbp, 0x3800u, "the last upload queued before the flip should have reached the GS");
++            t.Equals(snap.transferCopiedPixels, 256u * 504u, "the last upload should be complete when the flip applies");
++            t.Equals(runtime.memory().gs().dispfb1, 0x1450ull, "the flip should apply");
++        });
++
+         // MKSM-Port: the GS clamps a vertex Z to its Z buffer format. Shaolin Monks draws its menu layers with Z
+         // 0x199999A0, 0x40000000 and 0x7FFFFFFF over a Z24 buffer (GEQUAL, never cleared): clamped, every layer passes;
+         // with only the low 24 bits kept they became 0.6, 0 and 1 and the old screens showed through the menu.

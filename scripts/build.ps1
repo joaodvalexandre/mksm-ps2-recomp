@@ -105,6 +105,39 @@ $analyzerFuncmapPatch = Join-Path $RepoRoot 'patches\ps2recomp-analyzer-funcmap.
 # MKSM-Port: sceGsSetDefDispEnv writes the whole display env like libgraph (PMODE with a read circuit on), not only
 # DISPFB/DISPLAY: games that apply it with sceGsPutDispEnv showed nothing but the blank (magenta) frame.
 $gsDefDispEnvPatch = Join-Path $RepoRoot 'patches\ps2recomp-gs-def-disp-env.patch'
+# MKSM-Port: CreateThread/ChangeThreadPriority accept priority 0 and ChangeThreadPriority returns the previous priority,
+# like the EE kernel: CRI ADX creates its server threads at the main thread's priority (0) and its lock restores the
+# priority ChangeThreadPriority returned; without that the game never finished loading.
+$eeThreadPriorityPatch = Join-Path $RepoRoot 'patches\ps2recomp-ee-thread-priority.patch'
+# MKSM-Port: sceGsPutDrawEnv sends the GIF tag it is given with all of its register pairs, like libgraph, instead of
+# reading 8 pairs from the tag itself (context 2, TEST_1 and the clear were lost and nothing visible was drawn).
+$gsPutDrawEnvPatch = Join-Path $RepoRoot 'patches\ps2recomp-gs-put-draw-env.patch'
+# MKSM-Port: sceGsSetDefLoadImage/sceGsExecLoadImage build and send libgraph's GIF packet (DBP as given) instead of a
+# private record whose DBP was scaled by 8 (every texture the game uploaded ended up outside GS memory).
+$gsLoadImagePatch = Join-Path $RepoRoot 'patches\ps2recomp-gs-load-image.patch'
+# MKSM-Port: EndOfHeap reports the game's SetupHeap limit, not the private runtime heap's (libc's sbrk failed every
+# malloc against it).
+$eeEndOfHeapPatch = Join-Path $RepoRoot 'patches\ps2recomp-ee-end-of-heap.patch'
+# MKSM-Port: the IOP heap starts at 0x90000 so that the game's nine IRX modules fit in the module arena (SNDFI.IRX did
+# not with the heap at 0x70000).
+$iopModuleArenaPatch = Join-Path $RepoRoot 'patches\ps2recomp-iop-module-arena.patch'
+# MKSM-Port: bit 31 of a DMA address (D_MADR, D_TADR, a tag's ADDR, sceDmaSend's argument) selects the scratchpad, where
+# the game builds its text packets.
+$dmaScratchpadAddressPatch = Join-Path $RepoRoot 'patches\ps2recomp-dma-scratchpad-address.patch'
+# MKSM-Port: scePadRead also writes the pad data into the buffer given to scePadPortOpen, as the IOP's pad driver does
+# (the game reads its buttons from there).
+$padDmaBufferPatch = Join-Path $RepoRoot 'patches\ps2recomp-pad-dma-buffer.patch'
+# MKSM-Port: a vertex Z larger than the Z buffer format holds is clamped to its maximum, not wrapped (the main menu's
+# sprite layers failed the depth test and old screens showed through).
+$gsDepthClampPatch = Join-Path $RepoRoot 'patches\ps2recomp-gs-depth-clamp.patch'
+# MKSM-Port: a flip (sceGsPutDispEnv) applies after the GS work queued before it on the VIF1/GIF worker (the display
+# showed buffers whose last draws, the game's text, were still queued).
+$gsFlipAfterQueuedWorkPatch = Join-Path $RepoRoot 'patches\ps2recomp-gs-flip-after-queued-work.patch'
+# MKSM-Port: the window shows frames at 4:3 (God of War's port forced 16:9); MKSM_ASPECT=16:9 stretches them.
+$hostAspectPatch = Join-Path $RepoRoot 'patches\ps2recomp-host-aspect.patch'
+# MKSM-Port: field rendering is shown as the mean of each field and the one before (the game puts every other field
+# half a line lower; shown one after the other the picture shook and text flickered). MKSM_DEINTERLACE=0 turns it off.
+$gsFieldBlendPatch = Join-Path $RepoRoot 'patches\ps2recomp-gs-field-blend.patch'
 $overrides = Join-Path $RepoRoot 'src\mksm_overrides.cpp'
 
 $git = 'git'
@@ -184,6 +217,17 @@ Run $git @('apply', '--ignore-whitespace', '--verbose', $vu1ClipBranchlessPatch)
 Run $git @('apply', '--ignore-whitespace', '--verbose', $vu1MaddSaturatedPatch)
 Run $git @('apply', '--ignore-whitespace', '--verbose', $analyzerFuncmapPatch)
 Run $git @('apply', '--ignore-whitespace', '--verbose', $gsDefDispEnvPatch)
+Run $git @('apply', '--ignore-whitespace', '--verbose', $eeThreadPriorityPatch)
+Run $git @('apply', '--ignore-whitespace', '--verbose', $gsPutDrawEnvPatch)
+Run $git @('apply', '--ignore-whitespace', '--verbose', $gsLoadImagePatch)
+Run $git @('apply', '--ignore-whitespace', '--verbose', $eeEndOfHeapPatch)
+Run $git @('apply', '--ignore-whitespace', '--verbose', $iopModuleArenaPatch)
+Run $git @('apply', '--ignore-whitespace', '--verbose', $dmaScratchpadAddressPatch)
+Run $git @('apply', '--ignore-whitespace', '--verbose', $padDmaBufferPatch)
+Run $git @('apply', '--ignore-whitespace', '--verbose', $gsDepthClampPatch)
+Run $git @('apply', '--ignore-whitespace', '--verbose', $gsFlipAfterQueuedWorkPatch)
+Run $git @('apply', '--ignore-whitespace', '--verbose', $hostAspectPatch)
+Run $git @('apply', '--ignore-whitespace', '--verbose', $gsFieldBlendPatch)
 Pop-Location
 
 # The generated code includes <ps2_recompiled_functions.h> from src/runner

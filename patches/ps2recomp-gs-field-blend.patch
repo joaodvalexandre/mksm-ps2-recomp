@@ -1,0 +1,116 @@
+diff --git a/ps2xRuntime/include/runtime/gs/gs_hw_backend.h b/ps2xRuntime/include/runtime/gs/gs_hw_backend.h
+index 0d7cc3a..f7b3224 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_hw_backend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_hw_backend.h
+@@ -18,6 +18,13 @@ inline float gsHwDepthToUnit(double z, double zmax)
+     return static_cast<float>(std::min(std::max(z, 0.0), zmax) / zmax);
+ }
+ 
++// MKSM-Port: field rendering (SMODE2 INT and FFMD) is shown as the mean of each field and the one before, as a TV's
++// persistence shows it (PCSX2's "blend" deinterlacing); setting is MKSM_DEINTERLACE, "0" shows the fields one by one.
++inline bool gsHwBlendFields(uint64_t smode2, const char *setting)
++{
++    return (smode2 & 3u) == 3u && !(setting != nullptr && setting[0] == '0');
++}
++
+ class GSHwBackend final : public GSRasterBackend
+ {
+ public:
+diff --git a/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+index 94f8ab2..b63f701 100644
+--- a/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -499,6 +499,10 @@ struct GSHwBackend::Impl
+     GLuint presentProgram = 0, presentVao = 0, presentFbo = 0, presentTex = 0;
+     GLint locPresentSrc = -1, locPresentOffset = -1, locPresentEdge = -1;
+     uint32_t presentW = 0, presentH = 0;
++    // MKSM-Port: the last two displayed fields of field rendering (see Present): fieldTex[fieldIndex] is the one shown now
++    // (buffer fieldFbp), the other the one before; fieldCount says how many of them are valid
++    GLuint fieldTex[2] = {0u, 0u};
++    uint32_t fieldW = 0, fieldH = 0, fieldIndex = 0, fieldFbp = 0, fieldCount = 0;
+     GLuint shuffleProgram = 0, shuffleVao = 0, shuffleVbo = 0;
+     GLint locShTexa = -1;
+     GLint locShInvSize = -1, locShSrc = -1, locShSrcZ = -1, locShZMax = -1, locShHs = -1, locShHd = -1, locShScale = -1;
+@@ -2767,6 +2771,60 @@ PresentationFrame GSHwBackend::Present(const GSPresentationRequest &request)
+     g.ClearColor(0.f, 0.f, 0.f, 1.f);
+     g.Clear(kColorBufferBit);
+     g.ColorMask(kTrue, kTrue, kTrue, kTrue);
++    // MKSM-Port: field rendering (SMODE2 INT and FFMD). Shaolin Monks draws every other field half a line lower in its
++    // own vertices (not XYOFFSET), which a TV interleaves; shown one after the other the picture moved a line every frame
++    // and thin text flickered. The frame shown is the mean of the displayed field and the one shown before it. A field
++    // is the displayed buffer: the window's refresh is not locked to the game's fields, and a buffer presented twice in
++    // a row must not become its own previous field (that showed the half-line shift again now and then).
++    static const char *const deinterlace = std::getenv("MKSM_DEINTERLACE");
++    if (gsHwBlendFields(request.smode2, deinterlace) && g.CopyImageSubData)
++    {
++        if (!d.fieldTex[0] || d.fieldW != outW || d.fieldH != outH)
++        {
++            for (GLuint &tex : d.fieldTex)
++            {
++                if (tex)
++                    g.DeleteTextures(1, &tex);
++                g.GenTextures(1, &tex);
++                g.BindTexture(kTexture2D, tex);
++                g.TexImage2D(kTexture2D, 0, static_cast<GLint>(kRgba8), outW, outH, 0, kRgba, kUnsignedByte, nullptr);
++                g.TexParameteri(kTexture2D, kTextureMinFilter, kNearest);
++                g.TexParameteri(kTexture2D, kTextureMagFilter, kNearest);
++            }
++            d.fieldW = outW;
++            d.fieldH = outH;
++            d.fieldCount = 0;
++        }
++        if (d.fieldCount == 0 || fbp != d.fieldFbp)
++        {
++            d.fieldIndex ^= 1u; // a new field: the one shown so far becomes the previous one
++            d.fieldCount = std::min(d.fieldCount + 1u, 2u);
++            d.fieldFbp = fbp;
++        }
++        const GLuint current = d.fieldTex[d.fieldIndex], previous = d.fieldTex[d.fieldIndex ^ 1u];
++        g.CopyImageSubData(d.presentTex, kTexture2D, 0, 0, 0, 0, current, kTexture2D, 0, 0, 0, 0,
++                           static_cast<GLsizei>(outW), static_cast<GLsizei>(outH), 1);
++        if (d.fieldCount == 2)
++        {
++            // the previous field over this one at half weight, through the present program as a 1:1 copy
++            g.UseProgram(d.presentProgram);
++            g.BindVertexArray(d.presentVao);
++            g.ActiveTexture(kTexture0);
++            g.BindTexture(kTexture2D, previous);
++            g.Uniform1i(d.locPresentSrc, 0);
++            g.Uniform4i(d.locPresentOffset, 0, 0, 0, 0);
++            g.Uniform1i(d.locPresentEdge, 0);
++            g.Enable(kBlend);
++            g.BlendEquationSeparate(kFuncAdd, kFuncAdd);
++            g.BlendColor(0.5f, 0.5f, 0.5f, 0.5f);
++            g.BlendFuncSeparate(kConstantColor, kOneMinusConstantColor, kZero, kOne);
++            g.DrawArrays(kTriangles, 0, 3);
++            g.Disable(kBlend);
++            g.BindVertexArray(d.vao);
++        }
++    }
++    else
++        d.fieldCount = 0;
+     if (shared)
+     {
+         // MKSM-Port: zero-copy presentation: GPU copy into a texture shared with the host window, no pixels returned.
+diff --git a/ps2xTest/src/ps2_gs_tests.cpp b/ps2xTest/src/ps2_gs_tests.cpp
+index a2371b9..c0926b6 100644
+--- a/ps2xTest/src/ps2_gs_tests.cpp
++++ b/ps2xTest/src/ps2_gs_tests.cpp
+@@ -817,6 +817,17 @@ void register_ps2_gs_tests()
+             t.Equals(runtime.memory().gs().dispfb1, 0x1450ull, "the flip should apply");
+         });
+ 
++        // MKSM-Port: field rendering is shown as the mean of each field and the one before. Shaolin Monks draws every
++        // other field half a line lower in its own vertices; the window showing the fields one after the other moved the
++        // picture a line every frame and thin text flickered.
++        tc.Run("field rendering is presented as the blend of the last two fields", [](TestCase &t)
++        {
++            t.IsTrue(gsHwBlendFields(3u, nullptr), "interlaced field mode (SMODE2 3) should blend the fields");
++            t.IsTrue(!gsHwBlendFields(1u, nullptr), "frame mode (SMODE2 1) shows each frame as it is");
++            t.IsTrue(!gsHwBlendFields(0u, nullptr), "progressive output shows each frame as it is");
++            t.IsTrue(!gsHwBlendFields(3u, "0"), "MKSM_DEINTERLACE=0 turns the blend off");
++        });
++
+         // MKSM-Port: the window shows PS2 frames at 4:3 by default; God of War's port forced 16:9, which stretched
+         // Shaolin Monks' 4:3 picture sideways (the dragon emblem's ring 1.36 times wider than tall).
+         tc.Run("the host shows frames at 4:3 unless MKSM_ASPECT gives a ratio", [](TestCase &t)

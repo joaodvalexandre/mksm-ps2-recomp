@@ -1,0 +1,100 @@
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
+index 09ffbf4..4b2481f 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
+@@ -766,14 +766,22 @@ namespace ps2_stubs
+ 
+     void sceGsPutDrawEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+-        uint32_t envAddr = getRegU32(ctx, 4);
+-        GsRegPairMem pairs[8]{};
+-        if (!readGsRegPairs(rdram, envAddr, pairs, 8u))
++        // MKSM-Port: like libgraph, the argument is the GIF tag in front of the drawing environment (sceGsDBuff.giftag0,
++        // ...), and the tag with its NLOOP quadwords goes to the GS through PATH3: both contexts' registers and, when the
++        // game appends it, the clear sprite. Reading 8 register pairs from the tag itself applied the tag as a register,
++        // dropped TEST_1 and the whole context 2 and never cleared (Mortal Kombat: Shaolin Monks drew nothing visible).
++        const uint32_t tagAddr = getRegU32(ctx, 4);
++        const uint8_t *tag = getConstMemPtr(rdram, tagAddr);
++        if (!tag || !runtime || !runtime->syncCoreSubsystems())
+         {
+             setReturnS32(ctx, -1);
+             return;
+         }
+-        applyGsRegPairs(runtime, pairs, 8u);
++        uint64_t tagLo = 0;
++        std::memcpy(&tagLo, tag, sizeof(tagLo));
++        const uint32_t nloop = static_cast<uint32_t>(tagLo & 0x7FFFu);
++        runtime->memory().sendDma(PS2Memory::DmaPath::Gif, tagAddr, nloop + 1u);
++        ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, 2u);
+         setReturnS32(ctx, 0);
+     }
+ 
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+index 66ef017..4e93075 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+@@ -1722,17 +1722,6 @@ namespace
+         return true;
+     }
+ 
+-    static bool readGsRegPairs(uint8_t *rdram, uint32_t addr, GsRegPairMem *pairs, size_t pairCount)
+-    {
+-        if (!pairs || pairCount == 0u)
+-            return false;
+-        const uint8_t *ptr = getConstMemPtr(rdram, addr);
+-        if (!ptr)
+-            return false;
+-        std::memcpy(pairs, ptr, pairCount * sizeof(GsRegPairMem));
+-        return true;
+-    }
+-
+     static void applyGsDispEnv(PS2Runtime *runtime, const GsDispEnvMem &env)
+     {
+         if (!runtime || !runtime->syncCoreSubsystems())
+diff --git a/ps2xTest/src/ps2_gs_tests.cpp b/ps2xTest/src/ps2_gs_tests.cpp
+index 7315659..7228b42 100644
+--- a/ps2xTest/src/ps2_gs_tests.cpp
++++ b/ps2xTest/src/ps2_gs_tests.cpp
+@@ -627,6 +627,42 @@ void register_ps2_gs_tests()
+                      "sceGsPutDispEnv should program DISPLAY2 from the display env");
+         });
+ 
++        // MKSM-Port: sceGsPutDrawEnv takes the GIF tag in front of the drawing environment and sends the tag with all of
++        // its NLOOP register pairs (both contexts), not 8 pairs read from the tag itself.
++        tc.Run("sceGsPutDrawEnv sends the GIF tag with all of its register pairs", [](TestCase &t)
++        {
++            PS2Runtime runtime;
++            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
++            uint8_t *rdram = runtime.memory().getRDRAM();
++
++            constexpr uint32_t kTagAddr = 0x4000u;
++            const uint64_t packet[] = {
++                10ull | (1ull << 15) | (1ull << 60), 0xEull, // PACKED A+D tag, EOP, NLOOP 10
++                (10ull << 16), GS_REG_FRAME_1,               // FBP 0, FBW 10
++                0ull, GS_REG_ZBUF_1,
++                (0x6C00ull | (0x7800ull << 32)), GS_REG_XYOFFSET_1,
++                ((639ull << 16) | (255ull << 48)), GS_REG_SCISSOR_1,
++                1ull, GS_REG_PRMODECONT,
++                1ull, GS_REG_COLCLAMP,
++                0ull, GS_REG_DTHE,
++                0x3000Bull, GS_REG_TEST_1,                   // ATE, ATST GEQUAL, ZTE, ZTST ALWAYS
++                (0x50ull | (10ull << 16)), GS_REG_FRAME_2,   // FBP 0x50, FBW 10
++                0x30000ull, GS_REG_TEST_2,
++            };
++            std::memcpy(rdram + kTagAddr, packet, sizeof(packet));
++
++            R5900Context ctx{};
++            setRegU32(ctx, 4, kTagAddr);
++            ps2_stubs::sceGsPutDrawEnv(rdram, &ctx, &runtime);
++            t.Equals(static_cast<int32_t>(getRegU32Test(ctx, 2)), 0, "sceGsPutDrawEnv should succeed");
++
++            const GSDebugSnapshot snap = runtime.gs().getDebugSnapshot();
++            t.Equals(snap.ctx[0].frame.fbw, 10u, "FRAME_1 should come from the first pair after the tag");
++            t.Equals(snap.ctx[0].test, 0x3000Bull, "TEST_1, the eighth pair, should reach the GS");
++            t.Equals(snap.ctx[1].frame.fbp, 0x50u, "FRAME_2 should reach the GS (context 2 of the environment)");
++            t.Equals(snap.ctx[1].test, 0x30000ull, "TEST_2, the last pair (NLOOP 10), should reach the GS");
++        });
++
+ 
+ 
+ 

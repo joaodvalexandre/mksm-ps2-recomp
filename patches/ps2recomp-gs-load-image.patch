@@ -1,0 +1,222 @@
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
+index 4b2481f..5c383c5 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
+@@ -593,74 +593,28 @@ namespace ps2_stubs
+ 
+     void sceGsExecLoadImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+-        uint32_t imgAddr = getRegU32(ctx, 4);
+-        uint32_t srcAddr = getRegU32(ctx, 5);
+-
+-        GsImageMem img{};
+-        if (!runtime || !runtime->syncCoreSubsystems() || !readGsImage(rdram, imgAddr, img))
++        // MKSM-Port: like libgraph, two GIF transfers: the 6 quadwords sceGsSetDefLoadImage built (A+D tag, BITBLTBUF,
++        // TRXPOS, TRXREG, TRXDIR, IMAGE tag), then the image data, as many quadwords as the IMAGE tag's NLOOP says.
++        const uint32_t lpAddr = getRegU32(ctx, 4);
++        const uint32_t srcAddr = getRegU32(ctx, 5);
++        const uint8_t *lp = getConstMemPtr(rdram, lpAddr);
++        if (!lp || !runtime || !runtime->syncCoreSubsystems())
+         {
+             setReturnS32(ctx, -1);
+             return;
+         }
+-
+-        const uint32_t rowBytes = bytesForPixels(img.psm, static_cast<uint32_t>(img.width));
+-        if (rowBytes == 0)
+-        {
+-            setReturnS32(ctx, -1);
+-            return;
+-        }
+-
+-        uint32_t fbw = img.vram_width ? img.vram_width : std::max<uint32_t>(1, (img.width + 63) / 64);
+-        const uint32_t totalImageBytes = rowBytes * static_cast<uint32_t>(img.height);
+-        const uint32_t headerQwc = 6u;
+-        const uint32_t imageQwc = (totalImageBytes + 15u) / 16u;
+-        const uint32_t totalQwc = headerQwc + imageQwc;
+-
+-        uint32_t pktAddr = runtime->guestMalloc(totalQwc * 16u, 16u);
+-        if (pktAddr == 0)
+-        {
+-            setReturnS32(ctx, -1);
+-            return;
+-        }
+-
+-        uint8_t *pkt = getMemPtr(rdram, pktAddr);
+-        const uint8_t *src = getConstMemPtr(rdram, srcAddr);
+-        if (!pkt || !src)
+-        {
+-            runtime->guestFree(pktAddr);
+-            setReturnS32(ctx, -1);
+-            return;
+-        }
+-
+-        uint32_t dbp = (static_cast<uint32_t>(img.vram_addr) * 2048u) / 256u;
+-        uint32_t dsax = static_cast<uint32_t>(img.x);
+-        uint32_t dsay = static_cast<uint32_t>(img.y);
+-
+-        // Full messy
+-        uint64_t *q = reinterpret_cast<uint64_t *>(pkt);
+-        q[0] = makeGiftagAplusD(4u);
+-        q[1] = 0xEULL;
+-        q[2] = (static_cast<uint64_t>(img.psm & 0x3Fu) << 24) | (static_cast<uint64_t>(1u) << 16) |
+-               (static_cast<uint64_t>(dbp & 0x3FFFu) << 32) | (static_cast<uint64_t>(fbw & 0x3Fu) << 48) |
+-               (static_cast<uint64_t>(img.psm & 0x3Fu) << 56);
+-        q[3] = 0x50ULL;
+-        q[4] = (static_cast<uint64_t>(dsay & 0x7FFu) << 48) | (static_cast<uint64_t>(dsax & 0x7FFu) << 32);
+-        q[5] = 0x51ULL;
+-        q[6] = (static_cast<uint64_t>(img.height) << 32) | static_cast<uint64_t>(img.width);
+-        q[7] = 0x52ULL;
+-        q[8] = 0ULL;
+-        q[9] = 0x53ULL;
+-        q[10] = (static_cast<uint64_t>(2) << 58) | (static_cast<uint64_t>(imageQwc) & 0x7FFF) |
+-                (1ULL << 15);
+-        q[11] = 0ULL;
+-
+-        std::memcpy(pkt + headerQwc * 16u, src, totalImageBytes);
++        uint64_t imageTag = 0;
++        std::memcpy(&imageTag, lp + 0x50u, sizeof(imageTag));
++        const uint32_t imageQwc = static_cast<uint32_t>(imageTag & 0x7FFFu);
+ 
+         auto &mem = runtime->memory();
+-        mem.sendDma(PS2Memory::DmaPath::Gif, pktAddr, totalQwc);
++        mem.sendDma(PS2Memory::DmaPath::Gif, lpAddr, 6u);
+         ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, 2u);
+-        runtime->guestFree(pktAddr);
+-
++        if (imageQwc != 0u)
++        {
++            mem.sendDma(PS2Memory::DmaPath::Gif, srcAddr, imageQwc);
++            ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, 2u);
++        }
+         setReturnS32(ctx, 0);
+     }
+ 
+@@ -1113,6 +1067,59 @@ namespace ps2_stubs
+ 
+     void sceGsSetDefLoadImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
++        // MKSM-Port: libgraph's sceGsLoadImage is the GIF packet itself (0x60 bytes): a PACKED A+D tag (NLOOP 4) with
++        // BITBLTBUF (DBP as given, in 64-word units), TRXPOS, TRXREG and TRXDIR, then the IMAGE tag (EOP) whose NLOOP is
++        // the image size in quadwords; it returns 6, the header's length. A private record whose DBP sceGsExecLoadImage
++        // scaled by 8 put every texture of Mortal Kombat: Shaolin Monks outside GS memory (blank textures, black screen).
++        const uint32_t lpAddr = getRegU32(ctx, 4);
++        const GsSetDefImageArgs args = decodeGsSetDefImageArgs(rdram, ctx);
++        uint8_t *lp = getMemPtr(rdram, lpAddr);
++        if (!lp)
++        {
++            setReturnS32(ctx, 0);
++            return;
++        }
++        // the arguments are shorts; the quadword count by format is libgraph's table
++        const int64_t dbp = static_cast<int16_t>(args.vramAddr), dbw = static_cast<int16_t>(args.vramWidth);
++        const int64_t dpsm = static_cast<int16_t>(args.psm), x = static_cast<int16_t>(args.x);
++        const int64_t y = static_cast<int16_t>(args.y), w = static_cast<int16_t>(args.width), h = static_cast<int16_t>(args.height);
++        int64_t qwc = 0;
++        switch (dpsm)
++        {
++        case GS_PSM_CT32: case GS_PSM_Z32: qwc = (w * h) >> 2; break;
++        case GS_PSM_CT24: case GS_PSM_Z24: qwc = (w * h * 3) >> 4; break;
++        case GS_PSM_CT16: case GS_PSM_CT16S: case GS_PSM_Z16: case GS_PSM_Z16S: qwc = (w * h) >> 3; break;
++        case GS_PSM_T8: case GS_PSM_T8H: qwc = (w * h) >> 4; break;
++        case GS_PSM_T4: case GS_PSM_T4HL: case GS_PSM_T4HH: qwc = (w * h) >> 5; break;
++        default: break;
++        }
++        if (qwc > 0x7FFF)
++        {
++            setReturnS32(ctx, 0);
++            return;
++        }
++        const auto bits = [](int64_t value) { return static_cast<uint64_t>(value); };
++        uint64_t q[12] = {};
++        q[0] = 4ull | (1ull << 60);                     // NLOOP 4, PACKED, NREG 1
++        q[1] = 0xEull;                                  // A+D
++        q[2] = (bits(dbp) << 32) | (bits(dbw) << 48) | (bits(dpsm) << 56);
++        q[3] = GS_REG_BITBLTBUF;
++        q[4] = (bits(x) << 32) | (bits(y) << 48);
++        q[5] = GS_REG_TRXPOS;
++        q[6] = bits(w) | (bits(h) << 32);
++        q[7] = GS_REG_TRXREG;
++        q[8] = 0ull;                                    // host -> local
++        q[9] = GS_REG_TRXDIR;
++        q[10] = static_cast<uint64_t>(qwc & 0x7FFF) | (1ull << 15) | (2ull << 58); // NLOOP, EOP, IMAGE
++        q[11] = 0ull;
++        std::memcpy(lp, q, sizeof(q));
++        setReturnS32(ctx, 6);
++    }
++
++    void sceGsSetDefStoreImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        // MKSM-Port: the store side keeps its record (read by sceGsExecStoreImage); the load side now writes
++        // libgraph's packet instead.
+         uint32_t imgAddr = getRegU32(ctx, 4);
+         const GsSetDefImageArgs args = decodeGsSetDefImageArgs(rdram, ctx);
+ 
+@@ -1129,11 +1136,6 @@ namespace ps2_stubs
+         setReturnS32(ctx, 0);
+     }
+ 
+-    void sceGsSetDefStoreImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+-    {
+-        sceGsSetDefLoadImage(rdram, ctx, runtime);
+-    }
+-
+     void sceGsSwapDBuffDc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+         const uint32_t envAddr = getRegU32(ctx, 4);
+diff --git a/ps2xTest/src/ps2_gs_tests.cpp b/ps2xTest/src/ps2_gs_tests.cpp
+index 7228b42..4241a05 100644
+--- a/ps2xTest/src/ps2_gs_tests.cpp
++++ b/ps2xTest/src/ps2_gs_tests.cpp
+@@ -663,6 +663,51 @@ void register_ps2_gs_tests()
+             t.Equals(snap.ctx[1].test, 0x30000ull, "TEST_2, the last pair (NLOOP 10), should reach the GS");
+         });
+ 
++        // MKSM-Port: sceGsSetDefLoadImage builds libgraph's GIF packet (DBP as given) and sceGsExecLoadImage sends it and
++        // the image to the GS; a private record whose DBP was scaled by 8 left the game's textures outside GS memory.
++        tc.Run("sceGsSetDefLoadImage builds libgraph's packet and sceGsExecLoadImage uploads to its DBP", [](TestCase &t)
++        {
++            PS2Runtime runtime;
++            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
++            uint8_t *rdram = runtime.memory().getRDRAM();
++
++            constexpr uint32_t kLpAddr = 0x4000u;
++            constexpr uint32_t kSrcAddr = 0x8000u;
++            R5900Context ctx{};
++            setRegU32(ctx, 4, kLpAddr);
++            setRegU32(ctx, 5, 0x3F2Cu); // DBP, 64-word units
++            setRegU32(ctx, 6, 2u);      // DBW
++            setRegU32(ctx, 7, static_cast<uint32_t>(GS_PSM_T8));
++            setRegU32(ctx, 8, 0u);      // x
++            setRegU32(ctx, 9, 0u);      // y
++            setRegU32(ctx, 10, 128u);   // w
++            setRegU32(ctx, 11, 128u);   // h
++            ps2_stubs::sceGsSetDefLoadImage(rdram, &ctx, &runtime);
++            t.Equals(static_cast<int32_t>(getRegU32Test(ctx, 2)), 6, "sceGsSetDefLoadImage should return the header length");
++
++            uint64_t q[12] = {};
++            std::memcpy(q, rdram + kLpAddr, sizeof(q));
++            t.Equals(q[0], 4ull | (1ull << 60), "the packet should start with a PACKED tag, NLOOP 4");
++            t.Equals(q[1], 0xEull, "the tag's register should be A+D");
++            t.Equals(q[2], (0x3F2Cull << 32) | (2ull << 48) | (static_cast<uint64_t>(GS_PSM_T8) << 56),
++                     "BITBLTBUF should keep the DBP as given");
++            t.Equals(q[3], static_cast<uint64_t>(GS_REG_BITBLTBUF), "BITBLTBUF register id");
++            t.Equals(q[6], 128ull | (128ull << 32), "TRXREG should hold the width and height");
++            t.Equals(q[9], static_cast<uint64_t>(GS_REG_TRXDIR), "TRXDIR register id");
++            t.Equals(q[10], 1024ull | (1ull << 15) | (2ull << 58), "IMAGE tag with EOP, NLOOP = 128x128 bytes / 16");
++
++            std::memset(rdram + kSrcAddr, 0x5A, 128u * 128u);
++            std::memset(&ctx, 0, sizeof(ctx));
++            setRegU32(ctx, 4, kLpAddr);
++            setRegU32(ctx, 5, kSrcAddr);
++            ps2_stubs::sceGsExecLoadImage(rdram, &ctx, &runtime);
++            t.Equals(static_cast<int32_t>(getRegU32Test(ctx, 2)), 0, "sceGsExecLoadImage should succeed");
++            const GSDebugSnapshot snap = runtime.gs().getDebugSnapshot();
++            t.Equals(snap.bitbltbuf.dbp, 0x3F2Cu, "the GS should receive the DBP the game asked for");
++            t.Equals(snap.transferCopiedPixels, 128u * 128u, "the whole image should reach the GS");
++            t.Equals(snap.trxdir, 3u, "the transfer should end once the image is complete");
++        });
++
+ 
+ 
+ 

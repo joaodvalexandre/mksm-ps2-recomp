@@ -1,0 +1,53 @@
+diff --git a/ps2xIOP/src/emulator/core/iop_memory.h b/ps2xIOP/src/emulator/core/iop_memory.h
+index 607865d..ba8ad33 100644
+--- a/ps2xIOP/src/emulator/core/iop_memory.h
++++ b/ps2xIOP/src/emulator/core/iop_memory.h
+@@ -29,7 +29,10 @@ namespace ps2x::iop::detail
+         // MKSM-Port: el heap empezaba en 0x120000 (832 KB hasta HeapLimit) y SMPD_IOP.IRX de el juego base
+         // reserva un bloque de 0x11ADF8 bytes. En un IOP real el heap empieza tras los modulos cargados
+         // (los del juego base terminan hacia 0x56000), asi que lo bajamos a 0x70000 (1.5 MB).
+-        static constexpr uint32_t HeapBase = 0x00070000u;
++        // MKSM-Port: Mortal Kombat: Shaolin Monks loads 9 IRX modules that span 0x76F00 bytes from 0x10000 (MCMAN alone
++        // 0x27400, SNDFI 0x1F000): with the heap at 0x70000 SNDFI.IRX did not fit ("module arena exhausted") and the
++        // game waited for its sound server forever. The modules get up to 0x90000 and the heap keeps 1.375 MB.
++        static constexpr uint32_t HeapBase = 0x00090000u;
+         static constexpr uint32_t HeapLimit = 0x001F0000u;
+ 
+         struct Allocation
+diff --git a/ps2xTest/src/ps2_iop_tests.cpp b/ps2xTest/src/ps2_iop_tests.cpp
+index 29fdb40..996a4a2 100644
+--- a/ps2xTest/src/ps2_iop_tests.cpp
++++ b/ps2xTest/src/ps2_iop_tests.cpp
+@@ -108,6 +108,19 @@ void register_ps2_iop_tests()
+                       "stopping LIBSD should deactivate its RPC endpoint");
+         });
+ 
++        // MKSM-Port: the IOP module arena (from 0x10000 up to IopMemory::HeapBase) must hold Mortal Kombat: Shaolin Monks'
++        // nine IRX modules, 0x76F00 bytes laid out from 0x10000: with the heap at 0x70000, SNDFI.IRX did not fit.
++        tc.Run("IOP module arena holds Shaolin Monks' IRX modules before the heap", [](TestCase &t)
++        {
++            using namespace ps2x::iop::detail;
++            t.IsTrue(IopMemory::HeapBase >= 0x00010000u + 0x00076F00u,
++                     "the modules (0x76F00 bytes from 0x10000) must end before the IOP heap");
++            IopMemory memory;
++            const uint32_t block = memory.allocate(0x100u);
++            t.IsTrue(block >= IopMemory::HeapBase && block < IopMemory::HeapLimit,
++                     "IOP heap allocations should start at HeapBase, after the modules");
++        });
++
+         // MKSM-Port: 989snd toma su candado del tick con WaitSema desde el servidor RPC (sin hilo actual).
+         tc.Run("WaitSema outside a thread waits for the semaphore instead of faking success", [](TestCase &t)
+         {
+diff --git a/ps2xTest/src/ps2_sif_dma_tests.cpp b/ps2xTest/src/ps2_sif_dma_tests.cpp
+index bd94e55..ffc99d6 100644
+--- a/ps2xTest/src/ps2_sif_dma_tests.cpp
++++ b/ps2xTest/src/ps2_sif_dma_tests.cpp
+@@ -200,7 +200,7 @@ void register_ps2_sif_dma_tests()
+             setRegU32(env.ctx, 4, kIopBlockSize);
+             ps2_stubs::sceSifAllocIopHeap(env.rdram.data(), &env.ctx, &env.runtime);
+             const uint32_t iopAddress = ::getRegU32(&env.ctx, 2);
+-            // MKSM-Port: el heap del IOP empieza en 0x70000 (IopMemory::HeapBase), tras los modulos cargados.
++            // MKSM-Port: the IOP heap starts after the loaded modules (IopMemory::HeapBase, 0x90000).
+             t.IsTrue(iopAddress >= 0x00070000u && iopAddress < 0x00200000u,
+                      "sceSifAllocIopHeap should return an address in physical IOP RAM");
+             std::memset(env.rdram.data() + iopAddress, 0x5Au, payload.size());

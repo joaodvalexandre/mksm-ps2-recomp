@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Completes the analyzer's function map and entry points for a stripped ELF.
 
-ps2_analyzer finds functions from JAL targets, so it misses code that is only reached by a J (tail call) and does
-not register jumps into the middle of another function (shared epilogues). At run time both end in
-"[guest-branch:missing-target]". This tool:
+ps2_analyzer finds functions from JAL targets, so it misses code that is only reached by a J (tail call) or through a
+pointer in data (a C++ vtable, a callback table), and does not register jumps into the middle of another function
+(shared epilogues). At run time all of them end in "[guest-branch:missing-target]". This tool:
 
   1. adds a sub_XXXXXXXX entry to config/funcmap.csv for every gap of .text that holds code;
   2. adds to `entry_points` of config/recomp.template.toml every J/JAL target that is not a function start
-     (the recompiler turns those into resume entries of the owning function, or into a standalone function).
+     (the recompiler turns those into resume entries of the owning function, or into a standalone function);
+  3. adds there too every code address stored in data that is not a function start and follows a return
+     (jr $ra and its delay slot), the shape of a function only called through a pointer.
 
 Usage:  python tools/funcmap_fixup.py game/SLES_535.24 [--check]
         --check only reports, and fails if something is missing.
@@ -54,7 +56,26 @@ def load_elf(path: Path):
                 return struct.unpack_from('<I', data, offset + address - vaddr)[0]
         return 0
 
-    return text, word
+    return text, word, [(vaddr, vaddr + size) for vaddr, _, size in segments]
+
+
+JR_RA = 0x03E00008
+
+
+def data_code_pointers(ranges, text, word, starts) -> set[int]:
+    """Words outside .text (in the loaded `ranges`) that point at an instruction of .text which is not a function
+    start but follows a return: functions reached only through a pointer (Shaolin Monks' 0x38C730, a vtable entry
+    the analyzer merged into the getter before it, killed the main thread at the first virtual call)."""
+    text_start, text_end = text
+    found = set()
+    for begin, end in ranges:
+        for address in range(begin, end, 4):
+            if text_start <= address < text_end:
+                continue
+            value = word(address)
+            if text_start < value < text_end and value % 4 == 0 and value not in starts and word(value - 8) == JR_RA:
+                found.add(value)
+    return found
 
 
 def main() -> int:
@@ -63,7 +84,7 @@ def main() -> int:
     parser.add_argument('--check', action='store_true')
     args = parser.parse_args()
 
-    (text_start, text_end), word = load_elf(args.elf)
+    (text_start, text_end), word, ranges = load_elf(args.elf)
     with FUNCMAP.open(newline='', encoding='utf-8') as f:
         rows = list(csv.DictReader(f))
     funcs = sorted((int(r['Start'], 16), int(r['End'], 16)) for r in rows)
@@ -96,6 +117,8 @@ def main() -> int:
         if opcode == 2 and owner(address) is not None and owner(address) == owner(target):
             continue
         targets.add(target)
+    # 3. Code addresses kept in data (vtables, callback tables).
+    targets |= data_code_pointers(ranges, (text_start, text_end), word, start_set)
 
     template = TEMPLATE.read_text(encoding='utf-8')
     block = re.search(r'^entry_points = \[\n(.*?)^\]', template, re.M | re.S)

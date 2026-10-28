@@ -1,0 +1,83 @@
+diff --git a/ps2xRuntime/include/ps2_runtime.h b/ps2xRuntime/include/ps2_runtime.h
+index 7161a70..c54def5 100644
+--- a/ps2xRuntime/include/ps2_runtime.h
++++ b/ps2xRuntime/include/ps2_runtime.h
+@@ -386,6 +386,9 @@ public:
+     uint32_t guestHeapBase() const;
+     uint32_t guestHeapEnd() const;
+     uint32_t guestHeapLimit() const;
++    // MKSM-Port: the end of the heap the game configured (SetupHeap), 0 before it does; EndOfHeap reports it even
++    // when the runtime keeps its internal heap in a private range (setPrivateGuestHeap).
++    uint32_t gameHeapLimit() const;
+     uint32_t reserveAsyncCallbackStack(uint32_t size, uint32_t alignment);
+     // MKSM-Port: las pilas de interrupciones/callbacks se reservan desde lo alto de la RAM hacia abajo; este
+     // limite las mantiene por debajo de la pila del hilo principal (que SetupThread coloca tambien arriba).
+@@ -542,6 +545,7 @@ private:
+     bool m_guestHeapConfigured = false;
+     uint32_t m_privateGuestHeapBase = 0u;
+     uint32_t m_privateGuestHeapLimit = 0u;
++    uint32_t m_gameHeapLimit = 0u; // MKSM-Port: see gameHeapLimit()
+     uint32_t m_asyncCallbackStackFloor = 0x01F00000u;
+     uint32_t m_asyncCallbackStackTop = PS2_RAM_SIZE;
+ 
+diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp b/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp
+index ea00e23..46dbde3 100644
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp
+@@ -598,9 +598,13 @@ namespace ps2_syscalls
+ 
+         static constexpr uint32_t kDefaultGuestHeapEnd = 0x01F00000u;
+ 
+-        const uint32_t ret = runtime
+-                                 ? runtime->guestHeapLimit()
+-                                 : kDefaultGuestHeapEnd;
++        // MKSM-Port: the end of the game's own heap (SetupHeap), not the runtime's: with a private runtime heap
++        // (setPrivateGuestHeap) its end is unrelated to the game, and a libc sbrk that checks heap_ptr + incr against
++        // EndOfHeap() failed every malloc (Mortal Kombat: Shaolin Monks built its GS packets at address 0).
++        const uint32_t gameLimit = runtime ? runtime->gameHeapLimit() : 0u;
++        const uint32_t ret = gameLimit != 0u ? gameLimit
++                             : runtime     ? runtime->guestHeapLimit()
++                                           : kDefaultGuestHeapEnd;
+ 
+         setReturnU32(ctx, ret);
+     }
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 49994db..f512199 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -2148,6 +2148,7 @@ void PS2Runtime::configureGuestHeap(uint32_t guestBase, uint32_t guestLimit)
+         normalizedBase = (m_guestHeapSuggestedBase != 0u) ? m_guestHeapSuggestedBase : kGuestHeapDefaultBase;
+     }
+     m_guestHeapSuggestedBase = normalizedBase;
++    m_gameHeapLimit = guestLimit; // MKSM-Port: kept even when the runtime heap is private
+     resetGuestHeapLocked(normalizedBase, guestLimit);
+ }
+ 
+@@ -2310,6 +2311,12 @@ uint32_t PS2Runtime::guestHeapLimit() const
+     return m_guestHeapConfigured ? m_guestHeapLimit : m_guestHeapSuggestedBase;
+ }
+ 
++uint32_t PS2Runtime::gameHeapLimit() const
++{
++    std::lock_guard<std::mutex> lock(m_guestHeapMutex);
++    return m_gameHeapLimit;
++}
++
+ void PS2Runtime::setPrivateGuestHeap(uint32_t base, uint32_t limit)
+ {
+     std::lock_guard<std::mutex> lock(m_guestHeapMutex);
+diff --git a/ps2xTest/src/ps2_runtime_kernel_tests.cpp b/ps2xTest/src/ps2_runtime_kernel_tests.cpp
+index ae9a3ec..35efdab 100644
+--- a/ps2xTest/src/ps2_runtime_kernel_tests.cpp
++++ b/ps2xTest/src/ps2_runtime_kernel_tests.cpp
+@@ -986,6 +986,10 @@ void register_ps2_runtime_kernel_tests()
+             t.IsTrue(a >= 0x000A0000u && a + 0x100u <= 0x000FF000u,
+                      "guestMalloc should allocate inside the private runtime heap");
+             t.Equals(env.runtime.guestHeapLimit(), 0x000FF000u, "the runtime heap limit should be the private one");
++            // MKSM-Port: EndOfHeap is the game's heap end (libc's sbrk checks against it), not the private one
++            t.IsTrue(callSyscall(0x3Eu, env.rdram.data(), &env.ctx, &env.runtime), "EndOfHeap syscall should dispatch");
++            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)), 0x00181010u,
++                     "EndOfHeap should report the game's SetupHeap limit, not the private runtime heap's");
+ 
+             env.runtime.guestFree(a);
+             setRegU32(env.ctx, 4, 0x00190000u);

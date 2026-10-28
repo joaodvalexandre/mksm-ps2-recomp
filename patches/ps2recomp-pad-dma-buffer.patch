@@ -1,0 +1,78 @@
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp
+index b50a4cf..e290b67 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp
+@@ -643,6 +643,28 @@ namespace ps2_stubs
+             return;
+         }
+ 
++        // MKSM-Port: the IOP's pad driver keeps the buffer given to scePadPortOpen up to date: two 128-byte halves
++        // (libpad's scePadGetDmaStr takes the one with the newer frame count at +0x58), each starting with the 32 bytes
++        // scePadRead returns. Mortal Kombat: Shaolin Monks reads the buttons and sticks straight from it (+2..+7); left
++        // at zero, every button looked held and no press ever registered.
++        uint32_t dmaAddr = 0u;
++        {
++            std::lock_guard<std::mutex> lock(g_padStateMutex);
++            if (const PadPortState *portState = lookupPadPortStateLocked(port, slot))
++                dmaAddr = portState->dmaAddr;
++        }
++        if (dmaAddr != 0u)
++        {
++            for (const uint32_t half : {0x00u, 0x80u})
++            {
++                if (uint8_t *dma = getMemPtr(rdram, dmaAddr + half))
++                {
++                    ps2TraceGuestRangeWrite(rdram, dmaAddr + half, 32u, "scePadRead", ctx);
++                    std::memcpy(dma, data, 32u);
++                }
++            }
++        }
++
+         PS2_IF_AGRESSIVE_LOGS({
+             if (g_padReadLogCount < 48)
+             {
+diff --git a/ps2xTest/src/pad_input_tests.cpp b/ps2xTest/src/pad_input_tests.cpp
+index 07f9b7a..93fc375 100644
+--- a/ps2xTest/src/pad_input_tests.cpp
++++ b/ps2xTest/src/pad_input_tests.cpp
+@@ -5,6 +5,7 @@
+ 
+ #include <vector>
+ #include <cstdint>
++#include <cstring>
+ #include <string>
+ 
+ 
+@@ -93,6 +94,32 @@ void register_pad_input_tests()
+             closePadPort(ctx, rdram);
+         });
+ 
++        // MKSM-Port: the IOP's pad driver keeps the buffer given to scePadPortOpen up to date (two 128-byte halves, each
++        // starting with the 32 bytes scePadRead returns). Mortal Kombat: Shaolin Monks reads the buttons from there; with
++        // the buffer left at zero every button looked held and no press registered.
++        tc.Run("scePadRead keeps the port's DMA buffer up to date", [](TestCase &t)
++               {
++            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
++            R5900Context ctx;
++
++            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
++            openPadPort(ctx, rdram);
++
++            const uint16_t buttons = static_cast<uint16_t>(0xFFFFu & ~kPadBtnCross);
++            ps2_stubs::setPadOverrideState(buttons, 0x80, 0x80, 0x80, 0x80);
++            runPadRead(ctx, rdram);
++
++            const uint8_t *dma = rdram.data() + kPadDataAddr + 0x200u;
++            for (const uint32_t half : {0x00u, 0x80u})
++                t.IsTrue(std::memcmp(dma + half, rdram.data() + kPadDataAddr, 32u) == 0,
++                         "each half of the DMA buffer should hold the data scePadRead returned");
++            t.Equals(static_cast<uint16_t>(dma[2] | (dma[3] << 8)), buttons,
++                     "the buttons in the DMA buffer should be the pad's (cross held)");
++
++            ps2_stubs::clearPadOverrideState();
++            closePadPort(ctx, rdram);
++        });
++
+         tc.Run("scePadRead button bits are active-low", [](TestCase &t)
+                {
+             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);

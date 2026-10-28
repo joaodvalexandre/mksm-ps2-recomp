@@ -1,0 +1,83 @@
+diff --git a/ps2xRuntime/include/runtime/gs/gs_hw_backend.h b/ps2xRuntime/include/runtime/gs/gs_hw_backend.h
+index e029c84..0d7cc3a 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_hw_backend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_hw_backend.h
+@@ -6,8 +6,18 @@
+ 
+ #include "runtime/gs/gs_backend.h"
+ 
++#include <algorithm>
+ #include <memory>
+ 
++// MKSM-Port: a vertex Z as a depth in [0, 1] of its Z buffer format's range (zmax: 0xFFFFFFFF, 0xFFFFFF or 0xFFFF). The
++// GS clamps a Z larger than the format holds to that maximum, as PCSX2 does (its zclamp); keeping only the low bits
++// turned Shaolin Monks' menu sprites (Z 0x40000000 and 0x7FFFFFFF over a Z24 buffer) into depths 0 and 1, and the
++// layers that then failed the GEQUAL test left the previous screens' pixels on the menu.
++inline float gsHwDepthToUnit(double z, double zmax)
++{
++    return static_cast<float>(std::min(std::max(z, 0.0), zmax) / zmax);
++}
++
+ class GSHwBackend final : public GSRasterBackend
+ {
+ public:
+diff --git a/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+index 2128f0e..94f8ab2 100644
+--- a/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -1356,11 +1356,7 @@ struct GSHwBackend::Impl
+         HwVertex h;
+         h.x = v.x - static_cast<float>(c.xyoffset.ofx) / 16.0f + half;
+         h.y = v.y - static_cast<float>(c.xyoffset.ofy) / 16.0f + half;
+-        // the Z buffer keeps only its low bits (Z24: 24, Z16: 16): a vertex Z of 1<<24 is stored as 0
+-        double zq = std::max(v.z, 0.0);
+-        if (zmax < 4294967295.0f)
+-            zq = static_cast<double>(static_cast<uint64_t>(zq) & (zmax < 70000.0f ? 0xFFFFull : 0xFFFFFFull));
+-        h.z = static_cast<float>(std::min(zq / zmax, 1.0));
++        h.z = gsHwDepthToUnit(v.z, zmax); // MKSM-Port: clamped to the Z format, not wrapped
+         h.r = v.r; h.g = v.g; h.b = v.b; h.a = v.a;
+         h.s = v.s; h.t = v.t; h.q = v.q;
+         h.u = u; h.v = tv;
+diff --git a/ps2xTest/src/ps2_gs_tests.cpp b/ps2xTest/src/ps2_gs_tests.cpp
+index 18deea5..36b5f5c 100644
+--- a/ps2xTest/src/ps2_gs_tests.cpp
++++ b/ps2xTest/src/ps2_gs_tests.cpp
+@@ -5,6 +5,7 @@
+ #include "ps2_stubs.h"
+ #include "ps2_syscalls.h"
+ #include "runtime/gs/gs_frontend.h"
++#include "runtime/gs/gs_hw_backend.h"
+ #include "runtime/gs/gs_stage.h"
+ #include "runtime/ee_scheduler.h"
+ #include "runtime/gs/ps2_gs_memory.h"
+@@ -16,6 +17,7 @@
+ 
+ #include <atomic>
+ #include <chrono>
++#include <cmath>
+ #include <cstdint>
+ #include <cstring>
+ #include <mutex>
+@@ -761,6 +763,22 @@ void register_ps2_gs_tests()
+             t.Equals(frame2Fbp(), 0x80u, "a ref tag with the SPR bit should take its data from the scratchpad");
+         });
+ 
++        // MKSM-Port: the GS clamps a vertex Z to its Z buffer format. Shaolin Monks draws its menu layers with Z
++        // 0x199999A0, 0x40000000 and 0x7FFFFFFF over a Z24 buffer (GEQUAL, never cleared): clamped, every layer passes;
++        // with only the low 24 bits kept they became 0.6, 0 and 1 and the old screens showed through the menu.
++        tc.Run("vertex Z is clamped to the Z buffer format, not wrapped", [](TestCase &t)
++        {
++            constexpr double kZ32 = 4294967295.0, kZ24 = 16777215.0, kZ16 = 65535.0;
++            const auto near = [](float value, double expected) { return std::fabs(value - expected) < 1e-6; };
++            t.IsTrue(near(gsHwDepthToUnit(0x199999A0, kZ24), 1.0), "Z24: 0x199999A0 should clamp to the deepest value");
++            t.IsTrue(near(gsHwDepthToUnit(0x40000000, kZ24), 1.0), "Z24: 0x40000000 should clamp, not wrap to 0");
++            t.IsTrue(near(gsHwDepthToUnit(0x7FFFFFFF, kZ24), 1.0), "Z24: 0x7FFFFFFF should clamp to the deepest value");
++            t.IsTrue(near(gsHwDepthToUnit(0x10000, kZ16), 1.0), "Z16: 0x10000 should clamp, not wrap to 0");
++            t.IsTrue(near(gsHwDepthToUnit(0x800000, kZ24), 0x800000 / kZ24), "Z24 values in range keep their depth");
++            t.IsTrue(near(gsHwDepthToUnit(0x40000000, kZ32), 0x40000000 / kZ32), "Z32 keeps all 32 bits");
++            t.IsTrue(near(gsHwDepthToUnit(-1.0, kZ24), 0.0), "negative Z is depth 0");
++        });
++
+ 
+ 
+ 

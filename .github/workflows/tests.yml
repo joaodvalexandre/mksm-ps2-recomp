@@ -24,6 +24,8 @@ jobs:
         run: python3 tools/ci/validate_config.py
       - name: Test the GIF packet inspector
         run: python3 -m unittest discover -s tests -p test_gif_inspector.py
+      - name: Test the function map fixup
+        run: python3 -m unittest discover -s tests -p test_funcmap_fixup.py
       - name: Analyze the PowerShell scripts
         shell: pwsh
         run: ./tools/ci/analyze_ps1.ps1

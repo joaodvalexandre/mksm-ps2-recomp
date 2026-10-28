@@ -1,0 +1,156 @@
+diff --git a/ps2xRuntime/include/runtime/ps2_memory.h b/ps2xRuntime/include/runtime/ps2_memory.h
+index c84a112..fe48a99 100644
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -117,6 +117,13 @@ inline uint32_t ps2ScratchpadOffset(uint32_t addr)
+     return lower - PS2_SCRATCHPAD_BASE;
+ }
+ 
++// MKSM-Port: an address as the DMAC reads it (D_MADR, D_TADR, the ADDR of a DMA tag): bit 31 (SPR) selects the
++// scratchpad, at the quadword offset in bits 4-13; any other address is main memory. For the EE, 0x80000000 is kseg0.
++inline uint32_t ps2DmaAddress(uint32_t value)
++{
++    return (value & 0x80000000u) != 0u ? PS2_SCRATCHPAD_BASE + (value & 0x3FF0u) : value;
++}
++
+ inline bool ps2ResolveGuestPointer(uint32_t addr, uint32_t &offset, bool &scratch)
+ {
+     if (ps2IsScratchpadAddress(addr))
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+index 4e93075..9c94cd1 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+@@ -1233,17 +1233,15 @@ namespace
+         return std::find(kDmaChannelBases.begin(), kDmaChannelBases.end(), value) != kDmaChannelBases.end();
+     }
+ 
++    // MKSM-Port: libdma hands the DMAC the address through CheckAddress (0x384480 in Shaolin Monks), which turns a
++    // scratchpad address (0x7xxxxxxx) into 0x80000000 | offset; the DMAC reads any address with bit 31 set from the
++    // scratchpad (Shaolin Monks passes (offset | 0x80000000) itself for the packets it builds there).
+     uint32_t toDmaPhys(uint32_t addr)
+     {
+-        if ((addr & 0x80000000u) != 0)
+-        {
+-            uint32_t lower = addr & 0x7FFFFFFFu;
+-            if (lower >= PS2_SCRATCHPAD_BASE &&
+-                lower < PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE)
+-            {
+-                return lower;
+-            }
+-        }
++        if ((addr >> 28u) == 7u)
++            addr = (addr & 0x0FFFFFFFu) | 0x80000000u;
++        if ((addr & 0x80000000u) != 0u)
++            return ps2DmaAddress(addr);
+         return addr & 0x1FFFFFFFu;
+     }
+ 
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index 37ba83c..681abe2 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -1505,9 +1505,9 @@ bool PS2Memory::eeDmaStore(uint32_t address, uint32_t value)
+         }
+         }
+         if (((value >> 2u) & 0x3u) == 1u)
+-            sendDmaChain(path, m_ioRegisters[channelBase + 0x30u]);
++            sendDmaChain(path, ps2DmaAddress(m_ioRegisters[channelBase + 0x30u])); // MKSM-Port: SPR bit
+         else
+-            sendDma(path, m_ioRegisters[channelBase + 0x10u], m_ioRegisters[channelBase + 0x20u] & 0xFFFFu);
++            sendDma(path, ps2DmaAddress(m_ioRegisters[channelBase + 0x10u]), m_ioRegisters[channelBase + 0x20u] & 0xFFFFu);
+         queueCompletedDmacCause(cause);
+         return true;
+     }
+@@ -1863,14 +1863,7 @@ void PS2Memory::sendDmaChain(DmaPath path, uint32_t tagAddress)
+         const uint32_t qwc = static_cast<uint32_t>(tag & 0xFFFFu);
+         const uint32_t id = static_cast<uint32_t>((tag >> 28u) & 0x7u);
+         const bool irq = ((tag >> 31u) & 1u) != 0u;
+-        const uint32_t addr = static_cast<uint32_t>((tag >> 32u) & 0x7FFFFFFFu);
+-        if ((tag >> 63u) != 0u)
+-        {
+-            static unsigned sprTags = 0;
+-            if (++sprTags <= 20u || sprTags % 100000u == 0u)
+-                std::fprintf(stderr, "[dma] chain tag with SPR flag #%u path=%u id=%u addr=%08x qwc=%u\n", sprTags,
+-                             static_cast<unsigned>(path), id, addr, qwc);
+-        }
++        const uint32_t addr = ps2DmaAddress(static_cast<uint32_t>(tag >> 32u)); // MKSM-Port: SPR bit (63)
+ 
+         uint32_t data = tagAddress + 16u;
+         bool end = false;
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index f512199..fc5acf3 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -2560,7 +2560,7 @@ void PS2Runtime::kickGifDmaChainFromMMIO(uint8_t *rdram,
+                                          uint32_t tadr,
+                                          uint32_t)
+ {
+-    m_memory.sendDmaChain(PS2Memory::DmaPath::Gif, tadr);
++    m_memory.sendDmaChain(PS2Memory::DmaPath::Gif, ps2DmaAddress(tadr)); // MKSM-Port: SPR bit
+     ps2_syscalls::dispatchDmacHandlersForCause(rdram, this, 2u);
+ }
+ 
+diff --git a/ps2xTest/src/ps2_gs_tests.cpp b/ps2xTest/src/ps2_gs_tests.cpp
+index 4241a05..18deea5 100644
+--- a/ps2xTest/src/ps2_gs_tests.cpp
++++ b/ps2xTest/src/ps2_gs_tests.cpp
+@@ -708,6 +708,59 @@ void register_ps2_gs_tests()
+             t.Equals(snap.trxdir, 3u, "the transfer should end once the image is complete");
+         });
+ 
++        // MKSM-Port: Shaolin Monks builds its text packets in the scratchpad and sends them with
++        // sceDmaSend(gif, offset | 0x80000000). Bit 31 of a DMA address selects the scratchpad; the runtime read main
++        // memory at the offset instead (an empty chain at address 0) and no text was drawn.
++        tc.Run("DMA addresses with the SPR bit read the scratchpad", [](TestCase &t)
++        {
++            PS2Runtime runtime;
++            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
++            t.IsTrue(runtime.syncCoreSubsystems(), "the GS should be bound to memory");
++            PS2Memory &mem = runtime.memory();
++            uint8_t *rdram = mem.getRDRAM();
++
++            // A GIF chain at scratchpad offset 0x100 that sets FRAME_2's FBP: cnt (GIF tag, A+D pair), then end.
++            const auto writeChain = [&mem](uint64_t fbp)
++            {
++                const uint64_t chain[] = {
++                    2ull | (1ull << 28), 0ull,                  // cnt, 2 quadwords
++                    1ull | (1ull << 15) | (1ull << 60), 0xEull, // PACKED A+D tag, EOP, NLOOP 1
++                    fbp | (10ull << 16), GS_REG_FRAME_2,
++                    7ull << 28, 0ull,                           // end
++                };
++                std::memcpy(mem.getScratchpad() + 0x100u, chain, sizeof(chain));
++            };
++            const auto frame2Fbp = [&runtime] { return runtime.gs().getDebugSnapshot().ctx[1].frame.fbp; };
++
++            R5900Context ctx{};
++            setRegU32(ctx, 4, 2u); // sceDmaGetChan(2): GIF
++            writeChain(0x50u);
++            setRegU32(ctx, 5, 0x80000100u);
++            ps2_stubs::sceDmaSend(rdram, &ctx, &runtime);
++            t.Equals(frame2Fbp(), 0x50u, "sceDmaSend(offset | 0x80000000) should send the chain in the scratchpad");
++
++            writeChain(0x60u);
++            setRegU32(ctx, 5, 0x70000100u);
++            ps2_stubs::sceDmaSend(rdram, &ctx, &runtime);
++            t.Equals(frame2Fbp(), 0x60u, "sceDmaSend(0x70000000 + offset) should send the chain in the scratchpad");
++
++            writeChain(0x70u);
++            t.IsTrue(mem.writeIORegister(0x1000A030u, 0x80000100u), "the game should be able to set D2_TADR");
++            t.IsTrue(mem.writeIORegister(0x1000A000u, 0x105u), "a D2_CHCR store with STR should start the chain");
++            t.Equals(frame2Fbp(), 0x70u, "a chain started from D2_TADR with the SPR bit should come from the scratchpad");
++
++            // A chain in main memory whose ref tag has the SPR bit (tag bit 63): its data is the scratchpad's.
++            writeChain(0x80u);
++            const uint64_t ref[] = {
++                2ull | (3ull << 28) | (0x80000110ull << 32), 0ull, // ref, 2 quadwords at scratchpad offset 0x110
++                7ull << 28, 0ull,                                  // end
++            };
++            std::memcpy(rdram + 0x4000u, ref, sizeof(ref));
++            setRegU32(ctx, 5, 0x4000u);
++            ps2_stubs::sceDmaSend(rdram, &ctx, &runtime);
++            t.Equals(frame2Fbp(), 0x80u, "a ref tag with the SPR bit should take its data from the scratchpad");
++        });
++
+ 
+ 
+ 

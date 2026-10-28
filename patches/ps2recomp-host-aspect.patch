@@ -1,0 +1,75 @@
+diff --git a/ps2xRuntime/include/runtime/gs/gs_host_aspect.h b/ps2xRuntime/include/runtime/gs/gs_host_aspect.h
+new file mode 100644
+index 0000000..0151eac
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/gs/gs_host_aspect.h
+@@ -0,0 +1,14 @@
++// MKSM-Port: the aspect the host window shows a PS2 frame at (PS2 frames do not have square pixels).
++#pragma once
++
++#include <cstdio>
++
++// MKSM_ASPECT as "<w>:<h>" (16:9, 21:9...); 4:3, the TV picture Shaolin Monks draws, when unset or not a ratio.
++inline float gsHostDisplayAspect(const char *setting)
++{
++    float w = 0.0f, h = 0.0f;
++    char colon = 0;
++    if (setting != nullptr && std::sscanf(setting, "%f%c%f", &w, &colon, &h) == 3 && colon == ':' && w > 0.0f && h > 0.0f)
++        return w / h;
++    return 4.0f / 3.0f;
++}
+diff --git a/ps2xRuntime/src/lib/gs/gs_host_present.cpp b/ps2xRuntime/src/lib/gs/gs_host_present.cpp
+index 0b387d0..c24c1f2 100644
+--- a/ps2xRuntime/src/lib/gs/gs_host_present.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_host_present.cpp
+@@ -1,6 +1,7 @@
+ // MKSM-Port: contexto host, selección de frames y dibujo raylib usados por el port.
+ #include <atomic>
+ #include "runtime/gs/gs_host_present.h"
++#include "runtime/gs/gs_host_aspect.h"
+ #include "rlgl.h"
+ #include "runtime/gs/gs_frontend.h"
+ #include "runtime/ps2_perf.h"
+@@ -310,9 +311,9 @@ GSHostPresentation::View GSHostPresentation::renderFrame(GS &gs, uint64_t vsyncT
+     const float sourceHeight = static_cast<float>(std::max<uint32_t>(1u, selected.height));
+     const float screenWidth = static_cast<float>(GetScreenWidth());
+     const float screenHeight = static_cast<float>(GetScreenHeight());
+-    // MKSM-Port: a PS2 frame (e.g. 512x448) is shown at the TV's aspect, not with square pixels:
+-    // always 16:9 (the game renders widescreen, see mksm_overrides.cpp; 4:3 is not supported any more).
+-    constexpr float displayAspect = 16.0f / 9.0f;
++    // MKSM-Port: a PS2 frame (e.g. 640x256 fields) is shown at the TV's aspect, not with square pixels: 4:3, as Shaolin
++    // Monks draws it (God of War's forced 16:9 stretched it), or the ratio in MKSM_ASPECT (16:9, 21:9...).
++    static const float displayAspect = gsHostDisplayAspect(std::getenv("MKSM_ASPECT"));
+     const float destinationWidth = std::min(screenWidth, screenHeight * displayAspect);
+     const float destinationHeight = destinationWidth / displayAspect;
+     const Rectangle source{0.0f, 0.0f, sourceWidth, sourceHeight};
+diff --git a/ps2xTest/src/ps2_gs_tests.cpp b/ps2xTest/src/ps2_gs_tests.cpp
+index 43e8460..a2371b9 100644
+--- a/ps2xTest/src/ps2_gs_tests.cpp
++++ b/ps2xTest/src/ps2_gs_tests.cpp
+@@ -5,6 +5,7 @@
+ #include "ps2_stubs.h"
+ #include "ps2_syscalls.h"
+ #include "runtime/gs/gs_frontend.h"
++#include "runtime/gs/gs_host_aspect.h"
+ #include "runtime/gs/gs_hw_backend.h"
+ #include "runtime/gs/gs_stage.h"
+ #include "runtime/ee_scheduler.h"
+@@ -816,6 +817,17 @@ void register_ps2_gs_tests()
+             t.Equals(runtime.memory().gs().dispfb1, 0x1450ull, "the flip should apply");
+         });
+ 
++        // MKSM-Port: the window shows PS2 frames at 4:3 by default; God of War's port forced 16:9, which stretched
++        // Shaolin Monks' 4:3 picture sideways (the dragon emblem's ring 1.36 times wider than tall).
++        tc.Run("the host shows frames at 4:3 unless MKSM_ASPECT gives a ratio", [](TestCase &t)
++        {
++            t.IsTrue(std::fabs(gsHostDisplayAspect(nullptr) - 4.0f / 3.0f) < 1e-6f, "the default aspect should be 4:3");
++            t.IsTrue(std::fabs(gsHostDisplayAspect("4:3") - 4.0f / 3.0f) < 1e-6f, "MKSM_ASPECT=4:3 is 4:3");
++            t.IsTrue(std::fabs(gsHostDisplayAspect("16:9") - 16.0f / 9.0f) < 1e-6f, "MKSM_ASPECT=16:9 is 16:9");
++            t.IsTrue(std::fabs(gsHostDisplayAspect("21:9") - 21.0f / 9.0f) < 1e-6f, "MKSM_ASPECT=21:9 is 21:9");
++            t.IsTrue(std::fabs(gsHostDisplayAspect("wide") - 4.0f / 3.0f) < 1e-6f, "a setting that is not a ratio is 4:3");
++        });
++
+         // MKSM-Port: the GS clamps a vertex Z to its Z buffer format. Shaolin Monks draws its menu layers with Z
+         // 0x199999A0, 0x40000000 and 0x7FFFFFFF over a Z24 buffer (GEQUAL, never cleared): clamped, every layer passes;
+         // with only the low 24 bits kept they became 0.6, 0 and 1 and the old screens showed through the menu.

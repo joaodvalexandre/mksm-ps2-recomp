@@ -97,8 +97,8 @@ addresses in game code). They are only names: none of them is stubbed.
 
 ### 2026-10-28 — startup fixes and the pink screen
 
-Startup. The first two fixes live only in the build tree (`mksm-work\PS2Recomp`) for now: a full `2_build.cmd`
-discards them until they become patches with their tests.
+Startup. The first two fixes started in the build tree only; they are now `patches/ps2recomp-iop-module-arena.patch`
+and `patches/ps2recomp-ee-end-of-heap.patch`, each with its `ps2xTest` test.
 
 - `SNDFI.IRX` did not load (`module arena exhausted`): the 9 modules span `0x76F00` bytes from `0x10000` and the
   IOP heap started at `0x70000`. `IopMemory::HeapBase` moved to `0x90000`.
@@ -127,6 +127,118 @@ The pink screen, analysed from the output side:
 - Fix: `patches/ps2recomp-gs-def-disp-env.patch`, with a `ps2xTest` regression test that fails without it. In the
   game: pending the next run.
 
+Black screen after the display fix (pink turned black: display on, nothing drawn). The GS counters stayed still for
+the whole run (7 DMA, 3 GIF, 4 VIF): the game never started rendering. The thread watch and the branch ring showed
+the main thread looping in `0x211DB0` (start a read, then every frame: poll it, run the ADX server `0x319CB8`, wait
+for vsync), called from `0x211750` → `0x2F8240` → the boot `0x2131E8`: it waits for file 29, `\GAMEDATA.WAD`, read
+through CRI's file system (ADXF → CVFS → the `SRD` device, which reads with `sceCdRead`/`sceCdSync`). The SRD server
+only runs in CRI ADX's threads, and there were none: `ADXPS2_SetupThrd` (`0x414FF0`) creates four (idle counter
+`0x414858`, servers `0x4148B0`, `0x4149B8`, `0x414AA8`; ids at `0x534478`, `0x534480`, `0x534484`, `0x53448C`) at the
+main thread's current priority, read with `ReferThreadStatus`, and lowers them afterwards. The main thread runs at
+priority 0, as on the console, but the runtime's `CreateThread` only took 1-127: all four ids were `-403`
+(`KE_ILLEGAL_PRIORITY`). Fix: `patches/ps2recomp-ee-thread-priority.patch` (0-127 for `CreateThread` and
+`ChangeThreadPriority`, like the EE kernel; regression test that fails without it).
+
+With the threads created the load of `GAMEDATA.WAD` completed and the boot went on, to stop again (still black): the
+main thread spun at priority 0 in `0x3794B0` (loop while bit 0 of `0x755DB8`, a loading flag, is set) while CRI's two
+servers stayed Ready at priority 1 and never ran. CRI sets the main thread to `0x18` at the end of its setup, but its
+lock (`0x414638`: raise the caller to priority 1 and keep what `ChangeThreadPriority` returned) and unlock (`0x4146C0`:
+restore that value) rely on the EE kernel returning the previous priority; the runtime returned `KE_OK` (0), so every
+unlock moved the caller to priority 0 (before the first fix that was refused and the caller stayed at 1, the
+`prio=1` of the earlier runs). Same patch: `ChangeThreadPriority` returns the previous priority (test extended, fails
+without it).
+
+With that the boot reached the first movie (skipped) and the frame loop: the display flips every frame between FBP 0
+and `0x50` (640x256 each), the game draws ~660 primitives a frame with 4 textures (`MKSM_GS_HW_STATS`: nothing
+skipped), and the main thread waits for each field on CSR at `0x274A48` at priority `0x18`. Still black, and the
+displayed buffer was entirely black (`MKSM_GS_HW_DISPDUMP`). The game keeps one block per buffer at `*(0x4FC1F8)`
+(display envs at `+0x00`/`+0x40`, then GIF tag, draw env 1, draw env 2 and clear packet at `+0x80`/`+0x1F0`) and calls
+`sceGsPutDrawEnv(tag)` (`0x275430`, `0x275444`); libgraph's (`0x383918`) DMAs the tag and its NLOOP quadwords to the
+GS. The runtime's read 8 register pairs from the tag itself: the tag became a register, TEST_1 and context 2 were
+never set and the clear never ran. Fix: `patches/ps2recomp-gs-put-draw-env.patch` (sends the tag and its pairs through
+the GIF path; regression test that fails without it). In the game: pending the next run.
+
+Movies. The file table at `0x4D3D00` names every file the game opens by index: the movies 0-7 (`MIDWAY`, `OPENING`,
+`FINAL`, `END006`, `END011`, `ESRB`, `BLITZ`, `GAUNTLET`), the IOP modules 8-20 (with `IOPRP300.IMG`) and the data
+21-29. `0x270038` plays one movie (path in `a0`): it creates a CRI Sofdec player (`mwPlyCreateSofdec` `0x43B920`,
+through `0x26FBD0`) and loops on `0x26FEA8` until the player reports its end (returns 4) or a button skips it (3);
+its caller `0x32ECE0` turns 4 into 0. Sofdec (`MWSFD/PS2EE Ver.3.50`, CRI MPV/M2V) decodes through the IPU itself,
+and the runtime has no IPU: the IPU DMA channels are accepted and ignored (`ps2_memory.cpp`), because its MPEG
+support replaces Sony's libmpeg, which is what God of War used. A movie therefore never ends and the game waits in
+that loop (vsync plus the movie's sound update at `0x271568`, as the thread watch showed). Until movies are supported,
+`src/mksm_overrides.cpp` makes `0x270038` return 4 at once (`[mksm-movie] skipped ...`); `MKSM_MOVIES=1` plays them.
+
+Still black after the draw-env fix: the draws are PSMT8 quads with CLUTs whose textures (`0x3F2C`, `0x3F70`,
+`0x3F84`, `0x3F98`) were zero in GS memory. Two causes:
+
+- `sceGsSetDefLoadImage`/`sceGsExecLoadImage` kept a private record whose DBP was multiplied by 8, so the only image
+  the game loads that way landed outside GS memory. Fix: `patches/ps2recomp-gs-load-image.patch` (libgraph's own
+  0x60-byte packet, sent through the GIF path; regression test).
+- The game's other uploads go in GIF chains built with libpkt, and the chain before them was corrupt: a cnt tag of
+  QWC 8 over 4 quadwords, so the GIF read a stale quadword as a tag (NLOOP 15844) and swallowed everything after it,
+  texture uploads included. The config stubs five libpkt functions (`sceGifPkCloseGifTag`, `sceGifPkAddGsAD`,
+  `sceVif1PkOpenDirectCode`, `sceVif1PkCloseGifTag`, `sceVif1PkAddGsAD`) and the rest runs as game code. The
+  runtime's handlers rewrite the open DMA tag's QWC (`sceGifPacket` +8) each time they move the packet pointer
+  (`refreshPacketBuilderPendingCount`), and the game's terminate (`0x384C58`) adds the QWC when it closes the tag:
+  every tag closed after a stubbed call counted its quadwords twice. Fix: `src/mksm_overrides.cpp` replaces the five
+  stubs with the game's own code (`libpkt=1` in `[mksm-override]`). The analyzer would add the stubs back on a
+  regenerated config, so the override is the durable place. **Verified in the game:** the frame shows the game's
+  framed text panel (background, corners, glow); the user saw it too.
+
+No text in that panel: each frame also sends 10 GIF chains from address 0, which are empty. They come from
+`0x37E5B4`-`0x37E828`, which builds a packet with `sceGifPkAddGsData` in a loop, closes it and calls
+`sceDmaSend(gif, (pkt & 0x3FF0) | 0x80000000)`: the packet is in the scratchpad, and bit 31 of a DMA address selects
+the scratchpad (libdma's `CheckAddress`, `0x384480`, turns `0x7xxxxxxx` into that form too). The runtime only treated
+`0xF000xxxx` (`0x80000000 | 0x7000xxxx`) that way and read main memory at the offset. Fix:
+`patches/ps2recomp-dma-scratchpad-address.patch` (`ps2DmaAddress`: the SPR bit in `sceDmaSend`'s argument, D_TADR,
+D_MADR and a tag's ADDR; regression test that fails without it). **Verified in the game:** the panel shows its text,
+the autosave notice ("MKSM uses an Autosave feature ... Press ✕ to continue").
+
+The notice ignored ✕ (the keyboard, the user's Xbox controller and `MKSM_PAD_SCRIPT` alike). The game polls the pad
+with libpad's state machine (`0x273200`), but `0x212808` takes the buttons and sticks straight from the buffer given to
+`scePadPortOpen` (pad object `0x652200 + port * 0x700`, `+2..+7`), not from what `scePadRead` returns. That buffer is
+libpad's: two 128-byte halves (frame count at `+0x58`, the game's `scePadGetDmaStr` `0x206AF0` picks the newer one),
+each starting with the 32 bytes `scePadRead` returns; the IOP's pad driver keeps it up to date. The runtime zeroed it
+at open and never wrote it again, so every button looked held and no press was ever new. Fix:
+`patches/ps2recomp-pad-dma-buffer.patch` (`scePadRead` also writes its data into both halves; regression test that
+fails without it). **Verified in the game:** ✕ continues to "No MKSM save data present on memory card ... create save
+data now? No / Yes" (the emulated card is seen, empty), then the title screen ("Press START button"), the first-boot
+brightness screen and the main menu (Single Player, Ko-op, Versus Mode, Load Game, Options, Kontent).
+
+The main menu showed leftovers of earlier screens (the brightness bar's end, its panel border, trails of the menu
+labels sliding in, dark blotches by the logo). The menu is ~42 pre-rendered sprites a frame, layered with Z
+`0x199999A0`, `0x40000000` and `0x7FFFFFFF` over a Z24 buffer with ZTST GEQUAL, and nothing clears Z between frames.
+The hardware renderer kept only the low 24 bits of Z (depths 0.6, 0 and 1), so the lower layers failed against the
+previous frame's and the old pixels stayed. The GS clamps Z to the format's maximum (PCSX2's `zclamp`): all three are
+`0xFFFFFF` and every layer passes. Fix: `patches/ps2recomp-gs-depth-clamp.patch` (`gsHwDepthToUnit`; regression test
+that fails with the old wrapping). **Verified in the game:** the main menu is complete and clean.
+
+The picture shook slightly and the 2D screens and their text flickered, at times losing the text for seconds. Three
+causes, three fixes (each with a regression test that fails without it):
+
+- The flip went ahead of the drawing. The game waits for the next field (CSR FIELD, `0x274A48`) and flips with
+  `sceGsPutDispEnv`; the runtime switched DISPFB at once while the frame's last draws (the text, sent last) could still
+  be queued on the VIF1/GIF worker, and the window showed the buffer without them.
+  `patches/ps2recomp-gs-flip-after-queued-work.patch`: the flip waits for the queued GS work, like the other GS writes
+  from the EE (the frame rate stays at 60 in the menus).
+- Field rendering. The game draws 640x256 fields (SMODE2 interlaced, FFMD) and puts every other field half a line
+  lower (a sprite at y 133.6 in one buffer, 133.1 in the other), which a TV cancels by showing that field half a line
+  lower; the window showed the fields one after the other, so the picture moved a line every frame and thin strokes
+  came and went. Forty consecutive window frames of the menu: each differed from the one before in ~20,000 pixels
+  over the whole picture, and a one-row shift made them identical. The offset is in the game's own vertices, not in
+  XYOFFSET (both buffers use OFY `0x7800`): a first try that dropped OFY's half line (as libgraph's
+  `sceGsSetHalfOffset` sets it) changed nothing here and was removed. `patches/ps2recomp-gs-field-blend.patch`: in
+  field mode the backend shows the mean of each field and the one before (PCSX2's "blend" deinterlacing,
+  `MKSM_DEINTERLACE=0` turns it off). **Verified in the game:** consecutive menu frames now differ only where the
+  fire and the selection sparkle move (300-500 pixels).
+- The window stretched the 4:3 picture to 16:9 (God of War's port forced it; the dragon emblem's ring was 1.36 times
+  wider than tall). `patches/ps2recomp-host-aspect.patch`: 4:3 by default, `MKSM_ASPECT=16:9` for a widescreen TV;
+  `scripts/run.ps1` now opens a 720x540 window.
+
+`scripts\4_diagnose.cmd` runs the game for 30 s with the GS and DMA diagnostics on and moves everything to
+`logs\diag-<date>-<time>\`: `run.log`, `run_err.log`, PNG captures (display, render targets after each batch, host
+window) and a `summary.txt` with the last thread snapshot, GS counters, render targets and likely problems.
+
 ## Work folders
 
 Everything lives inside `D:\Projects\Recomps\mksm-ps2-recomp`, never in the root of a drive:
@@ -144,16 +256,24 @@ Any other repository that is needed must also be cloned inside `D:\Projects\Reco
 | `MKSM_ELF` | Path of the game ELF (default `game\SLES_535.24`) |
 | `MKSM_ISO` | Read this disc image instead of the extracted files |
 | `MKSM_WORK` | Work folder (default `mksm-work`) |
+| `MKSM_WINDOW=<w>x<h>` | Window size; `scripts/run.ps1` sets `720x540` unless it is already defined (without it the runtime starts in borderless fullscreen) |
 | `MKSM_THREAD_WATCH=<s>` | Every `<s>` seconds, print the EE threads (status, wait, pc, ra) and, for now, a `[mksm-gs]` line with the GS counters and display registers |
+| `MKSM_MOVIES=1` | Play the movies instead of skipping them (they need the IPU, which the runtime does not emulate yet) |
 | `MKSM_WATCH_WORDS=<addr>:<n>,...` | With `MKSM_THREAD_WATCH`, also print `<n>` guest RAM words at each `<addr>` (hex) |
+| `MKSM_CD_READ_TRACE=<n>` | Log the first `<n>` `sceCdRead` calls: sector, count, destination, caller, result, non-zero bytes |
+| `MKSM_LOADIMAGE_TRACE=<n>` | Log the first `<n>` `sceGsExecLoadImage` uploads: DBP, DBW, PSM, position, size, source, caller |
+| `MKSM_PAD_SCRIPT=<s>:<button>[+<button>],...` | Hold those pad buttons for 0.25 s at `<s>` seconds after start, on top of the real pad (`start`, `select`, `cross`, `circle`, `square`, `triangle`, `up`, `down`, `left`, `right`, `l1`, `r1`, `l2`, `r2`), e.g. `12:start,15:cross` |
+| `MKSM_ASPECT=16:9` | Show the picture at 16:9 instead of the game's 4:3 |
+| `MKSM_DEINTERLACE=0` | Show the fields of field rendering one after the other instead of blended (the picture then shakes a line every frame) |
 | `MKSM_IOP_MODULOS` | Folder of dumped IRX modules for the native IOP build |
 
 ## Next steps
 
-1. Confirm the display fix in the game: pink should turn into black (display on, nothing drawn yet) or a picture.
-2. Turn the IOP heap and `EndOfHeap` fixes into patches with their tests.
-3. First movie (`MIDWAY.SFD`/`ESRB.SFD`) and the main menu; then pad, audio and gameplay.
-4. Make the VBlank rate configurable (PAL 50 Hz).
+1. Audio: nothing is heard yet (CRI ADX and the `SNDF` driver run in the IOP interpreter over the SPU2 emulation).
+2. Gameplay: Single Player and beyond.
+3. Translate the Spanish runtime messages (`[SPU2] salida de audio ...`, `[stack] pilas ...`) and comments.
+4. Movies: IPU emulation or a native Sofdec player (SFD: MPEG-2 video and ADX audio).
+5. Make the VBlank rate configurable (PAL 50 Hz).
 
 ## Language
 

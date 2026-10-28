@@ -42,7 +42,10 @@ if (-not (Get-ChildItem -LiteralPath (Join-Path $elfDir 'IOP') -Filter '*.IRX' -
     Write-Warning "There are no .IRX modules in $elfDir\IOP: extract the disc with tools\iso_extract.py --layout"
 }
 # MKSM-Port: game values from play.cmd (Waffle565). Those already defined in the environment are respected.
-foreach ($par in @(@('PS2X_GS_WORKER', '1'), @('MKSM_GS_FINISH_ASINCRONO', '1'), @('MKSM_AUDIO_DEVICE', 'default'))) {
+# MKSM_WINDOW: start in a 720x540 (4:3) window instead of borderless fullscreen (F11 still toggles fullscreen).
+# The diagnostics (thread watch, GS statistics and captures) are turned on by scripts\diagnose.ps1.
+foreach ($par in @(@('PS2X_GS_WORKER', '1'), @('MKSM_GS_FINISH_ASINCRONO', '1'), @('MKSM_AUDIO_DEVICE', 'default'),
+                   @('MKSM_WINDOW', '720x540'))) {
     if (-not [Environment]::GetEnvironmentVariable($par[0])) { Set-Item -Path ('env:' + $par[0]) -Value $par[1] }
 }
 
