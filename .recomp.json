@@ -1,6 +1,7 @@
 {
   "$schema": "https://recomp.fyi/schema/v1.json",
   "game": "Mortal Kombat: Shaolin Monks",
+  "wikidata": "Q1313975",
   "system": "PS2",
   "type": "recomp",
   "original": {
@@ -10,8 +11,8 @@
   "project": "Mortal Kombat: Shaolin Monks — PS2 Static Recompilation",
   "status": "in-progress",
   "targets": ["Windows"],
-  "toolchain": "Ps2recomp",
-  "approach": "Static recompilation of MIPS R5900 code to C++20, with a PS2Recomp-based runtime and game-specific overrides.",
+  "toolchain": "PS2Recomp",
+  "approach": "Static recompilation of the MIPS R5900 executable to C++20 on a patched PS2Recomp runtime (OpenGL GS renderer, native SPU2 engine, disc IRX modules in an R3000A interpreter), with game-specific overrides.",
   "maintainers": [
     {
       "name": "joaodvalexandre",
@@ -20,14 +21,20 @@
   ],
   "links": [
     {
-      "label": "Project status",
+      "label": "Research log",
       "url": "https://github.com/joaodvalexandre/mksm-ps2-recomp/blob/master/docs/MKSM.md"
+    },
+    {
+      "label": "Status map",
+      "url": "https://github.com/joaodvalexandre/mksm-ps2-recomp/blob/master/docs/status/details.md"
     }
   ],
   "help": [
-    "Function boundaries for the stripped ELF",
-    "CRI ADX audio and Sofdec SFD movies",
+    "SPU2 streaming timing (crackling ADX audio)",
+    "Midway SNDF sound bank upload (missing sound effects)",
+    "Sofdec SFD movies (IPU)",
     "PAL 50 Hz timing"
   ],
-  "notes": "Function map and recompiler configuration generated; first boot pending. Not yet playable."
+  "tags": ["PAL", "widescreen"],
+  "notes": "Boots to the main menu: menus render cleanly, the controller works and the memory card is detected, menu music and announcer play (with crackle). 16:9 option. Character and difficulty select work; loading into a fight does not finish yet. Not playable."
 }

@@ -1,0 +1,150 @@
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index 130934f..fc3b7f3 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -424,6 +424,12 @@ namespace ps2x::iop::detail
+             }
+             if (iequals(call.library, "heaplib") && heaplib.dispatchImport(call.ordinal, cpu))
+                 return ImportDisposition::Handled;
++            if (iequals(call.library, "libsd")) // MKSM-Port: LIBSD drives the native sound engine (iop_native_overrides.cpp)
++            {
++                IopNativeCall native{cpu, memory, host, *this};
++                if (iopNativeLibsdImport(call.ordinal, native))
++                    return ImportDisposition::Handled;
++            }
+ 
+             const uint32_t target = imports.resolve(call.library, call.ordinal, call.version);
+             if (target != 0u)
+@@ -705,6 +711,7 @@ namespace ps2x::iop::detail
+             }
+             else
+                 sound.advanceTo(soundBase + std::min(totalCycles - runStartTotal, runGrant));
++            iopNativeLibsdStreamInterrupts(*this); // MKSM-Port: a played half of a looping block transfer
+         }
+ 
+         void servicePendingGuestCallbacks()
+diff --git a/ps2xIOP/src/native/iop_native.h b/ps2xIOP/src/native/iop_native.h
+index 1823765..c8dc09a 100644
+--- a/ps2xIOP/src/native/iop_native.h
++++ b/ps2xIOP/src/native/iop_native.h
+@@ -51,6 +51,9 @@ namespace ps2x::iop::detail
+ 
+     // src/native/iop_native_overrides.cpp
+     const IopNativeOverride *iopNativeOverrides(size_t &count);
++    // MKSM-Port: a "libsd" import by ordinal (false: no native form, the module's export runs) and the stream interrupts
++    bool iopNativeLibsdImport(uint32_t ordinal, IopNativeCall &call);
++    void iopNativeLibsdStreamInterrupts(IopNativeServices &services);
+ 
+     struct IopNativeModule
+     {
+diff --git a/ps2xIOP/src/native/iop_native_overrides.cpp b/ps2xIOP/src/native/iop_native_overrides.cpp
+index 84d926d..23f41f7 100644
+--- a/ps2xIOP/src/native/iop_native_overrides.cpp
++++ b/ps2xIOP/src/native/iop_native_overrides.cpp
+@@ -288,6 +288,24 @@ namespace ps2x::iop::detail
+             ret(c, 0u);
+         }
+ 
++        // #12 sceSdGetCoreAttr(entry)
++        void sdGetCoreAttr(IopNativeCall &c) { ret(c, c.services.sound().getCoreAttr(arg(c, 0))); }
++
++        // #27 sceSdSetSpu2IntrHandler(handler, arg): no SPU2 interrupt is raised (IRQ addresses are not emulated)
++        void sdSetSpu2IntrHandler(IopNativeCall &c) { ret(c, 0u); }
++
++        // #28 sceSdGetTransIntrHandlerArgument(channel)
++        void sdGetTransIntrHandlerArgument(IopNativeCall &c) { ret(c, g_libsd.handlerArg[arg(c, 0) & 1u]); }
++
++        // #30 sceSdStopTrans(channel): stops the channel's block transfer (voice transfers are already complete)
++        void sdStopTrans(IopNativeCall &c)
++        {
++            const uint32_t channel = arg(c, 0) & 1u;
++            c.services.sound().stopStream(channel);
++            g_libsd.blockActive[channel] = false;
++            ret(c, 0u);
++        }
++
+         // #23 sceSdSetEffectAttr(core, attr *): reverb mode and depths (stored; reverb is not mixed yet)
+         void sdSetEffectAttr(IopNativeCall &c)
+         {
+@@ -350,4 +368,45 @@ namespace ps2x::iop::detail
+         count = sizeof(kOverrides) / sizeof(kOverrides[0]);
+         return kOverrides;
+     }
++
++    // MKSM-Port: LIBSD by import ordinal. Shaolin Monks' sound drivers (CRI ADX, Midway's SNDF) and SDRDRV run from the
++    // disc in the interpreter and call LIBSD.IRX through its exports; its build is not the one the offsets above name,
++    // so its own code ran and wrote SPU2 registers that exist nowhere: no sound at all. LIBSD's export table is the
++    // same in every build, so the emulator hands each "libsd" import here; the ordinals without a handler (Note2Pitch,
++    // ProcBatch, the reverb calls) still run the module's code.
++    bool iopNativeLibsdImport(uint32_t ordinal, IopNativeCall &call)
++    {
++        switch (ordinal)
++        {
++        case 4: sdInit(call); return true;
++        case 5: sdSetParam(call); return true;
++        case 6: sdGetParam(call); return true;
++        case 7: sdSetSwitch(call); return true;
++        case 8: sdGetSwitch(call); return true;
++        case 9: sdSetAddr(call); return true;
++        case 10: sdGetAddr(call); return true;
++        case 11: sdSetCoreAttr(call); return true;
++        case 12: sdGetCoreAttr(call); return true;
++        case 17: sdVoiceTrans(call); return true;
++        case 18: sdBlockTrans(call); return true;
++        case 19: sdVoiceTransStatus(call); return true;
++        case 20: sdBlockTransStatus(call); return true;
++        case 23: sdSetEffectAttr(call); return true;
++        case 26: sdSetTransIntrHandler(call); return true;
++        case 27: sdSetSpu2IntrHandler(call); return true;
++        case 28: sdGetTransIntrHandlerArgument(call); return true;
++        case 30: sdStopTrans(call); return true;
++        case 31: sdSetEffectWorkArea(call); return true;
++        default: return false;
++        }
++    }
++
++    // MKSM-Port: a block transfer in loop mode raises its channel's transfer interrupt each time half of the IOP ring has
++    // been played, and LIBSD calls the handler set with sceSdSetTransIntrHandler (CRI ADX refills that half there).
++    void iopNativeLibsdStreamInterrupts(IopNativeServices &services)
++    {
++        for (uint32_t channel = 0; channel < 2u; ++channel)
++            if (services.sound().takeStreamHalf(channel) && g_libsd.blockActive[channel] && g_libsd.handler[channel] != 0u)
++                services.callGuestLater(g_libsd.handler[channel], g_libsd.handlerGp[channel], channel, g_libsd.handlerArg[channel], 0u);
++    }
+ }
+diff --git a/ps2xTest/src/ps2_iop_tests.cpp b/ps2xTest/src/ps2_iop_tests.cpp
+index 996a4a2..68787f0 100644
+--- a/ps2xTest/src/ps2_iop_tests.cpp
++++ b/ps2xTest/src/ps2_iop_tests.cpp
+@@ -121,6 +121,31 @@ void register_ps2_iop_tests()
+                      "IOP heap allocations should start at HeapBase, after the modules");
+         });
+ 
++        // MKSM-Port: Shaolin Monks' sound drivers (CRI ADX, SNDF) run from the disc and call LIBSD.IRX through its
++        // exports; that build is not the one the native LIBSD offsets name, so its own code wrote SPU2 registers that
++        // exist nowhere and nothing was heard. "libsd" imports reach the native sound engine by ordinal: a voice pitch
++        // set with sceSdSetParam (#5) reads back with sceSdGetParam (#6), with no LIBSD module loaded at all.
++        tc.Run("libsd imports drive the native sound engine by ordinal", [](TestCase &t)
++        {
++            iop_test::Host host;
++            ps2x::iop::IopSubsystem subsystem(host);
++            iop_test::Irx image;
++            image.words(0u, {
++                0x27BDFFE0u, 0xAFBF001Cu,               // save ra
++                0x34040200u, 0x34051234u,               // a0 = PITCH of voice 0 on core 0, a1 = 0x1234
++                0x0C00401Du, 0u,                        // jal 0x10074: sceSdSetParam
++                0x34040200u,                            // a0 = PITCH of voice 0 on core 0
++                0x0C00401Fu, 0u,                        // jal 0x1007C: sceSdGetParam
++                0x8FBF001Cu, 0x03E00008u, 0x27BD0020u, // return what it read
++            });
++            image.words(0x60u, {0x41E00000u, 0u, 0x0101u, 0x7362696Cu, 0x00000064u, // imports of "libsd"
++                                0x03E00008u, 0x24000005u, 0x03E00008u, 0x24000006u, 0u, 0u});
++            image.install(host);
++            const ps2x::iop::ModuleLoadResult loaded = subsystem.loadModuleBuffer(0x1000u);
++            t.IsTrue(loaded.handled, "the synthetic driver should load");
++            t.Equals(loaded.startResult, 0x1234, "sceSdGetParam should return what sceSdSetParam stored");
++        });
++
+         // MKSM-Port: 989snd toma su candado del tick con WaitSema desde el servidor RPC (sin hilo actual).
+         tc.Run("WaitSema outside a thread waits for the semaphore instead of faking success", [](TestCase &t)
+         {

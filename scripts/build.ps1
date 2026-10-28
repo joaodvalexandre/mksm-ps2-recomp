@@ -138,6 +138,9 @@ $hostAspectPatch = Join-Path $RepoRoot 'patches\ps2recomp-host-aspect.patch'
 # MKSM-Port: field rendering is shown as the mean of each field and the one before (the game puts every other field
 # half a line lower; shown one after the other the picture shook and text flickered). MKSM_DEINTERLACE=0 turns it off.
 $gsFieldBlendPatch = Join-Path $RepoRoot 'patches\ps2recomp-gs-field-blend.patch'
+# MKSM-Port: "libsd" imports reach the native sound engine by ordinal (the game's own LIBSD.IRX build wrote SPU2
+# registers that exist nowhere: no sound), and a looping block transfer calls its interrupt handler at each half.
+$iopLibsdImportsPatch = Join-Path $RepoRoot 'patches\ps2recomp-iop-libsd-imports.patch'
 $overrides = Join-Path $RepoRoot 'src\mksm_overrides.cpp'
 
 $git = 'git'
@@ -228,6 +231,7 @@ Run $git @('apply', '--ignore-whitespace', '--verbose', $gsDepthClampPatch)
 Run $git @('apply', '--ignore-whitespace', '--verbose', $gsFlipAfterQueuedWorkPatch)
 Run $git @('apply', '--ignore-whitespace', '--verbose', $hostAspectPatch)
 Run $git @('apply', '--ignore-whitespace', '--verbose', $gsFieldBlendPatch)
+Run $git @('apply', '--ignore-whitespace', '--verbose', $iopLibsdImportsPatch)
 Pop-Location
 
 # The generated code includes <ps2_recompiled_functions.h> from src/runner

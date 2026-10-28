@@ -58,7 +58,7 @@ modules load straight from the extracted tree. It also names `\GAMEDATA.WAK`, `\
 | Region/video | **PAL**, 50 Hz | The `vblank-ntsc` patch fixes the VBlank at 59.94 Hz; the field rate has to become configurable |
 | Pad | `PADMAN.IRX` + `SIO2MAN.IRX` (classic libpad) | The runtime does not model SIO2: `scePad*` are stubbed to its EE-side handlers |
 | Memory card | `MCMAN.IRX` + `MCSERV.IRX` (classic libmc) | `sceMc*` stubbed to the runtime's EE-side handlers |
-| Audio | **CRI ADX** (`CRI_ADXI.IRX`) + `SNDFI.IRX` over `LIBSD`/`SDRDRV` | The native SPU2 engine is driven by LIBSD calls; ADX should work on top, to be verified |
+| Audio | **CRI ADX** (`CRI_ADXI.IRX`) + `SNDFI.IRX` over `LIBSD`/`SDRDRV` | The native SPU2 engine handles every `libsd` import by ordinal: ADX music plays, SNDF effects do not yet |
 | Movies | **SFD** (Sofdec, MPEG-2 through the IPU) | `sceMpeg*` stubbed to the native decoder; the SFD demultiplexer has to be checked |
 | Disc | 7 `GAMEDATA.WA*` + `FILELIST.DIR` | The extractor's `.disc_layout` works as is |
 
@@ -76,7 +76,9 @@ is a hypothesis to confirm once the game gets past its startup.
    software double `floor`, `sqrt` and `log` are removed (their ABI does not match the runtime's float handlers),
    which leaves 153.
 3. `python tools/funcmap_fixup.py game/SLES_535.24`: 3 gaps with code added to the map (13,630 functions) and 247
-   jump targets that are not function starts added to `entry_points` (567 in total).
+   jump targets that are not function starts added to `entry_points` (567 in total). It also adds every word outside
+   `.text` that points into `.text` right after a `jr $ra` + delay slot but not at a function start: a function pointer
+   (vtables, callback tables) to a function the map merged into the one before. 687 more, 1,254 entry points in all.
 
 Some SDK names are false matches of the symbol database (`_InitSys` and `eh_context_free` appear at a dozen
 addresses in game code). They are only names: none of them is stubbed.
@@ -239,6 +241,34 @@ causes, three fixes (each with a regression test that fails without it):
 `logs\diag-<date>-<time>\`: `run.log`, `run_err.log`, PNG captures (display, render targets after each batch, host
 window) and a `summary.txt` with the last thread snapshot, GS counters, render targets and likely problems.
 
+### 2026-10-28 (evening) — sound, widescreen and the character select
+
+- **Freeze after choosing a character.** The game called `0x38C730` through a function pointer in data; the map had
+  merged that function into the one before it, so the runtime had no entry for the address and the EE stopped.
+  `tools/funcmap_fixup.py` now adds such pointers as entry points (step 3 of the function map, test in
+  `tests/test_funcmap_fixup.py`, run by CI). **Verified in the game:** character and difficulty select no longer freeze.
+- **Widescreen.** With `MKSM_ASPECT` wider than 4:3, `src/mksm_overrides.cpp` (`applyMksmAspect`) also writes
+  `(4/3) / aspect` over the game's horizontal 3D scale at `0x4F4E08` (1.0 in the ELF; the value PCSX2's 16:9 patch
+  for this game changes) and logs `[mksm-override] widescreen`. The menus are 2D and stay stretched; the 3D view is
+  not reached yet, so the result is unverified.
+- **Sound.** `LIBSD.IRX` on the disc is not the build whose offsets the native LIBSD overrides name, so its own code
+  ran in the interpreter and wrote SPU2 registers the runtime does not have: no sound at all.
+  `patches/ps2recomp-iop-libsd-imports.patch`: every `libsd` import (CRI ADX, SNDF, SDRDRV) goes to the native
+  sound engine by export ordinal (`iopNativeLibsdImport`; GetCoreAttr, SetSpu2IntrHandler,
+  GetTransIntrHandlerArgument and StopTrans added), and a looping block transfer calls its interrupt handler at each
+  half (`iopNativeLibsdStreamInterrupts`, what CRI's stream refill waits for). Regression test "libsd imports drive
+  the native sound engine by ordinal". **Verified in the game:** the menu music and the announcer play.
+- **Open: the sound crackles.** The device never runs short (`[mksm-audio]` with `MKSM_THREAD_WATCH`: asked = got
+  every period), so it is not an underrun. A capture of the output shows steps in the right channel at the 256-sample
+  block boundaries of CRI's stream: the refill of a 1024-sample half lands late relative to the engine's reads.
+  Next: model the ADMA read-ahead the way PCSX2's SPU2 does.
+- **Open: no menu sound effects.** `SNDFI.IRX` keys on core 1 voices, but never uploads their samples: its only
+  `sceSdVoiceTrans` call (`0xE158`, in `0xE09C`) is skipped behind two capacity checks (`[s2+0x10] <= [v1+0x4A8]`,
+  `[s2+0x18] <= [v1+0x628]`). SNDF does no file I/O, so the bank comes from the EE through SIF commands or RPC;
+  `PS2X_TRACE_RPC` prints nothing for it, so that path bypasses `IopSubsystem::handleRpc`.
+- **Open: the wait after difficulty select.** The game reads 19 sectors of `GAMEDATA.WAG` and then waits on an empty
+  panel. It may wait on the same SNDF bank load.
+
 ## Work folders
 
 Everything lives inside `D:\Projects\Recomps\mksm-ps2-recomp`, never in the root of a drive:
@@ -257,11 +287,11 @@ Any other repository that is needed must also be cloned inside `D:\Projects\Reco
 | `MKSM_ISO` | Read this disc image instead of the extracted files |
 | `MKSM_WORK` | Work folder (default `mksm-work`) |
 | `MKSM_WINDOW=<w>x<h>` | Window size; `scripts/run.ps1` sets `720x540` unless it is already defined (without it the runtime starts in borderless fullscreen) |
-| `MKSM_THREAD_WATCH=<s>` | Every `<s>` seconds, print the EE threads (status, wait, pc, ra) and, for now, a `[mksm-gs]` line with the GS counters and display registers |
+| `MKSM_THREAD_WATCH=<s>` | Every `<s>` seconds, print the EE threads (status, wait, pc, ra), a `[mksm-audio]` line (frames the audio device asked for and frames the sound engine had) and a `[mksm-gs]` line with the GS counters and display registers |
+| `MKSM_THREAD_WATCH_RING=<n>` | With `MKSM_THREAD_WATCH`, the tick that dumps the last 256 inter-function branches (default 3) |
 | `MKSM_MOVIES=1` | Play the movies instead of skipping them (they need the IPU, which the runtime does not emulate yet) |
 | `MKSM_WATCH_WORDS=<addr>:<n>,...` | With `MKSM_THREAD_WATCH`, also print `<n>` guest RAM words at each `<addr>` (hex) |
 | `MKSM_CD_READ_TRACE=<n>` | Log the first `<n>` `sceCdRead` calls: sector, count, destination, caller, result, non-zero bytes |
-| `MKSM_LOADIMAGE_TRACE=<n>` | Log the first `<n>` `sceGsExecLoadImage` uploads: DBP, DBW, PSM, position, size, source, caller |
 | `MKSM_PAD_SCRIPT=<s>:<button>[+<button>],...` | Hold those pad buttons for 0.25 s at `<s>` seconds after start, on top of the real pad (`start`, `select`, `cross`, `circle`, `square`, `triangle`, `up`, `down`, `left`, `right`, `l1`, `r1`, `l2`, `r2`), e.g. `12:start,15:cross` |
 | `MKSM_ASPECT=16:9` | Show the picture at 16:9 instead of the game's 4:3 |
 | `MKSM_DEINTERLACE=0` | Show the fields of field rendering one after the other instead of blended (the picture then shakes a line every frame) |
@@ -269,8 +299,8 @@ Any other repository that is needed must also be cloned inside `D:\Projects\Reco
 
 ## Next steps
 
-1. Audio: nothing is heard yet (CRI ADX and the `SNDF` driver run in the IOP interpreter over the SPU2 emulation).
-2. Gameplay: Single Player and beyond.
+1. Audio: the crackle (ADMA read-ahead) and the missing SNDF sound effects (the bank upload from the EE).
+2. Gameplay: get past the wait after difficulty select.
 3. Translate the Spanish runtime messages (`[SPU2] salida de audio ...`, `[stack] pilas ...`) and comments.
 4. Movies: IPU emulation or a native Sofdec player (SFD: MPEG-2 video and ADX audio).
 5. Make the VBlank rate configurable (PAL 50 Hz).

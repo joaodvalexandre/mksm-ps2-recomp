@@ -181,12 +181,12 @@ name = "EE"
   name = "R5900 CPU (recompiled to C++)"
   status = "partial"
   weight = 5
-  note = "13,627 functions from the analyzer's map recompiled and built; not booted yet"
+  note = "13,630 functions recompiled; boots to the main menu and the character select"
 
   [[hardware.group.component]]
   short = "Kernel"
   name = "Kernel: threads, semaphores and alarms"
-  status = "pending"
+  status = "partial"
   weight = 3
 
   [[hardware.group.component]]
@@ -205,9 +205,9 @@ name = "EE"
   [[hardware.group.component]]
   short = "DMAC"
   name = "DMA controller"
-  status = "pending"
+  status = "partial"
   weight = 2
-  note = "Native DMA service: chains go straight to VIF1/VU1 and the GS, with no controller model"
+  note = "Native DMA service with the scratchpad (SPR) address bit; no controller model"
 
   [[hardware.group.component]]
   short = "Timers"
@@ -222,9 +222,9 @@ name = "GS / VU"
   [[hardware.group.component]]
   short = "GS"
   name = "GS: primitives and framebuffer"
-  status = "pending"
+  status = "partial"
   weight = 3
-  note = "Native OpenGL render-target renderer, 2x internal resolution"
+  note = "Native OpenGL renderer; menus clean (Z clamp, flip after queued work, field blend)"
 
   [[hardware.group.component]]
   short = "VIF1/VU1"
@@ -235,14 +235,14 @@ name = "GS / VU"
   [[hardware.group.component]]
   short = "Tex/CLUT"
   name = "GS: textures, CLUT and fonts"
-  status = "pending"
+  status = "partial"
   weight = 2
-  note = "Native texture and CLUT store instead of a VRAM model"
+  note = "Menu textures and text correct"
 
   [[hardware.group.component]]
   short = "GIF"
   name = "GIF (PATH1-3)"
-  status = "pending"
+  status = "partial"
   weight = 2
 
   [[hardware.group.component]]
@@ -258,21 +258,21 @@ name = "IOP"
   [[hardware.group.component]]
   short = "R3000A"
   name = "R3000A CPU (IRX in the interpreter or compiled to C++)"
-  status = "pending"
+  status = "partial"
   weight = 3
-  note = "9 IRX modules (CDVDSTM, CRI_ADXI, LIBSD, MCMAN, MCSERV, PADMAN, SDRDRV, SIO2MAN, SNDFI)"
+  note = "The 9 disc IRX modules run in the interpreter"
 
   [[hardware.group.component]]
   short = "SPU2"
   name = "SPU2: audio output"
-  status = "pending"
+  status = "partial"
   weight = 3
-  note = "Native sound engine driven by LIBSD calls; CRI ADX on top"
+  note = "libsd imports go to the native sound engine: menu music and announcer play; crackle; SNDF effects silent"
 
   [[hardware.group.component]]
   short = "IRX"
   name = "Original IRX modules"
-  status = "pending"
+  status = "partial"
   weight = 2
 
   [[hardware.group.component]]
@@ -284,20 +284,20 @@ name = "IOP"
   [[hardware.group.component]]
   short = "CDVD"
   name = "CDVD: extracted disc files"
-  status = "partial"
+  status = "ok"
   weight = 2
-  note = "Disc extracted with its .disc_layout (27 files, single layer); reads not verified yet"
+  note = "Disc extracted with its .disc_layout (27 files, single layer); menus load from it"
 
   [[hardware.group.component]]
   short = "Pad"
   name = "DualShock 2 controller"
-  status = "pending"
+  status = "ok"
   weight = 2
-  note = "Classic libpad: scePad* stubbed to the runtime's EE-side handlers (no SIO2 model)"
+  note = "Classic libpad: scePad* stubbed, and scePadRead fills the pad DMA buffer the game reads"
 
   [[hardware.group.component]]
   short = "MC"
   name = "Memory card"
-  status = "pending"
+  status = "partial"
   weight = 2
-  note = "Classic libmc: sceMc* stubbed to the runtime's EE-side handlers (no SIO2 model)"
+  note = "Classic libmc stubbed to the runtime; the empty card is seen, saving untested"

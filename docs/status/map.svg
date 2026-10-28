@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="900" height="424" viewBox="0 0 900 424" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" role="img" aria-labelledby="status-title">
-<title id="status-title">Status: libraries* 0.0%, hardware 0.0%</title>
+<title id="status-title">Status: libraries* 0.0%, hardware 9.3%</title>
 <style>
   .background { fill: #ffffff; }
   .border { stroke: #d0d7de; }
@@ -40,7 +40,7 @@
 <rect class="pending" x="230.4" y="56" width="44.8" height="22" rx="3"/>
 <rect class="pending" x="230.4" y="56" width="4" height="22"/>
 <text class="badge-t" x="193.6" y="71" font-size="12" text-anchor="middle">hardware</text>
-<text class="badge-t" x="252.8" y="71" font-size="12" font-weight="600" text-anchor="middle">0.0%</text>
+<text class="badge-t" x="252.8" y="71" font-size="12" font-weight="600" text-anchor="middle">9.3%</text>
 <text class="t1" x="16" y="102" font-size="14">Sony SDK libraries*: 0.0% (0/654)</text>
 <rect class="group" x="16" y="112" width="424" height="260"/>
 <rect class="pending" x="17.5" y="113.5" width="11.7" height="12"><title>C++ EH · sub_00201380 (40 B)</title></rect>
@@ -719,46 +719,54 @@
 <text class="t1" x="384.4" y="221.6" font-size="11" pointer-events="none">libvu0</text>
 <rect class="chip" x="315.2" y="319.2" width="41" height="15" rx="2" pointer-events="none"/>
 <text class="t1" x="319.2" y="330.2" font-size="11" pointer-events="none">libmc</text>
-<text class="t1" x="460" y="102" font-size="14">PS2 hardware: 0.0%</text>
+<text class="t1" x="460" y="102" font-size="14">PS2 hardware: 9.3%</text>
 <rect class="group" x="460" y="112" width="424" height="260"/>
-<rect class="partial" x="461.5" y="113.5" width="61.3" height="79.6"><title>CDVD: extracted disc files — Disc extracted with its .disc_layout (27 files, single layer); reads not verified yet</title></rect>
-<rect x="461.5" y="113.5" width="61.3" height="79.6" fill="url(#hatch)" pointer-events="none"/>
-<text class="badge-v-dark" x="492.2" y="157.2" font-size="11" text-anchor="middle" pointer-events="none">CDVD</text>
-<rect class="pending" x="523.8" y="113.5" width="92.5" height="79.6"><title>R3000A CPU (IRX in the interpreter or compiled to C++) — 9 IRX modules (CDVDSTM, CRI_ADXI, LIBSD, MCMAN, MCSERV, PADMAN, SDRDRV, SIO2MAN, SNDFI)</title></rect>
-<text class="text-pending" x="570" y="157.2" font-size="11" text-anchor="middle" pointer-events="none">R3000A</text>
-<rect class="pending" x="461.5" y="194.1" width="92.5" height="79.6"><title>SPU2: audio output — Native sound engine driven by LIBSD calls; CRI ADX on top</title></rect>
-<text class="text-pending" x="507.7" y="237.8" font-size="11" text-anchor="middle" pointer-events="none">SPU2</text>
-<rect class="pending" x="555" y="194.1" width="61.3" height="79.6"><title>Original IRX modules</title></rect>
-<text class="text-pending" x="585.6" y="237.8" font-size="11" text-anchor="middle" pointer-events="none">IRX</text>
-<rect class="pending" x="461.5" y="274.8" width="50.9" height="95.8"><title>SIF: EE ↔ IOP RPC and DMA</title></rect>
-<text class="text-pending" x="487" y="326.5" font-size="11" text-anchor="middle" pointer-events="none">SIF</text>
-<rect class="pending" x="513.4" y="274.8" width="50.9" height="95.8"><title>DualShock 2 controller — Classic libpad: scePad* stubbed to the runtime&#x27;s EE-side handlers (no SIO2 model)</title></rect>
-<text class="text-pending" x="538.9" y="326.5" font-size="11" text-anchor="middle" pointer-events="none">Pad</text>
-<rect class="pending" x="565.3" y="274.8" width="50.9" height="95.8"><title>Memory card — Classic libmc: sceMc* stubbed to the runtime&#x27;s EE-side handlers (no SIO2 model)</title></rect>
-<text class="text-pending" x="590.8" y="326.5" font-size="11" text-anchor="middle" pointer-events="none">MC</text>
-<rect class="partial" x="619.3" y="113.5" width="144.9" height="85"><title>R5900 CPU (recompiled to C++) — 13,627 functions from the analyzer&#x27;s map recompiled and built; not booted yet</title></rect>
+<rect class="ok" x="461.5" y="113.5" width="76.9" height="63.5"><title>CDVD: extracted disc files — Disc extracted with its .disc_layout (27 files, single layer); menus load from it</title></rect>
+<text class="badge-t" x="499.9" y="149.1" font-size="11" text-anchor="middle" pointer-events="none">CDVD</text>
+<rect class="ok" x="539.4" y="113.5" width="76.9" height="63.5"><title>DualShock 2 controller — Classic libpad: scePad* stubbed, and scePadRead fills the pad DMA buffer the game reads</title></rect>
+<text class="badge-t" x="577.8" y="149.1" font-size="11" text-anchor="middle" pointer-events="none">Pad</text>
+<rect class="partial" x="461.5" y="178" width="76.9" height="95.8"><title>R3000A CPU (IRX in the interpreter or compiled to C++) — The 9 disc IRX modules run in the interpreter</title></rect>
+<rect x="461.5" y="178" width="76.9" height="95.8" fill="url(#hatch)" pointer-events="none"/>
+<text class="badge-v-dark" x="499.9" y="229.7" font-size="11" text-anchor="middle" pointer-events="none">R3000A</text>
+<rect class="partial" x="539.4" y="178" width="76.9" height="95.8"><title>SPU2: audio output — libsd imports go to the native sound engine: menu music and announcer play; crackle; SNDF effects silent</title></rect>
+<rect x="539.4" y="178" width="76.9" height="95.8" fill="url(#hatch)" pointer-events="none"/>
+<text class="badge-v-dark" x="577.8" y="229.7" font-size="11" text-anchor="middle" pointer-events="none">SPU2</text>
+<rect class="partial" x="461.5" y="274.8" width="50.9" height="95.8"><title>Original IRX modules</title></rect>
+<rect x="461.5" y="274.8" width="50.9" height="95.8" fill="url(#hatch)" pointer-events="none"/>
+<text class="badge-v-dark" x="487" y="326.5" font-size="11" text-anchor="middle" pointer-events="none">IRX</text>
+<rect class="partial" x="513.4" y="274.8" width="50.9" height="95.8"><title>Memory card — Classic libmc stubbed to the runtime; the empty card is seen, saving untested</title></rect>
+<rect x="513.4" y="274.8" width="50.9" height="95.8" fill="url(#hatch)" pointer-events="none"/>
+<text class="badge-v-dark" x="538.9" y="326.5" font-size="11" text-anchor="middle" pointer-events="none">MC</text>
+<rect class="pending" x="565.3" y="274.8" width="50.9" height="95.8"><title>SIF: EE ↔ IOP RPC and DMA</title></rect>
+<text class="text-pending" x="590.8" y="326.5" font-size="11" text-anchor="middle" pointer-events="none">SIF</text>
+<rect class="partial" x="619.3" y="113.5" width="144.9" height="85"><title>R5900 CPU (recompiled to C++) — 13,630 functions recompiled; boots to the main menu and the character select</title></rect>
 <rect x="619.3" y="113.5" width="144.9" height="85" fill="url(#hatch)" pointer-events="none"/>
 <text class="badge-v-dark" x="691.7" y="159.8" font-size="11" text-anchor="middle" pointer-events="none">R5900</text>
-<rect class="pending" x="619.3" y="199.5" width="86.5" height="85"><title>Kernel: threads, semaphores and alarms</title></rect>
-<text class="text-pending" x="662.5" y="245.8" font-size="11" text-anchor="middle" pointer-events="none">Kernel</text>
-<rect class="pending" x="706.8" y="199.5" width="57.4" height="85"><title>FPU (COP1) and MMI instructions</title></rect>
-<text class="text-pending" x="735.5" y="245.8" font-size="11" text-anchor="middle" pointer-events="none">FPU/MMI</text>
-<rect class="pending" x="619.3" y="285.5" width="57.4" height="85"><title>INTC: VSync and GS interrupt — The runtime&#x27;s VBlank is fixed at NTSC 59.94 Hz; this game is PAL (50 Hz)</title></rect>
-<text class="text-pending" x="647.9" y="331.9" font-size="11" text-anchor="middle" pointer-events="none">INTC</text>
-<rect class="pending" x="677.6" y="285.5" width="57.4" height="85"><title>DMA controller — Native DMA service: chains go straight to VIF1/VU1 and the GS, with no controller model</title></rect>
-<text class="text-pending" x="706.3" y="331.9" font-size="11" text-anchor="middle" pointer-events="none">DMAC</text>
+<rect class="partial" x="619.3" y="199.5" width="86.5" height="85"><title>Kernel: threads, semaphores and alarms</title></rect>
+<rect x="619.3" y="199.5" width="86.5" height="85" fill="url(#hatch)" pointer-events="none"/>
+<text class="badge-v-dark" x="662.5" y="245.8" font-size="11" text-anchor="middle" pointer-events="none">Kernel</text>
+<rect class="partial" x="706.8" y="199.5" width="57.4" height="85"><title>DMA controller — Native DMA service with the scratchpad (SPR) address bit; no controller model</title></rect>
+<rect x="706.8" y="199.5" width="57.4" height="85" fill="url(#hatch)" pointer-events="none"/>
+<text class="badge-v-dark" x="735.5" y="245.8" font-size="11" text-anchor="middle" pointer-events="none">DMAC</text>
+<rect class="pending" x="619.3" y="285.5" width="57.4" height="85"><title>FPU (COP1) and MMI instructions</title></rect>
+<text class="text-pending" x="647.9" y="331.9" font-size="11" text-anchor="middle" pointer-events="none">FPU/MMI</text>
+<rect class="pending" x="677.6" y="285.5" width="57.4" height="85"><title>INTC: VSync and GS interrupt — The runtime&#x27;s VBlank is fixed at NTSC 59.94 Hz; this game is PAL (50 Hz)</title></rect>
+<text class="text-pending" x="706.3" y="331.9" font-size="11" text-anchor="middle" pointer-events="none">INTC</text>
 <rect class="pending" x="736" y="285.5" width="28.2" height="85"><title>Timers — Native EE clock: the recompiler turns timer reads into clock calls</title></rect>
 <text class="text-pending" x="750.1" y="331.9" font-size="11" text-anchor="middle" transform="rotate(-90 750.1 328)" pointer-events="none">Timers</text>
-<rect class="pending" x="767.2" y="113.5" width="115.3" height="63.5"><title>GS: primitives and framebuffer — Native OpenGL render-target renderer, 2x internal resolution</title></rect>
-<text class="text-pending" x="824.8" y="149.1" font-size="11" text-anchor="middle" pointer-events="none">GS</text>
-<rect class="pending" x="767.2" y="178" width="115.3" height="63.5"><title>VIF1 and VU1</title></rect>
-<text class="text-pending" x="824.8" y="213.6" font-size="11" text-anchor="middle" pointer-events="none">VIF1/VU1</text>
-<rect class="pending" x="767.2" y="242.5" width="57.2" height="85"><title>GS: textures, CLUT and fonts — Native texture and CLUT store instead of a VRAM model</title></rect>
-<text class="text-pending" x="795.8" y="288.1" font-size="9" text-anchor="middle" pointer-events="none">Tex/CLUT</text>
-<rect class="pending" x="825.3" y="242.5" width="57.2" height="85"><title>GIF (PATH1-3)</title></rect>
-<text class="text-pending" x="853.9" y="288.9" font-size="11" text-anchor="middle" pointer-events="none">GIF</text>
-<rect class="pending" x="767.2" y="328.5" width="115.3" height="42"><title>IPU: FMV video — Sofdec .SFD movies (FRONT/MOVIES)</title></rect>
-<text class="text-pending" x="824.8" y="353.4" font-size="11" text-anchor="middle" pointer-events="none">IPU</text>
+<rect class="partial" x="767.2" y="113.5" width="115.3" height="63.5"><title>GS: primitives and framebuffer — Native OpenGL renderer; menus clean (Z clamp, flip after queued work, field blend)</title></rect>
+<rect x="767.2" y="113.5" width="115.3" height="63.5" fill="url(#hatch)" pointer-events="none"/>
+<text class="badge-v-dark" x="824.8" y="149.1" font-size="11" text-anchor="middle" pointer-events="none">GS</text>
+<rect class="partial" x="767.2" y="178" width="57.2" height="85"><title>GS: textures, CLUT and fonts — Menu textures and text correct</title></rect>
+<rect x="767.2" y="178" width="57.2" height="85" fill="url(#hatch)" pointer-events="none"/>
+<text class="badge-v-dark" x="795.8" y="223.7" font-size="9" text-anchor="middle" pointer-events="none">Tex/CLUT</text>
+<rect class="partial" x="825.3" y="178" width="57.2" height="85"><title>GIF (PATH1-3)</title></rect>
+<rect x="825.3" y="178" width="57.2" height="85" fill="url(#hatch)" pointer-events="none"/>
+<text class="badge-v-dark" x="853.9" y="224.3" font-size="11" text-anchor="middle" pointer-events="none">GIF</text>
+<rect class="pending" x="767.2" y="264" width="68.8" height="106.5"><title>VIF1 and VU1</title></rect>
+<text class="text-pending" x="801.6" y="321.1" font-size="11" text-anchor="middle" pointer-events="none">VIF1/VU1</text>
+<rect class="pending" x="837" y="264" width="45.5" height="106.5"><title>IPU: FMV video — Sofdec .SFD movies (FRONT/MOVIES)</title></rect>
+<text class="text-pending" x="859.7" y="321.1" font-size="11" text-anchor="middle" pointer-events="none">IPU</text>
 <rect class="chip" x="462" y="114" width="27.8" height="15" rx="2" pointer-events="none"/>
 <text class="t1" x="466" y="125" font-size="11" pointer-events="none">IOP</text>
 <rect class="chip" x="619.8" y="114" width="21.2" height="15" rx="2" pointer-events="none"/>

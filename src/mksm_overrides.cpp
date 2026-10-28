@@ -20,6 +20,8 @@
 #include <vector>
 
 extern std::atomic<uint64_t> g_mksmPresentedFrames; // gs_host_present.cpp: frames the host window has shown
+extern std::atomic<uint64_t> g_mksmAudioFramesPlayed;   // ps2_runtime.cpp: frames the audio device asked for
+extern std::atomic<uint64_t> g_mksmAudioFramesProduced; // ps2_runtime.cpp: frames the sound engine had for it
 void mksmDumpBranchRing(const char *why);            // ps2_runtime.cpp: the last 256 inter-function branches (JAL included)
 namespace ps2_stubs                                  // Stubs/Pad.h: the pad state scePadRead returns while it is set
 {
@@ -100,7 +102,10 @@ namespace
         if (!watch || std::atof(watch) <= 0.0)
             return;
         const double period = std::max(1.0, std::atof(watch));
-        std::thread([&runtime, period] {
+        // MKSM_THREAD_WATCH_RING=<tick>: the tick that dumps the branch ring (default 3)
+        const unsigned ringTick = std::getenv("MKSM_THREAD_WATCH_RING") ? std::atoi(std::getenv("MKSM_THREAD_WATCH_RING")) : 3u;
+        std::thread([&runtime, period, ringTick] {
+            uint64_t lastPlayed = 0, lastProduced = 0;
             for (unsigned tick = 1;; ++tick)
             {
                 std::this_thread::sleep_for(std::chrono::duration<double>(period));
@@ -111,8 +116,17 @@ namespace
                     std::fprintf(stderr, "[mksm-threads]   id=%d prio=%d status=%d wait=%d/%d pc=%08x ra=%08x sp=%08x "
                                  "callers:%s\n", t.id, t.currentPriority, int(t.status), int(t.waitReason), t.waitId,
                                  t.pc, t.ra, t.sp, stackCallers(runtime.memory().getRDRAM(), t.sp).c_str());
-                if (tick == 3u)
-                    mksmDumpBranchRing("thread watch, third tick");
+                if (tick == ringTick)
+                    mksmDumpBranchRing("thread watch");
+                {
+                    // audio the device asked for in this period and how much of it the sound engine had (the rest is
+                    // the silence filled in when it ran short)
+                    const uint64_t played = g_mksmAudioFramesPlayed.load(), produced = g_mksmAudioFramesProduced.load();
+                    std::fprintf(stderr, "[mksm-audio] asked=%llu got=%llu\n", static_cast<unsigned long long>(played - lastPlayed),
+                                 static_cast<unsigned long long>(produced - lastProduced));
+                    lastPlayed = played;
+                    lastProduced = produced;
+                }
                 {
                     // The GS work counters and the display registers the host presents from: PMODE with no read
                     // circuit on (or DISPLAY 0) is the blank, magenta frame. "presented" also counts blank frames.
@@ -282,32 +296,6 @@ namespace
                      dst, ra, static_cast<int>(GPR_U32(ctx, 2)), nonzero, bytes);
     }
 
-    // MKSM-Port: MKSM_LOADIMAGE_TRACE=<n> (debug): the first <n> calls of sceGsExecLoadImage (0x383EE0): the upload in
-    // the sceGsLoadImage packet (DBP, DBW, PSM, position, size), the source, the caller and how much of it is not zero.
-    void mksmTraceLoadImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-    {
-        static const long limit = [] { const char *v = std::getenv("MKSM_LOADIMAGE_TRACE"); return v ? std::atol(v) : 0L; }();
-        static long traced = 0;
-        const uint32_t lp = GPR_U32(ctx, 4) & 0x01FFFFF0u, src = GPR_U32(ctx, 5) & 0x01FFFFF0u, ra = GPR_U32(ctx, 31);
-        if (traced < limit && lp + 0x60u <= PS2_RAM_SIZE)
-        {
-            ++traced;
-            uint64_t q[12];
-            std::memcpy(q, rdram + lp, sizeof(q));
-            const size_t bytes = std::min<size_t>(static_cast<size_t>(q[10] & 0x7FFFu) * 16u, PS2_RAM_SIZE - src);
-            size_t nonzero = 0;
-            for (size_t i = 0; i < bytes; ++i)
-                nonzero += rdram[src + i] != 0u;
-            std::fprintf(stderr, "[mksm-loadimage] dbp=%x dbw=%u psm=%u xy=%u,%u %ux%u src=%08x ra=%08x nonzero=%zu/%zu\n",
-                         static_cast<unsigned>((q[2] >> 32) & 0x3FFFu), static_cast<unsigned>((q[2] >> 48) & 0x3Fu),
-                         static_cast<unsigned>((q[2] >> 56) & 0x3Fu), static_cast<unsigned>((q[4] >> 32) & 0x7FFu),
-                         static_cast<unsigned>((q[4] >> 48) & 0x7FFu), static_cast<unsigned>(q[6] & 0xFFFu),
-                         static_cast<unsigned>((q[6] >> 32) & 0xFFFu), src, ra, nonzero, bytes);
-        }
-        ctx->pc = ra;
-        ps2_stubs::sceGsExecLoadImage(rdram, ctx, runtime);
-    }
-
     // MKSM-Port: MKSM_PAD_SCRIPT=<s>:<button>[+<button>...],... (testing): scePadRead (0x206C48) also holds those
     // buttons for a quarter of a second, <s> seconds after start, so a timed run can get past the boot prompts. Buttons:
     // start, select, up, down, left, right, cross, circle, square, triangle, l1, r1, l2, r2.
@@ -420,8 +408,6 @@ namespace
                             runtime.replaceFunction(0x00385610u, mksmVif1PkAddGsAD);
         if (std::getenv("MKSM_CD_READ_TRACE"))
             runtime.replaceFunction(0x00467BF0u, mksmTraceCdRead);
-        if (std::getenv("MKSM_LOADIMAGE_TRACE"))
-            runtime.replaceFunction(0x00383EE0u, mksmTraceLoadImage);
         if (std::getenv("MKSM_PAD_SCRIPT"))
             runtime.replaceFunction(0x00206C48u, mksmScriptedPadRead);
         std::fprintf(stderr, "[mksm-override] Mortal Kombat: Shaolin Monks (SLES-53524): sceCdLayerSearchFile=%d movie=%d "
