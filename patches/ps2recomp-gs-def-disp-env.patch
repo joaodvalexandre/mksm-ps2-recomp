@@ -1,0 +1,99 @@
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
+index 55b4fc8..09ffbf4 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
+@@ -1002,10 +1002,18 @@ namespace ps2_stubs
+             h = 448;
+ 
+         uint32_t fbw = (w + 63) / 64;
+-        uint64_t dispfb = makeDispFb(0, fbw, psm, 0, 0);
+-        uint64_t display = makeDisplay(dx, dy, 0, 0, w - 1, h - 1);
++        // MKSM-Port: like libgraph, the whole sceGsDispEnv is written, not only DISPFB/DISPLAY: PMODE 0x66 (read
++        // circuit 2, CRTMD 1, MMOD, AMOD), SMODE2 from the sceGsResetGraph mode and BGCOLOR 0. A game that builds its
++        // display with it and applies it with sceGsPutDispEnv (Mortal Kombat: Shaolin Monks) otherwise sent PMODE 0 at
++        // every flip: no read circuit was enabled and the host only showed its blank (magenta) frame.
++        GsDispEnvMem env{};
++        env.pmode = makePmode(0u, 1u, 1u, 1u, 0u, 0u);
++        env.smode2 = (g_gparam.interlace & 1u) == 0u ? 2u : ((g_gparam.ffmode & 1u) != 0u ? 3u : 1u);
++        env.dispfb = makeDispFb(0, fbw, psm, 0, 0);
++        env.display = makeDisplay(dx, dy, 0, 0, w - 1, h - 1);
++        env.bgcolor = 0u;
+ 
+-        writeGsDispEnv(rdram, envAddr, display, dispfb);
++        writeGsDispEnv(rdram, envAddr, env);
+         setReturnS32(ctx, 0);
+     }
+ 
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+index f34749c..66ef017 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+@@ -1668,15 +1668,11 @@ namespace
+         return true;
+     }
+ 
+-    static bool writeGsDispEnv(uint8_t *rdram, uint32_t addr, uint64_t display, uint64_t dispfb)
++    static bool writeGsDispEnv(uint8_t *rdram, uint32_t addr, const GsDispEnvMem &env)
+     {
+         uint8_t *ptr = getMemPtr(rdram, addr);
+         if (!ptr)
+             return false;
+-        GsDispEnvMem env{};
+-        std::memcpy(&env, ptr, sizeof(env));
+-        env.dispfb = dispfb;
+-        env.display = display;
+         std::memcpy(ptr, &env, sizeof(env));
+         return true;
+     }
+diff --git a/ps2xTest/src/ps2_gs_tests.cpp b/ps2xTest/src/ps2_gs_tests.cpp
+index 57a6592..7315659 100644
+--- a/ps2xTest/src/ps2_gs_tests.cpp
++++ b/ps2xTest/src/ps2_gs_tests.cpp
+@@ -586,6 +586,47 @@ void register_ps2_gs_tests()
+                      "sceGsSwapDBuffDc should preserve the display width from the seeded env");
+         });
+ 
++        // MKSM-Port: a game that seeds its display with sceGsSetDefDispEnv and applies it with sceGsPutDispEnv must turn a
++        // read circuit on: libgraph writes the whole sceGsDispEnv, PMODE included, over fresh (zero) memory.
++        tc.Run("sceGsSetDefDispEnv seeds a display that sceGsPutDispEnv turns on", [](TestCase &t)
++        {
++            PS2Runtime runtime;
++            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
++
++            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
++            R5900Context resetCtx{};
++            setRegU32(resetCtx, 4, 0u);
++            setRegU32(resetCtx, 5, 1u); // interlaced
++            setRegU32(resetCtx, 6, 2u); // NTSC
++            setRegU32(resetCtx, 7, 0u); // field mode
++            ps2_stubs::sceGsResetGraph(rdram.data(), &resetCtx, &runtime);
++
++            constexpr uint32_t kEnvAddr = 0x4000u;
++            R5900Context ctx{};
++            setRegU32(ctx, 4, kEnvAddr);
++            setRegU32(ctx, 5, 0u); // PSMCT32
++            setRegU32(ctx, 6, 640u);
++            setRegU32(ctx, 7, 448u);
++            ps2_stubs::sceGsSetDefDispEnv(rdram.data(), &ctx, &runtime);
++
++            uint64_t env[5] = {}; // pmode, smode2, dispfb, display, bgcolor
++            std::memcpy(env, rdram.data() + kEnvAddr, sizeof(env));
++            t.Equals(env[0], 0x66ull, "sceGsSetDefDispEnv should seed libgraph's PMODE (read circuit 2, MMOD, AMOD)");
++            t.Equals(env[1], 1ull, "sceGsSetDefDispEnv should seed SMODE2 from the interlaced field mode");
++            t.Equals((env[2] >> 9) & 0x3Full, 10ull, "sceGsSetDefDispEnv should seed DISPFB FBW from the width");
++            t.Equals((env[3] >> 32) & 0x0FFFull, 639ull, "sceGsSetDefDispEnv should seed DISPLAY DW from the width");
++            t.Equals((env[3] >> 44) & 0x07FFull, 447ull, "sceGsSetDefDispEnv should seed DISPLAY DH from the height");
++            t.Equals(env[4], 0ull, "sceGsSetDefDispEnv should seed BGCOLOR 0");
++
++            std::memset(&ctx, 0, sizeof(ctx));
++            setRegU32(ctx, 4, kEnvAddr);
++            ps2_stubs::sceGsPutDispEnv(rdram.data(), &ctx, &runtime);
++            t.Equals(runtime.memory().gs().pmode & 0x3ull, 0x2ull,
++                     "sceGsPutDispEnv of a default display env should enable read circuit 2");
++            t.Equals((runtime.memory().gs().display2 >> 32) & 0x0FFFull, 639ull,
++                     "sceGsPutDispEnv should program DISPLAY2 from the display env");
++        });
++
+ 
+ 
+ 

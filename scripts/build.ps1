@@ -102,6 +102,9 @@ $vu0Vi0Patch = Join-Path $RepoRoot 'patches\ps2recomp-vu0-vi0.patch'
 $vu1nHeadsPatch = Join-Path $RepoRoot 'patches\ps2recomp-vu1n-heads.patch'
 # MKSM-Port: PS2X_ANALYZER_FUNCMAP=<csv> makes ps2_analyzer write its functions as a function map (stripped ELFs).
 $analyzerFuncmapPatch = Join-Path $RepoRoot 'patches\ps2recomp-analyzer-funcmap.patch'
+# MKSM-Port: sceGsSetDefDispEnv writes the whole display env like libgraph (PMODE with a read circuit on), not only
+# DISPFB/DISPLAY: games that apply it with sceGsPutDispEnv showed nothing but the blank (magenta) frame.
+$gsDefDispEnvPatch = Join-Path $RepoRoot 'patches\ps2recomp-gs-def-disp-env.patch'
 $overrides = Join-Path $RepoRoot 'src\mksm_overrides.cpp'
 
 $git = 'git'
@@ -180,6 +183,7 @@ Run $git @('apply', '--ignore-whitespace', '--verbose', $gsFramesInFlightPatch)
 Run $git @('apply', '--ignore-whitespace', '--verbose', $vu1ClipBranchlessPatch)
 Run $git @('apply', '--ignore-whitespace', '--verbose', $vu1MaddSaturatedPatch)
 Run $git @('apply', '--ignore-whitespace', '--verbose', $analyzerFuncmapPatch)
+Run $git @('apply', '--ignore-whitespace', '--verbose', $gsDefDispEnvPatch)
 Pop-Location
 
 # The generated code includes <ps2_recompiled_functions.h> from src/runner

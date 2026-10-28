@@ -92,7 +92,40 @@ addresses in game code). They are only names: none of them is stubbed.
   shows the runtime set up (GS renderer, SPU2 output at 48 kHz, the `SLES_535.24` override) and then:
   `[guest-branch:missing-target] kind=DirectJump op=J source=0x486534 target=0x487890`. The main thread stops inside
   `_InitSys` (`0x4864E8`, called from the entry at `0x11C218`): `0x487890–0x4878C8` was a gap of the map, code only
-  reached by `J`. Fixed by `tools/funcmap_fixup.py` (step 3 above); rebuild pending verification.
+  reached by `J`. Fixed by `tools/funcmap_fixup.py` (step 3 above); verified on the next run (the boot gets past
+  `_InitSys` and loads the 9 IRX modules).
+
+### 2026-10-28 — startup fixes and the pink screen
+
+Startup. The first two fixes live only in the build tree (`mksm-work\PS2Recomp`) for now: a full `2_build.cmd`
+discards them until they become patches with their tests.
+
+- `SNDFI.IRX` did not load (`module arena exhausted`): the 9 modules span `0x76F00` bytes from `0x10000` and the
+  IOP heap started at `0x70000`. `IopMemory::HeapBase` moved to `0x90000`.
+- Every `malloc` failed: `EndOfHeap` (syscall `0x3E`) returned the end of the runtime's private heap (`0xFF000`)
+  instead of the limit the game gave `SetupHeap`, so newlib's `sbrk` (`0x4807F0`) refused every request and the GS
+  packets were built at address 0. `EndOfHeap` now returns the game's limit.
+- `sceCdLayerSearchFile` (`0x385F90`) retried forever to bind the IOP search server `0x80000597`; it is bound to the
+  runtime's native `sceCdSearchFile` (`src/mksm_overrides.cpp`).
+- `sceCdSearchFile failed: \\FRONT\MOVIES\BLITZ.SFD;1` (and `GAUNTLET.SFD`) is expected: the PAL disc has no such
+  movies (it has `ESRB`, `MIDWAY`, `OPENING`, `FINAL`, `END006`, `END011`), the game only probes for them.
+
+The pink screen, analysed from the output side:
+
+- The host window shows its magenta placeholder (`GSHostPresentation::blankFallback`) whenever the backend's
+  `Present` returns no frame, and `Present` returns none when PMODE enables no read circuit or DISPLAY1/2 is zero
+  (`gs_hw_backend.cpp`). A display that is on with nothing drawn would be black: pink means the display registers
+  were never turned on.
+- The game has no direct stores to PMODE/DISPFB/DISPLAY (only CSR accesses and a debug BGCOLOR store at
+  `0x414A34`). It uses libgraph: `sceGsResetGraph` at boot (`0x274224`, `0x275484`), then `0x275170` seeds two
+  display envs with `sceGsSetDefDispEnv` and patches their FBP, and the flip `0x275870` applies one of them with
+  `sceGsPutDispEnv` (5 callers, the frame loop at `0x274898` among them).
+- Those libgraph functions are stubs. The runtime's `sceGsSetDefDispEnv` only wrote DISPFB and DISPLAY and left
+  PMODE, SMODE2 and BGCOLOR as they were (zero), while libgraph's own (`0x3831F0`) writes PMODE `0x66` (circuit 2,
+  CRTMD 1, MMOD, AMOD), SMODE2 from the reset mode and BGCOLOR 0. Every flip therefore loaded PMODE 0. God of War
+  used `sceGsSetDefDBuffDc`, whose handler does set PMODE, so the gap never showed there.
+- Fix: `patches/ps2recomp-gs-def-disp-env.patch`, with a `ps2xTest` regression test that fails without it. In the
+  game: pending the next run.
 
 ## Work folders
 
@@ -111,14 +144,16 @@ Any other repository that is needed must also be cloned inside `D:\Projects\Reco
 | `MKSM_ELF` | Path of the game ELF (default `game\SLES_535.24`) |
 | `MKSM_ISO` | Read this disc image instead of the extracted files |
 | `MKSM_WORK` | Work folder (default `mksm-work`) |
-| `MKSM_THREAD_WATCH=<s>` | Every `<s>` seconds, print the EE threads (status, wait, pc, ra) |
+| `MKSM_THREAD_WATCH=<s>` | Every `<s>` seconds, print the EE threads (status, wait, pc, ra) and, for now, a `[mksm-gs]` line with the GS counters and display registers |
+| `MKSM_WATCH_WORDS=<addr>:<n>,...` | With `MKSM_THREAD_WATCH`, also print `<n>` guest RAM words at each `<addr>` (hex) |
 | `MKSM_IOP_MODULOS` | Folder of dumped IRX modules for the native IOP build |
 
 ## Next steps
 
-1. Run the build with the completed map and follow the log past `_InitSys`.
-2. First movie (`MIDWAY.SFD`/`ESRB.SFD`) and the main menu; then pad, audio and gameplay.
-3. Make the VBlank rate configurable (PAL 50 Hz).
+1. Confirm the display fix in the game: pink should turn into black (display on, nothing drawn yet) or a picture.
+2. Turn the IOP heap and `EndOfHeap` fixes into patches with their tests.
+3. First movie (`MIDWAY.SFD`/`ESRB.SFD`) and the main menu; then pad, audio and gameplay.
+4. Make the VBlank rate configurable (PAL 50 Hz).
 
 ## Language
 

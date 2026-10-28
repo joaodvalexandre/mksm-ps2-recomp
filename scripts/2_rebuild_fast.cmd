@@ -13,7 +13,7 @@ if not defined VSPATH (
 set VSCMD_SKIP_SENDTELEMETRY=1
 call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" > logs\vcvars.log 2>&1
 rem Same work folder as scripts\common.ps1 (Get-MksmWorkDir)
-if defined MKSM_WORK (set "WORK=%MKSM_WORK%") else (for /f "usebackq delims=" %%w in (`powershell -NoProfile -Command ". '%~dp0common.ps1'; Get-MksmWorkDir"`) do set "WORK=%%w")
+if defined MKSM_WORK (set "WORK=%MKSM_WORK%") else (for /f "usebackq delims=" %%w in (`powershell -NoProfile -ExecutionPolicy Bypass -Command ". '%~dp0common.ps1'; Get-MksmWorkDir"`) do set "WORK=%%w")
 copy /y "src\mksm_overrides.cpp" "%WORK%\PS2Recomp\ps2xRuntime\src\runner\mksm_overrides.cpp" >nul
 if errorlevel 1 exit /b 1
 copy /y "src\*.h" "%WORK%\PS2Recomp\ps2xRuntime\src\runner\" >nul
@@ -21,7 +21,7 @@ if errorlevel 1 exit /b 1
 rem With a localized MSVC ("Note: including file:") ninja does not record the /showIncludes dependencies,
 rem so a change in mksm_overrides.cpp (included from a unity file) rebuilds nothing.
 rem The unity file that includes it is touched to force the rebuild.
-powershell -NoProfile -Command "$unityDir = Join-Path $env:WORK 'PS2Recomp\out\build\ps2xRuntime\CMakeFiles\ps2EntryRunner.dir\Unity'; Get-ChildItem -LiteralPath $unityDir -Filter '*.cxx' -File | Where-Object { Select-String -LiteralPath $_.FullName -SimpleMatch 'mksm_overrides.cpp' -Quiet } | ForEach-Object { $_.LastWriteTime = Get-Date }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$unityDir = Join-Path $env:WORK 'PS2Recomp\out\build\ps2xRuntime\CMakeFiles\ps2EntryRunner.dir\Unity'; Get-ChildItem -LiteralPath $unityDir -Filter '*.cxx' -File | Where-Object { Select-String -LiteralPath $_.FullName -SimpleMatch 'mksm_overrides.cpp' -Quiet } | ForEach-Object { $_.LastWriteTime = Get-Date }"
 if errorlevel 1 exit /b 1
 cmake --build "%WORK%\PS2Recomp\out\build" --target ps2EntryRunner > logs\2_rebuild_fast.log 2>&1
 set "RC=%errorlevel%"

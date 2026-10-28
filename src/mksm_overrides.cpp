@@ -6,11 +6,16 @@
 #include "ps2_runtime_macros.h"
 #include "mksm_gs_replay.h" // MKSM-Port: optional, bounded capture to compare backends.
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
+#include <string>
 #include <thread>
+
+extern std::atomic<uint64_t> g_mksmPresentedFrames; // gs_host_present.cpp: frames the host window has shown
 
 namespace
 {
@@ -69,6 +74,50 @@ namespace
                 for (const EeThreadSnapshot &t : snapshot.threads)
                     std::fprintf(stderr, "[mksm-threads]   id=%d prio=%d status=%d wait=%d/%d pc=%08x ra=%08x\n", t.id,
                                  t.currentPriority, int(t.status), int(t.waitReason), t.waitId, t.pc, t.ra);
+                {
+                    // The GS work counters and the display registers the host presents from: PMODE with no read
+                    // circuit on (or DISPLAY 0) is the blank, magenta frame. "presented" also counts blank frames.
+                    PS2Memory &mem = runtime.memory();
+                    const GSRegisters &gs = mem.gs();
+                    std::fprintf(stderr,
+                                 "[mksm-gs] dma=%llu gif=%llu gswrites=%llu vifwrites=%llu presented=%llu pmode=%llx "
+                                 "smode2=%llx dispfb1=%llx display1=%llx dispfb2=%llx display2=%llx bgcolor=%llx\n",
+                                 static_cast<unsigned long long>(mem.dmaStartCount()),
+                                 static_cast<unsigned long long>(mem.gifCopyCount()),
+                                 static_cast<unsigned long long>(mem.gsWriteCount()),
+                                 static_cast<unsigned long long>(mem.vifWriteCount()),
+                                 static_cast<unsigned long long>(g_mksmPresentedFrames.load()),
+                                 static_cast<unsigned long long>(gs.pmode), static_cast<unsigned long long>(gs.smode2),
+                                 static_cast<unsigned long long>(gs.dispfb1), static_cast<unsigned long long>(gs.display1),
+                                 static_cast<unsigned long long>(gs.dispfb2), static_cast<unsigned long long>(gs.display2),
+                                 static_cast<unsigned long long>(gs.bgcolor));
+                }
+                // MKSM_WATCH_WORDS=<addr>:<count>,... also prints those guest RAM words at every tick.
+                if (const char *spec = std::getenv("MKSM_WATCH_WORDS"))
+                {
+                    const uint8_t *ram = runtime.memory().getRDRAM();
+                    for (const char *p = spec; *p;)
+                    {
+                        char *end = nullptr;
+                        const uint32_t address = static_cast<uint32_t>(std::strtoul(p, &end, 16)) & 0x01FFFFFCu;
+                        uint32_t count = 1u;
+                        if (end && *end == ':')
+                            count = static_cast<uint32_t>(std::strtoul(end + 1, &end, 0));
+                        std::string line;
+                        for (uint32_t i = 0; i < count && i < 64u; ++i)
+                        {
+                            uint32_t value;
+                            std::memcpy(&value, ram + address + i * 4u, sizeof(value));
+                            char item[16];
+                            std::snprintf(item, sizeof(item), " %08x", value);
+                            line += item;
+                        }
+                        std::fprintf(stderr, "[mksm-words] %08x:%s\n", address, line.c_str());
+                        p = (end && *end == ',') ? end + 1 : (end ? end : p + std::strlen(p));
+                        if (end && *end == '\0')
+                            break;
+                    }
+                }
             }
         }).detach();
     }
@@ -81,7 +130,12 @@ namespace
         // The runtime's internal heap goes below the ELF (free memory, the ELF loads at 0x100000) so as not to
         // trample the game's own heap at the end of .bss.
         runtime.setPrivateGuestHeap(0x000A0000u, 0x000FF000u);
-        std::fprintf(stderr, "[mksm-override] Mortal Kombat: Shaolin Monks (SLES-53524): base setup only\n");
+        // libcdvd's sceCdLayerSearchFile (0x385F90; sceCdSearchFile at 0x386290 calls it with layer 0) binds the IOP
+        // CDVDFSV search server 0x80000597 and retries until it exists. The runtime answers libcdvd on the EE side, so
+        // the native sceCdSearchFile handler takes it (same fp/name arguments; the disc has a single layer).
+        const bool search = ps2_game_overrides::bindAddressHandler(runtime, 0x00385F90u, "sceCdSearchFile");
+        std::fprintf(stderr, "[mksm-override] Mortal Kombat: Shaolin Monks (SLES-53524): sceCdLayerSearchFile=%d\n",
+                     search);
     }
 }
 
