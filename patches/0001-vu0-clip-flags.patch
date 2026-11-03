@@ -1,0 +1,53 @@
+diff --git a/ps2xRecomp/src/lib/vu_translator.cpp b/ps2xRecomp/src/lib/vu_translator.cpp
+index d0fc95d..474bd02 100644
+--- a/ps2xRecomp/src/lib/vu_translator.cpp
++++ b/ps2xRecomp/src/lib/vu_translator.cpp
+@@ -274,9 +274,12 @@ namespace ps2recomp
+                         "__m128 lt = _mm_cmplt_ps(fs, neg_ft); "
+                         "uint32_t gt_mask = (uint32_t)_mm_movemask_ps(gt); "
+                         "uint32_t lt_mask = (uint32_t)_mm_movemask_ps(lt); "
+-                        "uint32_t flags = ((lt_mask & 0x1) << 0) | ((gt_mask & 0x1) << 1) | "
+-                        "((lt_mask & 0x2) << 1) | ((gt_mask & 0x2) << 2) | "
+-                        "((lt_mask & 0x4) << 2) | ((gt_mask & 0x4) << 3); "
++                        // MKSM: hardware order (VU manual, PCSX2 _vuCLIP): bit 0 = x > +w, bit 1 = x < -w, bit 2 = y > +w,
++                        // bit 3 = y < -w, bit 4 = z > +w, bit 5 = z < -w. With the pairs swapped, a sphere-vs-frustum
++                        // test that reads the "< -w" bits culls every object that is comfortably inside the frustum.
++                        "uint32_t flags = ((gt_mask & 0x1) << 0) | ((lt_mask & 0x1) << 1) | "
++                        "((gt_mask & 0x2) << 1) | ((lt_mask & 0x2) << 2) | "
++                        "((gt_mask & 0x4) << 2) | ((lt_mask & 0x4) << 3); "
+                         "ctx->vu0_clip_flags = ((ctx->vu0_clip_flags << 6) | (flags & 0x3F)) & 0xFFFFFF; }}",
+                         inst.rd, inst.rt, inst.rt, shuffle_pattern);
+                 }
+diff --git a/ps2xTest/src/code_generator_tests.cpp b/ps2xTest/src/code_generator_tests.cpp
+index 463b6cf..70512b6 100644
+--- a/ps2xTest/src/code_generator_tests.cpp
++++ b/ps2xTest/src/code_generator_tests.cpp
+@@ -1056,6 +1056,28 @@ void register_code_generator_tests()
+                 t.IsTrue(ctc2Code.find("Unimplemented") == std::string::npos, "CTC2 VI4 should be implemented");
+         });
+ 
++        // MKSM: VCLIPw sets the clipping flags in the hardware order (VU manual, PCSX2 _vuCLIP): bit 0 = x > +w,
++        // bit 1 = x < -w, then y and z. A game that classifies a bounding sphere with "andi 0xAAA" (the "< -w" bits
++        // of two clips) culled everything with the bits swapped.
++        tc.Run("VU0 macro VCLIPw sets the clip flags in hardware order", [](TestCase &t) {
++            R5900Decoder decoder;
++            CodeGenerator gen({}, {});
++
++            const Instruction vclipw = decoder.decodeInstruction(0x22C8B4u, 0x4BCD41FFu); // vclipw.xyz $vf8, $vf13w
++            const std::string out = gen.translateInstruction(vclipw);
++            printGeneratedCode("vclipw.xyz $vf8, $vf13w", out);
++            t.IsTrue(out.find("ctx->vu0_vf[8]") != std::string::npos, "VCLIPw must compare Fs (vf8)");
++            t.IsTrue(out.find("ctx->vu0_vf[13]") != std::string::npos, "VCLIPw must clip against Ft (vf13)");
++            t.IsTrue(out.find("((gt_mask & 0x1) << 0) | ((lt_mask & 0x1) << 1)") != std::string::npos,
++                     "bit 0 must be x > +w and bit 1 x < -w");
++            t.IsTrue(out.find("((gt_mask & 0x2) << 1) | ((lt_mask & 0x2) << 2)") != std::string::npos,
++                     "bit 2 must be y > +w and bit 3 y < -w");
++            t.IsTrue(out.find("((gt_mask & 0x4) << 2) | ((lt_mask & 0x4) << 3)") != std::string::npos,
++                     "bit 4 must be z > +w and bit 5 z < -w");
++            t.IsTrue(out.find("(ctx->vu0_clip_flags << 6)") != std::string::npos,
++                     "the previous results must shift up by 6 bits");
++        });
++
+         tc.Run("VU special control registers use hardware indices", [](TestCase& t)
+             {
+                 CodeGenerator gen({}, {});

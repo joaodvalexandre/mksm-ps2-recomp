@@ -1,0 +1,32 @@
+name: Checks
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  patches-and-config:
+    name: Patches apply, configuration is sane
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Apply the patches on the pinned PS2Recomp
+        run: |
+          set -e
+          for patch in $(ls patches/*.patch | sort); do
+            echo "applying $patch"
+            git -C PS2Recomp apply --ignore-whitespace "$GITHUB_WORKSPACE/$patch"
+          done
+      - name: Check the recompiler configuration
+        run: |
+          set -e
+          test -f config/recomp.toml
+          grep -q '@ELF@' config/recomp.toml
+          grep -q '@OUT@' config/recomp.toml
+          ! grep -qiE 'D:\\|C:\\|/Users/' config/recomp.toml
+      - name: Python tool tests
+        run: |
+          if ls tests/test_*.py >/dev/null 2>&1; then python3 -m unittest discover -s tests -p 'test_*.py'; else echo "no tests yet"; fi

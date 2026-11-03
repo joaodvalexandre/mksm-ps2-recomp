@@ -1,0 +1,30 @@
+{
+  "$schema": "https://recomp.fyi/schema/v1.json",
+  "game": "Mortal Kombat: Shaolin Monks",
+  "wikidata": "Q1313975",
+  "system": "PS2",
+  "type": "recomp",
+  "original": {
+    "region": "Europe",
+    "serial": "SLES-53524"
+  },
+  "project": "Mortal Kombat: Shaolin Monks (PAL) - PS2 static recompilation",
+  "status": "exploring",
+  "targets": ["Windows"],
+  "toolchain": "PS2Recomp",
+  "approach": "Static recompilation of the MIPS R5900 executable to C++20 with upstream PS2Recomp (pinned submodule plus a few small recompiler patches), game-specific overrides on top of its runtime.",
+  "maintainers": [
+    {
+      "name": "joaodvalexandre",
+      "link": "https://github.com/joaodvalexandre"
+    }
+  ],
+  "links": [
+    {
+      "label": "Research log",
+      "url": "https://github.com/joaodvalexandre/mksm-ps2-recomp/blob/master/docs/MKSM.md"
+    }
+  ],
+  "tags": ["PAL"],
+  "notes": "Restarted on 2026-11-03 on upstream PS2Recomp for the PAL release; the earlier NTSC attempt on a patched runtime is kept in the archive/ntsc-waffle-runtime branch."
+}

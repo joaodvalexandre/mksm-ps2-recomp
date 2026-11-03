@@ -1,0 +1,25 @@
+# Game files: never committed (ISO, ELF, IRX, data). The disc is extracted into game\ (see the README).
+game/
+*.iso
+*.ISO
+*.irx
+*.IRX
+*.WAD
+*.WA?
+SLES_*
+SLUS_*
+SYSTEM.CNF
+mc0/
+mc1/
+
+# Build output inside the submodule and local logs
+PS2Recomp/out/
+logs/
+*.log
+
+# Editors / system
+.vs/
+.vscode/
+__pycache__/
+Thumbs.db
+desktop.ini
