@@ -9,7 +9,7 @@ MIPS R5900 code to C++.**
 ![Language](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)
 ![Build](https://img.shields.io/badge/build-CMake%20%2B%20Ninja-064F8C?logo=cmake&logoColor=white)
 ![Based on](https://img.shields.io/badge/based%20on-PS2Recomp-8A2BE2)
-![Status](https://img.shields.io/badge/status-pre--boot-red)
+![Status](https://img.shields.io/badge/status-main%20menu-orange)
 [![Tests](https://github.com/joaodvalexandre/mksm-ps2-recomp/actions/workflows/tests.yml/badge.svg)](https://github.com/joaodvalexandre/mksm-ps2-recomp/actions/workflows/tests.yml)
 
 </div>
@@ -21,8 +21,9 @@ MIPS R5900 code to C++.**
 > nor the C++ code generated from them. You need **your own legal copy** of Mortal Kombat: Shaolin Monks for the PS2.
 
 > [!WARNING]
-> **The game does not boot yet.** The executable recompiles and builds; the first runs stop during startup. Progress
-> is logged in [`docs/MKSM.md`](docs/MKSM.md).
+> **The game is not playable yet.** It boots to the main menu with music and a working controller, and the character
+> and difficulty select work, but loading into a fight does not finish. Progress is logged in
+> [`docs/MKSM.md`](docs/MKSM.md).
 
 ## Contents
 
@@ -46,12 +47,12 @@ the PS2 hardware with native code:
 | Layer | Native replacement | Shaolin Monks |
 |---|---|---|
 | **EE CPU** (game code) | Static recompilation to C++ | 13,630 functions from the analyzer (the ELF has no symbols) |
-| **VU1** (vector microcode) | Microprograms compiled ahead of time to C++, interpreter as fallback | To verify |
-| **GS** (graphics) | OpenGL render-target renderer, 2x internal resolution | To verify |
-| **IOP** (I/O CPU) | IRX modules in the interpreter, or compiled ahead of time to C++ | 9 IRX modules |
-| **Sound** (SPU2) | Native sound engine driven by LIBSD calls | CRI ADX runs over LIBSD; to verify |
-| **Pad / memory card** | EE-side handlers, no SIO2 model | Classic libpad/libmc stubbed to those handlers |
-| **Movies** (IPU) | MPEG-2 through native libmpeg2 | Sofdec `.SFD` movies; to verify |
+| **VU1** (vector microcode) | Microprograms compiled ahead of time to C++, interpreter as fallback | Interpreter; the 3D view is not reached yet |
+| **GS** (graphics) | OpenGL render-target renderer, 2x internal resolution | Menus render cleanly (field blend, Z clamp); 4:3 by default, `MKSM_ASPECT=16:9` |
+| **IOP** (I/O CPU) | IRX modules in the interpreter, or compiled ahead of time to C++ | The 9 disc IRX modules run in the interpreter |
+| **Sound** (SPU2) | Native sound engine driven by LIBSD calls | LIBSD imports routed by ordinal: ADX music and the announcer play (crackle); SNDF effects silent |
+| **Pad / memory card** | EE-side handlers, no SIO2 model | Classic libpad/libmc stubbed to those handlers; pad works, the empty card is detected |
+| **Movies** (IPU) | MPEG-2 through native libmpeg2 | Sofdec `.SFD` movies decode through the IPU, which is not emulated: skipped (`MKSM_MOVIES=1` plays them) |
 | **Disc** | Files extracted from the disc, each at its original sector | Works as is |
 | **Video timing** | VBlank at 59.94 Hz | The game is PAL (50 Hz): field rate has to become configurable |
 
@@ -73,12 +74,14 @@ This repository contains only what is specific to the game:
 | Disc extracted with its sector layout | ✅ |
 | Function map and recompiler configuration for `SLES_535.24` | ✅ |
 | `SLES_535.24` recompiled to C++ and native executable (MSVC, x64) | ✅ |
-| Boot through the SDK startup (`_InitSys`) | 🔧 in progress |
-| First movie and the main menu | ⏳ pending |
-| Pad and memory card | ⏳ pending |
-| ADX audio and SFD movies | ⏳ pending |
+| Boot through the SDK startup (`_InitSys`) | ✅ |
+| Main menu (movies skipped) | ✅ |
+| Pad and memory card | ✅ pad; card detected, saving untested |
+| ADX music | 🔧 plays, with crackle |
+| SNDF sound effects and SFD movies | ⏳ pending |
+| Loading into a fight | 🔧 in progress |
 | Gameplay at full speed, PAL 50 Hz timing | ⏳ pending |
-| Extras (higher frame rates, widescreen, improvements) | ⏳ later |
+| Extras (higher frame rates, widescreen, improvements) | 🔧 16:9 option (`MKSM_ASPECT`) |
 
 <a href="docs/status/details.md"><img src="docs/status/map.svg" alt="Port status map: Sony SDK library functions and PS2 hardware components, colored by status" width="100%"></a>
 

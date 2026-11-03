@@ -23,6 +23,8 @@ rem so a change in mksm_overrides.cpp (included from a unity file) rebuilds noth
 rem The unity file that includes it is touched to force the rebuild.
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$unityDir = Join-Path $env:WORK 'PS2Recomp\out\build\ps2xRuntime\CMakeFiles\ps2EntryRunner.dir\Unity'; Get-ChildItem -LiteralPath $unityDir -Filter '*.cxx' -File | Where-Object { Select-String -LiteralPath $_.FullName -SimpleMatch 'mksm_overrides.cpp' -Quiet } | ForEach-Object { $_.LastWriteTime = Get-Date }"
 if errorlevel 1 exit /b 1
+rem An interrupted build leaves zero-length .obj files that ninja takes for up to date (see scripts\build.ps1).
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-ChildItem -LiteralPath (Join-Path $env:WORK 'PS2Recomp\out\build') -Recurse -Filter '*.obj' -File | Where-Object { $_.Length -eq 0 } | Remove-Item -Force"
 cmake --build "%WORK%\PS2Recomp\out\build" --target ps2EntryRunner > logs\2_rebuild_fast.log 2>&1
 set "RC=%errorlevel%"
 echo [final code %RC%] >> logs\2_rebuild_fast.log

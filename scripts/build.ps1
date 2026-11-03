@@ -141,6 +141,14 @@ $gsFieldBlendPatch = Join-Path $RepoRoot 'patches\ps2recomp-gs-field-blend.patch
 # MKSM-Port: "libsd" imports reach the native sound engine by ordinal (the game's own LIBSD.IRX build wrote SPU2
 # registers that exist nowhere: no sound), and a looping block transfer calls its interrupt handler at each half.
 $iopLibsdImportsPatch = Join-Path $RepoRoot 'patches\ps2recomp-iop-libsd-imports.patch'
+# MKSM-Port: MKSM_HOST_SHOT takes a list of host frames (host_shot_<n>.png each), so a scripted run can save every screen.
+$hostShotListPatch = Join-Path $RepoRoot 'patches\ps2recomp-host-shot-list.patch'
+# MKSM-Port: D_STAT keeps the DMAC channel status (CISn set at completion, cleared by a write of 1; CIMn toggled): the game
+# spins on CIS0 after uploading its VU0 microprogram with its own D0_CHCR store, and never got past the difficulty select.
+$dmacStatPatch = Join-Path $RepoRoot 'patches\ps2recomp-dmac-stat.patch'
+# MKSM-Port: the recompiler's BC2F/BC2T test VU0 busy (VPU_STAT.VBS0), not the Z flag of the VU0 STATUS register: the
+# game's sync path waits with "bc2t ." for its VU0 microprogram and spun forever.
+$bc2VpuStatPatch = Join-Path $RepoRoot 'patches\ps2recomp-bc2-vpu-stat.patch'
 $overrides = Join-Path $RepoRoot 'src\mksm_overrides.cpp'
 
 $git = 'git'
@@ -232,6 +240,9 @@ Run $git @('apply', '--ignore-whitespace', '--verbose', $gsFlipAfterQueuedWorkPa
 Run $git @('apply', '--ignore-whitespace', '--verbose', $hostAspectPatch)
 Run $git @('apply', '--ignore-whitespace', '--verbose', $gsFieldBlendPatch)
 Run $git @('apply', '--ignore-whitespace', '--verbose', $iopLibsdImportsPatch)
+Run $git @('apply', '--ignore-whitespace', '--verbose', $hostShotListPatch)
+Run $git @('apply', '--ignore-whitespace', '--verbose', $dmacStatPatch)
+Run $git @('apply', '--ignore-whitespace', '--verbose', $bc2VpuStatPatch)
 Pop-Location
 
 # The generated code includes <ps2_recompiled_functions.h> from src/runner
@@ -325,6 +336,9 @@ $vu1ObjectDir = Join-Path $bld 'ps2xRuntime\CMakeFiles\ps2EntryRunner.dir\vu1_ge
 if (Test-Path -LiteralPath $vu1ObjectDir) { Get-ChildItem -LiteralPath $vu1ObjectDir -Filter '*.obj' | Remove-Item -Force }
 Run 'cmake' @('-S', $rec, '-B', $bld)
 
+# MKSM-Port: an interrupted build (Ctrl+C, closed console) leaves zero-length .obj files, which ninja then takes for up
+# to date: the next build fails at the link, or stops with no compiler message at all. They are removed first.
+Get-ChildItem -LiteralPath $bld -Recurse -Filter '*.obj' -File | Where-Object { $_.Length -eq 0 } | Remove-Item -Force
 Step 'Building the optimized game in parallel'
 Run 'cmake' @('--build', $bld, '--target', 'ps2EntryRunner')
 

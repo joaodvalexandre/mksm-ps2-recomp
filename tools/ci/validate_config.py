@@ -26,6 +26,9 @@ ROOT = Path(__file__).resolve().parents[2]
 FUNCMAP = ROOT / "config" / "funcmap.csv"
 TEMPLATE = ROOT / "config" / "recomp.template.toml"
 LIBM_DOUBLE = {"sin", "cos", "tan", "atan", "atan2", "sqrt", "pow", "exp", "log", "fabs", "floor", "ceil", "fmod"}
+# The EE side of libsdr: the game uploads its sound-effect samples through these (sceSifSetDma + rSdVoiceTrans to
+# SDRDRV.IRX); the runtime's handlers only faked the transfers and the effects were silent. They stay recompiled.
+LIBSDR_EE = {"sceSdRemoteInit", "sceSdTransToIOP", "sceSdRemote"}
 SELECTOR = re.compile(r"^(?P<name>[A-Za-z_$][\w$.]*)@0x(?P<addr>[0-9A-Fa-f]{1,8})$")
 
 errors: list[str] = []
@@ -112,6 +115,9 @@ def main() -> int:
         if name in LIBM_DOUBLE:
             errors.append(f"stubs: {name}@0x{address:08X} is the software double libm; "
                           "the runtime's float handler does not respect its ABI")
+        if name in LIBSDR_EE or address in (0x00382C70, 0x00382D20, 0x00382DB0):
+            errors.append(f"stubs: {name}@0x{address:08X} is the EE's libsdr, which must be recompiled: "
+                          "the runtime's handlers fake the SPU2 sample transfers (see docs/MKSM.md, 2026-11-03)")
 
     by_address: dict[int, list[str]] = {}
     for name, address in stubs + entries:

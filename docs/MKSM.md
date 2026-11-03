@@ -3,7 +3,7 @@
 Research log of the port of *Mortal Kombat: Shaolin Monks* (MKSM, PAL `SLES-53524`). Current goal: **get the game
 to boot and run smoothly on Windows**; everything else (improvements, higher frame rates, etc.) comes later.
 
-_Last updated: October 27, 2026_
+_Last updated: November 3, 2026_
 
 ## The disc
 
@@ -58,7 +58,7 @@ modules load straight from the extracted tree. It also names `\GAMEDATA.WAK`, `\
 | Region/video | **PAL**, 50 Hz | The `vblank-ntsc` patch fixes the VBlank at 59.94 Hz; the field rate has to become configurable |
 | Pad | `PADMAN.IRX` + `SIO2MAN.IRX` (classic libpad) | The runtime does not model SIO2: `scePad*` are stubbed to its EE-side handlers |
 | Memory card | `MCMAN.IRX` + `MCSERV.IRX` (classic libmc) | `sceMc*` stubbed to the runtime's EE-side handlers |
-| Audio | **CRI ADX** (`CRI_ADXI.IRX`) + `SNDFI.IRX` over `LIBSD`/`SDRDRV` | The native SPU2 engine handles every `libsd` import by ordinal: ADX music plays, SNDF effects do not yet |
+| Audio | **CRI ADX** (`CRI_ADXI.IRX`) + `SNDFI.IRX` over `LIBSD`/`SDRDRV` | The native SPU2 engine handles every `libsd` import by ordinal: ADX music plays; the EE's libsdr (sample upload through `SDRDRV.IRX`) is recompiled, so the SNDF effects sound, with a pitch/tempo problem still open |
 | Movies | **SFD** (Sofdec, MPEG-2 through the IPU) | `sceMpeg*` stubbed to the native decoder; the SFD demultiplexer has to be checked |
 | Disc | 7 `GAMEDATA.WA*` + `FILELIST.DIR` | The extractor's `.disc_layout` works as is |
 
@@ -262,12 +262,76 @@ window) and a `summary.txt` with the last thread snapshot, GS counters, render t
   every period), so it is not an underrun. A capture of the output shows steps in the right channel at the 256-sample
   block boundaries of CRI's stream: the refill of a 1024-sample half lands late relative to the engine's reads.
   Next: model the ADMA read-ahead the way PCSX2's SPU2 does.
-- **Open: no menu sound effects.** `SNDFI.IRX` keys on core 1 voices, but never uploads their samples: its only
+- **Open: no menu sound effects** (resolved on 2026-11-03: the EE uploads the samples itself through libsdr, which was stubbed; see that entry). `SNDFI.IRX` keys on core 1 voices, but never uploads their samples: its only
   `sceSdVoiceTrans` call (`0xE158`, in `0xE09C`) is skipped behind two capacity checks (`[s2+0x10] <= [v1+0x4A8]`,
   `[s2+0x18] <= [v1+0x628]`). SNDF does no file I/O, so the bank comes from the EE through SIF commands or RPC;
   `PS2X_TRACE_RPC` prints nothing for it, so that path bypasses `IopSubsystem::handleRpc`.
 - **Open: the wait after difficulty select.** The game reads 19 sectors of `GAMEDATA.WAG` and then waits on an empty
   panel. It may wait on the same SNDF bank load.
+
+### 2026-11-03 — the fight never loads: D_STAT
+
+- **Interrupted builds.** The build of October 28 (after un-stubbing libsdr, below) stopped with eight unity objects
+  "failed" and no compiler message: the build had been interrupted (console closed), each `cl.exe` in flight exited
+  with code 1 and left a **zero-length `.obj`**, and ninja took those for up to date on the next build. `scriptsuild.ps1`
+  and `2_rebuild_fast.cmd` now delete zero-length objects before building.
+- **libsdr un-stubbed.** `sceSdRemoteInit`, `sceSdTransToIOP` and `sceSdRemote` (`0x382C70`-`0x383130`) are no longer
+  stubs: the runtime's EE-side handlers (`Stubs/Audio.cpp`) faked the transfers in a private record and `sceSdTransToIOP`
+  was a TODO, while the game's own libsdr talks to `SDRDRV.IRX` (RPC `0x80000701`; the IOP tries the module's server
+  before its HLE service), whose libsd calls reach the native sound engine by ordinal. The map names them `libsdr_*` so
+  that a regenerated config does not stub them again, and `tools/ci/validate_config.py` rejects those stubs. The game
+  calls them at 17 sites: the boot (`0x2131E8`: `sceSdRemoteInit`, then `rSdInit` 0x8000 and four `rSdSetParam` 0x8010
+  that set MVOLL/MVOLR of both cores to `0x3FFF`), the MMIX setup (`0x2722B0`) and, above all, **the sound-effect
+  sample upload**: `0x463BF8` copies a block to the IOP with `sceSifSetDma` and asks `rSdVoiceTrans` (0x80D0) to move
+  it into SPU2 RAM, polling `rSdVoiceTransStatus` (0x80F0); `0x464238` does the same with `sceSdTransToIOP`. That is
+  why the menu effects were silent: `SNDFI.IRX` never uploads samples itself (its "capacity checks" of October 28 were
+  a red herring), the EE does, and the stubs dropped the data. **Verified in the game:** the menu select sound plays
+  (the user hears it slowed down or wrong, see below). SDRDRV serves RPC `0x80000701` (the IOP tries the module's
+  server before its HLE service); its callback-client thread (bind to an EE server `0x80000704`, which the runtime
+  cannot serve) is only created by command `0xE620`, which the game never sends.
+- **`MKSM_HOST_SHOT` takes a list** of host frames (`patches/ps2recomp-host-shot-list.patch`, `host_shot_<n>.png` each),
+  so a scripted run saves every screen it goes through. A run with `MKSM_PAD_SCRIPT=12:cross,16:cross,20:start,24:cross,
+  28:cross,33:cross,38:cross` goes notice (9 s) → save prompt (15 s) → title → brightness (21 s) → main menu (27 s) →
+  character select (33 s) → difficulty select, then the opening movie is skipped (`[mksm-movie] skipped OPENING.SFD` at
+  ~40 s) and the picture freezes on a stretched copy of the last menu frame (the display switched to a 512-wide buffer,
+  `fbp=32 fbw=8`, that nothing draws into).
+- **The wait after difficulty select is a DMAC status poll.** With the thread watch, the main thread spins at priority
+  `0x18` in `0x40E4D8` (called from `0x3D5080` ← `0x3935F0` ← `0x395500` ← `0x395200` ← `0x3350F0`, the level loader):
+  the routine clears `D_STAT` CIS0 (`sw 1, 0x1000E010`), sets `D_PCR`, points `D0_MADR`/`D0_QWC` at
+  `0x49A9D0`-`0x49B430` (the start of `.vutext`: a VIF0 packet with two `MPG`s, 256 and 74 instructions, the game's
+  **VU0 microprogram**), starts channel 0 with `D0_CHCR = 0x100` and loops until `D_STAT` bit 0 (CIS0) reads 1. The
+  runtime ran the VIF0 transfer (the MPG lands in VU0 micro memory) but dropped every `D_STAT` store and read it as 0,
+  so the loop never ended. God of War only cleared the bits after its scratchpad copies, which is why no status was kept.
+  Fix: `patches/ps2recomp-dmac-stat.patch`: `D_STAT` keeps the channel status: `queueCompletedDmacCause` sets CISn when a
+  transfer completes (still at the store that starts it), a write of 1 clears the status bits (0-9, 13-15) and toggles
+  the mask bits (16-25, 29, 30), as on the DMAC. Regression test "D_STAT reports a finished VIF0 transfer and clears on
+  write-one" (fails without the patch). **Verified in the game:** the main thread leaves `0x40E4D8`, loads for a few
+  seconds (`0x3404BC`, callers `0x343518` ← `0x2592A0` ← `0x2596DC`) and reaches the level loader's wait
+  (`0x3794B0`, which loops while bit 0 of `0x755DB8` is set, running `0x378D08` each pass). After the upload the game
+  calls its VU0 microprogram with `vcallms` at 16 sites (`0x0`, `0x8`, `0x38`, `0x60`...; the runtime's VU0
+  interpreter runs them synchronously) and polls `VPU_STAT` (`cfc2 $vi29`) at four.
+- **Then the sync path spins on VU0.** The next stop is `0x24E910` (called from `0x27D6D0`, which sends one GS
+  register through VIF1 synchronously, here `TEST_1 = 0x30000` and `ALPHA_1 = 0x44` from `0x22E6B8`, the GS setup of
+  the fight): it waits for VIF1 idle (`VIF1_STAT & 0x1F000003`), then for VU0 idle with **`bc2t .`** (`0x24EA10`,
+  the only COP2 branch in the game), then for the GIF (`GIF_STAT & 0xC00`). The recompiler translated `bc2t`/`bc2f`
+  as a test of bit 0 of the VU0 **STATUS** register (the Z flag of the last VU0 result) instead of the COP2 condition,
+  which is VU0 busy (`VPU_STAT` bit 0, as the runtime's own EE reference `eeref.cpp` says); any zero result left the
+  loop spinning forever. Fix: `patches/ps2recomp-bc2-vpu-stat.patch` (`control_flow_emitter.cpp` tests
+  `ctx->vu0_vpu_stat`; recompiler test "COP2 branches test VU0 busy, not the STATUS flags"). It changes the generated
+  code, so it needs a full `2_build.cmd`. **Verified in the game:** the loader goes on: with `PS2X_TRACE_RPC=80000701`
+  the EE uploads the level's sound banks through libsdr (58 `rSdVoiceTrans` of `0x8000` bytes to SPU2 RAM `0xD0240`
+  onwards, each followed by `rSdVoiceTransStatus`), then the main thread stops running at `0x17C218` (ra `0x30FD48`,
+  callers `0x2F4534` ← `0x1D3538` ← `0x1D5264` ← `0x379FB8` ← `0x37A16C`), the scheduler shows no running thread
+  and the GS counters stay still: the next wait, not yet analysed. The picture is still the stretched menu frame.
+- **IOP clock.** `MKSM_IOP_DRIFT=1` shows the IOP granted and advancing 184.32 M cycles per 5.00 s of wall time
+  (36.864 MHz exactly), so the slowed-down select sound is not a slow IOP clock. SNDFI's tick is a 200 Hz hardware
+  timer (`AllocHardTimer(SYSCLOCK, 32 bits, prescale 256)`, compare 720, handler `+0xA3F4` that wakes the tick thread
+  and skips the tick if the previous one was not consumed); whether ticks are lost to scheduling, or the pitch is
+  wrong, is the next thing to measure (`MKSM_SND_CALLLOG=1` logs the pitch and volume writes).
+- Seen by the user during the scripted run: the menu select sound plays but sounds slowed down or wrong, the text
+  flickers, and the music crackles. The sound engine's pitch model is the SPU2's (4.12, `0x1000` = 48 kHz), so a wrong
+  select sound most likely plays data that is not its sample: SNDF's bank upload is skipped (the capacity checks of the
+  evening entry of October 28), and its voices point at whatever is in sound RAM, such as the ADX stream buffers.
 
 ## Work folders
 
@@ -296,11 +360,12 @@ Any other repository that is needed must also be cloned inside `D:\Projects\Reco
 | `MKSM_ASPECT=16:9` | Show the picture at 16:9 instead of the game's 4:3 |
 | `MKSM_DEINTERLACE=0` | Show the fields of field rendering one after the other instead of blended (the picture then shakes a line every frame) |
 | `MKSM_IOP_MODULOS` | Folder of dumped IRX modules for the native IOP build |
+| `MKSM_HOST_SHOT=<n>[,<n>...]` | Save the window at those host frames (about 60 per second) as `host_shot_<n>.png` next to the executable; with `MKSM_PAD_SCRIPT`, one capture per screen of a scripted run |
 
 ## Next steps
 
-1. Audio: the crackle (ADMA read-ahead) and the missing SNDF sound effects (the bank upload from the EE).
-2. Gameplay: get past the wait after difficulty select.
+1. Gameplay: verify the D_STAT fix in the game and follow the level load (VU0 microprograms, the first 3D frame).
+2. Audio: the SNDF bank upload (the capacity checks), the crackle (ADMA read-ahead).
 3. Translate the Spanish runtime messages (`[SPU2] salida de audio ...`, `[stack] pilas ...`) and comments.
 4. Movies: IPU emulation or a native Sofdec player (SFD: MPEG-2 video and ADX audio).
 5. Make the VBlank rate configurable (PAL 50 Hz).

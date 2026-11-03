@@ -1,0 +1,111 @@
+diff --git a/ps2xRuntime/include/runtime/ps2_memory.h b/ps2xRuntime/include/runtime/ps2_memory.h
+index fe48a99..a593e57 100644
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -521,6 +521,10 @@ public:
+ 
+     std::mutex m_completedDmacMutex;
+     std::vector<uint32_t> m_completedDmacCauses;
++    // MKSM-Port: D_STAT. A channel's interrupt status bit (CIS0-9) is set when its transfer completes and cleared by a
++    // write of 1; the mask bits (CIM0-9, SIM, MEIM) toggle on a write of 1, as on the DMAC. Shaolin Monks uploads its
++    // VU0 microprogram with its own store to D0_CHCR and spins until CIS0 is set.
++    std::atomic<uint32_t> m_dmaStat{0};
+ 
+     struct CodeRegion
+     {
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index 681abe2..7c5ac42 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -324,6 +324,7 @@ bool PS2Memory::initialize(size_t ramSize)
+         std::lock_guard<std::mutex> lock(m_completedDmacMutex);
+         m_completedDmacCauses.clear();
+     }
++    m_dmaStat.store(0u, std::memory_order_relaxed); // MKSM-Port
+     m_codeRegions.clear();
+     m_path3Masked = false;
+     m_path3MaskedFifo.clear();
+@@ -1436,6 +1437,8 @@ uint32_t PS2Memory::eeDmaLoad(uint32_t address) noexcept
+ {
+     if ((address & 0x1FFFFFFFu) == 0x1000F520u)
+         return 0u; // D_ENABLER: DMA is never suspended (see eeDmaStore)
++    if ((address & 0x1FFFFFFFu) == 0x1000E010u)
++        return m_dmaStat.load(std::memory_order_acquire); // MKSM-Port: D_STAT (see eeDmaStore)
+     const auto it = m_ioRegisters.find(address & 0x1FFFFFFFu);
+     return it != m_ioRegisters.end() ? it->second : 0u;
+ }
+@@ -1443,10 +1446,21 @@ uint32_t PS2Memory::eeDmaLoad(uint32_t address) noexcept
+ bool PS2Memory::eeDmaStore(uint32_t address, uint32_t value)
+ {
+     address &= 0x1FFFFFFFu;
+-    // D_STAT: the game clears its DMA-end bits after its scratchpad copies; no DMA status is kept, transfers are
+-    // complete when the store that starts them returns (docs/native-port.md, step 2).
++    // D_STAT: a write of 1 clears the status bits (CIS0-9, SIS, MEIS, BEIS: bits 0-9 and 13-15) and toggles the mask
++    // bits (CIM0-9, SIM, MEIM: bits 16-25, 29, 30), as on the DMAC. The status bits are set by queueCompletedDmacCause
++    // when a transfer completes, which is still when the store that starts it returns (docs/native-port.md, step 2).
++    // MKSM-Port: before, every D_STAT store was dropped and it read 0: Shaolin Monks clears CIS0, starts its VU0
++    // microprogram upload on channel 0 with its own CHCR store (0x40E4D8) and spins until CIS0 reads 1, so the
++    // game never got past the difficulty select. God of War only cleared the bits after its scratchpad copies.
+     if (address == 0x1000E010u)
++    {
++        const uint32_t clear = value & 0x0000E3FFu, toggle = value & 0x63FF0000u;
++        uint32_t stat = m_dmaStat.load(std::memory_order_relaxed);
++        while (!m_dmaStat.compare_exchange_weak(stat, (stat & ~clear) ^ toggle, std::memory_order_acq_rel))
++        {
++        }
+         return true;
++    }
+     // D_ENABLEW: libdma and the movie player suspend DMA (CPND) around channel setup. No transfer runs in the
+     // background, so there is nothing to suspend: the store is dropped and D_ENABLER reads 0 (never suspended).
+     if (address == 0x1000F590u || address == 0x1000F520u)
+@@ -2182,6 +2196,8 @@ bool PS2Memory::needsGsWorkerSync(uint32_t address) const
+ 
+ void PS2Memory::queueCompletedDmacCause(uint32_t cause)
+ {
++    if (cause < 10u)
++        m_dmaStat.fetch_or(1u << cause, std::memory_order_acq_rel); // MKSM-Port: D_STAT CISn
+     std::lock_guard<std::mutex> lock(m_completedDmacMutex);
+     m_completedDmacCauses.push_back(cause);
+ }
+diff --git a/ps2xTest/src/ps2_memory_tests.cpp b/ps2xTest/src/ps2_memory_tests.cpp
+index a4d5dd9..8d566fd 100644
+--- a/ps2xTest/src/ps2_memory_tests.cpp
++++ b/ps2xTest/src/ps2_memory_tests.cpp
+@@ -357,6 +357,37 @@ void register_ps2_memory_tests()
+             t.Equals(words[3], 0x44556677u, "VU0 data lane 3 should match");
+         });
+ 
++        // MKSM-Port: D_STAT keeps the DMAC's channel status. Shaolin Monks uploads its VU0 microprogram with its own
++        // stores (0x40E4D8: D_STAT=1, D_PCR=1, D0_MADR, D0_QWC, D0_CHCR=0x100) and spins until CIS0 reads 1; the
++        // runtime dropped every D_STAT store and read 0 forever, so the game never got past the difficulty select.
++        tc.Run("D_STAT reports a finished VIF0 transfer and clears on write-one", [](TestCase &t)
++        {
++            PS2Memory mem;
++            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
++            uint8_t *rdram = mem.getRDRAM();
++            // Two quadwords for VIF0: NOP, MPG of 2 instructions at micro address 0x10, the instructions, padding.
++            const uint32_t packet[] = {0u, makeVifCmd(0x4Au, 2u, 0x10u), 0x11111111u, 0x22222222u,
++                                       0x33333333u, 0x44444444u, 0u, 0u};
++            std::memcpy(rdram + 0x5000u, packet, sizeof(packet));
++            t.Equals(mem.eeDmaLoad(0x1000E010u) & 1u, 0u, "CIS0 should start clear");
++            mem.eeDmaStore(0x1000E010u, 1u);      // clear CIS0
++            mem.eeDmaStore(0x1000E020u, 1u);      // D_PCR
++            mem.eeDmaStore(0x10008010u, 0x5000u); // D0_MADR
++            mem.eeDmaStore(0x10008020u, 2u);      // D0_QWC
++            mem.eeDmaStore(0x10008000u, 0x100u);  // D0_CHCR: STR, normal mode
++            t.Equals(mem.eeDmaLoad(0x1000E010u) & 1u, 1u, "CIS0 should be set once the VIF0 transfer is complete");
++            uint32_t word = 0u;
++            std::memcpy(&word, mem.getVU0Code() + 0x10u * 8u, sizeof(word));
++            t.Equals(word, 0x11111111u, "the MPG should have landed in VU0 micro memory");
++            mem.eeDmaStore(0x1000E010u, 1u);
++            t.Equals(mem.eeDmaLoad(0x1000E010u) & 1u, 0u, "writing 1 to CIS0 should clear it");
++            mem.eeDmaStore(0x1000E010u, 0x10000u);
++            t.Equals(mem.eeDmaLoad(0x1000E010u) & 0x10000u, 0x10000u, "writing 1 to CIM0 should toggle it on");
++            mem.eeDmaStore(0x1000E010u, 0x10000u);
++            t.Equals(mem.eeDmaLoad(0x1000E010u) & 0x10000u, 0u, "writing 1 to CIM0 again should toggle it off");
++            t.Equals(mem.consumeCompletedDmacCauses().size(), size_t{1}, "the DMA-end handler of channel 0 should be queued once");
++        });
++
+         tc.Run("fast memory helpers wrap safely at RAM boundary", [](TestCase &t)
+         {
+             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);

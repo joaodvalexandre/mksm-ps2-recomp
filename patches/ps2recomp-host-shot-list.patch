@@ -1,0 +1,116 @@
+diff --git a/ps2xRuntime/include/runtime/gs/gs_host_shot.h b/ps2xRuntime/include/runtime/gs/gs_host_shot.h
+new file mode 100644
+index 0000000..00632a5
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/gs/gs_host_shot.h
+@@ -0,0 +1,27 @@
++// MKSM-Port: the host frames at which the window's back buffer is saved (MKSM_HOST_SHOT), to check presentation
++// without a desktop grab.
++#pragma once
++
++#include <algorithm>
++#include <cstdlib>
++#include <vector>
++
++// MKSM_HOST_SHOT as "<n>[,<n>...]": the host frame numbers to save, sorted and without repeats; empty when unset.
++// Parsing stops at the first item that is not a number.
++inline std::vector<long> gsHostShotFrames(const char *setting)
++{
++    std::vector<long> frames;
++    for (const char *p = setting; p != nullptr && *p != '\0';)
++    {
++        char *end = nullptr;
++        const long frame = std::strtol(p, &end, 10);
++        if (end == p)
++            break;
++        if (frame >= 0)
++            frames.push_back(frame);
++        p = (*end == ',') ? end + 1 : end;
++    }
++    std::sort(frames.begin(), frames.end());
++    frames.erase(std::unique(frames.begin(), frames.end()), frames.end());
++    return frames;
++}
+diff --git a/ps2xRuntime/src/lib/gs/gs_host_present.cpp b/ps2xRuntime/src/lib/gs/gs_host_present.cpp
+index c24c1f2..991b2bd 100644
+--- a/ps2xRuntime/src/lib/gs/gs_host_present.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_host_present.cpp
+@@ -2,6 +2,7 @@
+ #include <atomic>
+ #include "runtime/gs/gs_host_present.h"
+ #include "runtime/gs/gs_host_aspect.h"
++#include "runtime/gs/gs_host_shot.h" // MKSM-Port
+ #include "rlgl.h"
+ #include "runtime/gs/gs_frontend.h"
+ #include "runtime/ps2_perf.h"
+@@ -12,6 +13,7 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <iostream>
++#include <vector>
+ 
+ // MKSM-Port: imágenes nuevas presentadas en la ventana (medidor de FPS de ps2_runtime.cpp).
+ std::atomic<uint64_t> g_mksmPresentedFrames{0};
+@@ -343,18 +345,25 @@ GSHostPresentation::View GSHostPresentation::renderFrame(GS &gs, uint64_t vsyncT
+         EndShaderMode();
+     if (overlay)
+         overlay();
+-    // MKSM-Port: MKSM_HOST_SHOT=<n>: at host frame n write the window's back buffer (what is about to be shown) to
+-    // host_shot.png in the working directory, plus the frame / window sizes, to check presentation without a desktop grab.
+-    static const long hostShotAt = [] { const char *v = std::getenv("MKSM_HOST_SHOT"); return v ? std::atol(v) : -1L; }();
++    // MKSM-Port: MKSM_HOST_SHOT=<n>[,<n>...]: at each listed host frame write the window's back buffer (what is about to
++    // be shown) to host_shot_<n>.png in the working directory, plus the frame / window sizes, to check presentation
++    // without a desktop grab; with MKSM_PAD_SCRIPT a scripted run saves every screen it goes through.
++    static const std::vector<long> hostShotAt = gsHostShotFrames(std::getenv("MKSM_HOST_SHOT"));
+     static long hostFrame = 0;
+-    if (hostShotAt >= 0 && hostFrame++ == hostShotAt)
++    static size_t hostShotNext = 0;
++    const long presentedFrame = hostFrame++;
++    if (hostShotNext < hostShotAt.size() && presentedFrame >= hostShotAt[hostShotNext])
+     {
++        ++hostShotNext;
+         rlDrawRenderBatchActive();
+         Image screen = LoadImageFromScreen();
+-        ExportImage(screen, "host_shot.png");
++        char shotName[48];
++        std::snprintf(shotName, sizeof(shotName), "host_shot_%ld.png", presentedFrame);
++        ExportImage(screen, shotName);
+         UnloadImage(screen);
+-        std::fprintf(stderr, "[gs-present] host_shot frame=%ux%u tex=%u window=%dx%d shared=%d scaler=%d\n", selected.width, selected.height,
+-                     selected.texture.id, GetScreenWidth(), GetScreenHeight(), selected.shared ? 1 : 0, scaler ? 1 : 0);
++        std::fprintf(stderr, "[gs-present] %s frame=%ux%u tex=%u window=%dx%d shared=%d scaler=%d\n", shotName, selected.width,
++                     selected.height, selected.texture.id, GetScreenWidth(), GetScreenHeight(), selected.shared ? 1 : 0,
++                     scaler ? 1 : 0);
+     }
+     {
+         ps2_perf::Scope perf(ps2_perf::Bucket::HostWait);
+diff --git a/ps2xTest/src/ps2_gs_tests.cpp b/ps2xTest/src/ps2_gs_tests.cpp
+index c0926b6..41e97e8 100644
+--- a/ps2xTest/src/ps2_gs_tests.cpp
++++ b/ps2xTest/src/ps2_gs_tests.cpp
+@@ -6,6 +6,7 @@
+ #include "ps2_syscalls.h"
+ #include "runtime/gs/gs_frontend.h"
+ #include "runtime/gs/gs_host_aspect.h"
++#include "runtime/gs/gs_host_shot.h" // MKSM-Port
+ #include "runtime/gs/gs_hw_backend.h"
+ #include "runtime/gs/gs_stage.h"
+ #include "runtime/ee_scheduler.h"
+@@ -839,6 +840,17 @@ void register_ps2_gs_tests()
+             t.IsTrue(std::fabs(gsHostDisplayAspect("wide") - 4.0f / 3.0f) < 1e-6f, "a setting that is not a ratio is 4:3");
+         });
+ 
++        // MKSM-Port: MKSM_HOST_SHOT takes a list of host frames (one window capture each), so that a scripted run
++        // (MKSM_PAD_SCRIPT) saves every screen it goes through; before, one frame per run.
++        tc.Run("MKSM_HOST_SHOT lists the host frames to capture", [](TestCase &t)
++        {
++            t.IsTrue(gsHostShotFrames(nullptr).empty(), "unset: nothing is captured");
++            t.IsTrue(gsHostShotFrames("1200") == std::vector<long>{1200L}, "a single frame, as before");
++            t.IsTrue(gsHostShotFrames("1800,600,1200,600") == (std::vector<long>{600L, 1200L, 1800L}),
++                     "a list is sorted and deduplicated");
++            t.IsTrue(gsHostShotFrames("600,x,900") == std::vector<long>{600L}, "parsing stops at the first non-number");
++        });
++
+         // MKSM-Port: the GS clamps a vertex Z to its Z buffer format. Shaolin Monks draws its menu layers with Z
+         // 0x199999A0, 0x40000000 and 0x7FFFFFFF over a Z24 buffer (GEQUAL, never cleared): clamped, every layer passes;
+         // with only the low 24 bits kept they became 0.6, 0 and 1 and the old screens showed through the menu.

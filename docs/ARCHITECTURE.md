@@ -65,9 +65,11 @@ calls) and the jumps into the middle of other functions.
 ## Overrides (`src/mksm_overrides.cpp`)
 
 They are registered with `PS2_REGISTER_GAME_OVERRIDE` for a given ELF name and entry address: `SLES_535.24`,
-entry `0x0011C038`. For now the file only does game-independent setup (disc files, the runtime's private heap below
-the ELF, the optional `MKSM_THREAD_WATCH` thread dump); game functions are replaced as the first runs show which
-ones need it.
+entry `0x0011C038`. The file does the game-independent setup (disc files, the runtime's private heap below the ELF,
+the diagnostics behind `MKSM_THREAD_WATCH`, `MKSM_CD_READ_TRACE` and `MKSM_PAD_SCRIPT`) and replaces the game
+functions that the runs showed to need it: the movie player (skipped until the IPU exists), the five stubbed libpkt
+functions (the game's own code), `sceCdLayerSearchFile` bound to the native `sceCdSearchFile`, and the widescreen
+scale. `docs/MKSM.md` records why each one exists.
 
 ## Runtime base (Waffle565)
 

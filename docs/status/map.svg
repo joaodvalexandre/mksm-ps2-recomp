@@ -687,12 +687,18 @@
 <rect class="pending" x="394.2" y="324.4" width="10.3" height="10.5"><title>libgcc · sub_00206218 (16 B)</title></rect>
 <rect class="pending" x="405.5" y="324.4" width="10.3" height="10.5"><title>libgcc · sub_00206228 (80 B)</title></rect>
 <rect class="pending" x="416.8" y="324.4" width="10.3" height="10.5"><title>libgcc · sub_00206278 (48 B)</title></rect>
-<rect class="pending" x="394.2" y="337.9" width="12.2" height="10.2"><title>libsdr · sub_00382C70 (176 B)</title></rect>
-<rect class="pending" x="407.4" y="337.9" width="12.2" height="10.2"><title>libsdr · sub_00382D20 (144 B)</title></rect>
-<rect class="pending" x="394.2" y="349.1" width="12.2" height="10.2"><title>libsdr · sub_00382DB0 (896 B)</title></rect>
-<rect class="pending" x="407.4" y="349.1" width="12.2" height="10.2"><title>libsdr · sub_00383130 (16 B)</title></rect>
-<rect class="pending" x="394.2" y="360.3" width="12.2" height="10.2"><title>libsdr · sub_00383140 (160 B)</title></rect>
-<rect class="pending" x="407.4" y="360.3" width="12.2" height="10.2"><title>libsdr · sub_003831E0 (16 B)</title></rect>
+<rect class="partial" x="394.2" y="337.9" width="12.2" height="10.2"><title>libsdr · sub_00382C70 (176 B)</title></rect>
+<rect x="394.2" y="337.9" width="12.2" height="10.2" fill="url(#hatch)" pointer-events="none"/>
+<rect class="partial" x="407.4" y="337.9" width="12.2" height="10.2"><title>libsdr · sub_00382D20 (144 B)</title></rect>
+<rect x="407.4" y="337.9" width="12.2" height="10.2" fill="url(#hatch)" pointer-events="none"/>
+<rect class="partial" x="394.2" y="349.1" width="12.2" height="10.2"><title>libsdr · sub_00382DB0 (896 B)</title></rect>
+<rect x="394.2" y="349.1" width="12.2" height="10.2" fill="url(#hatch)" pointer-events="none"/>
+<rect class="partial" x="407.4" y="349.1" width="12.2" height="10.2"><title>libsdr · sub_00383130 (16 B)</title></rect>
+<rect x="407.4" y="349.1" width="12.2" height="10.2" fill="url(#hatch)" pointer-events="none"/>
+<rect class="partial" x="394.2" y="360.3" width="12.2" height="10.2"><title>libsdr · sub_00383140 (160 B)</title></rect>
+<rect x="394.2" y="360.3" width="12.2" height="10.2" fill="url(#hatch)" pointer-events="none"/>
+<rect class="partial" x="407.4" y="360.3" width="12.2" height="10.2"><title>libsdr · sub_003831E0 (16 B)</title></rect>
+<rect x="407.4" y="360.3" width="12.2" height="10.2" fill="url(#hatch)" pointer-events="none"/>
 <rect class="pending" x="422.6" y="337.9" width="7.5" height="15.8"><title>libc · sub_00470DE8 (328 B)</title></rect>
 <rect class="pending" x="431" y="337.9" width="7.5" height="15.8"><title>libc · sub_00470F30 (336 B)</title></rect>
 <rect class="pending" x="422.6" y="354.7" width="7.5" height="15.8"><title>libc · sub_00471080 (1264 B)</title></rect>
@@ -745,7 +751,7 @@
 <rect class="partial" x="619.3" y="199.5" width="86.5" height="85"><title>Kernel: threads, semaphores and alarms</title></rect>
 <rect x="619.3" y="199.5" width="86.5" height="85" fill="url(#hatch)" pointer-events="none"/>
 <text class="badge-v-dark" x="662.5" y="245.8" font-size="11" text-anchor="middle" pointer-events="none">Kernel</text>
-<rect class="partial" x="706.8" y="199.5" width="57.4" height="85"><title>DMA controller — Native DMA service with the scratchpad (SPR) address bit; no controller model</title></rect>
+<rect class="partial" x="706.8" y="199.5" width="57.4" height="85"><title>DMA controller — Native DMA service with the scratchpad (SPR) address bit and the D_STAT channel status the game polls; no controller model</title></rect>
 <rect x="706.8" y="199.5" width="57.4" height="85" fill="url(#hatch)" pointer-events="none"/>
 <text class="badge-v-dark" x="735.5" y="245.8" font-size="11" text-anchor="middle" pointer-events="none">DMAC</text>
 <rect class="pending" x="619.3" y="285.5" width="57.4" height="85"><title>FPU (COP1) and MMI instructions</title></rect>

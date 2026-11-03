@@ -16,7 +16,7 @@ if (Test-Path -LiteralPath $build) {
 if (-not $exe) { throw 'ps2EntryRunner.exe does not exist. Run scripts\2_build.cmd first.' }
 
 # The captures are written next to the executable; those of an earlier run would get mixed with this one's.
-$captures = @('gs_hw_*.ppm', 'gs_hw_*.pgm', 'host_shot.png')
+$captures = @('gs_hw_*.ppm', 'gs_hw_*.pgm', 'host_shot_*.png')
 foreach ($pattern in $captures) {
     Get-ChildItem -LiteralPath $exe.DirectoryName -Filter $pattern -File | Remove-Item -Force
 }
@@ -24,7 +24,6 @@ foreach ($pattern in $captures) {
 $diagnostics = [ordered]@{
     MKSM_THREAD_WATCH      = '5'     # EE threads (status, wait, pc, callers on the stack) every 5 s
     MKSM_CD_READ_TRACE     = '400'   # the first 400 sceCdRead calls (sector, count, destination, non-zero bytes)
-    MKSM_LOADIMAGE_TRACE   = '400'   # the first 400 sceGsExecLoadImage uploads (destination, size, source, non-zero bytes)
     MKSM_GS_HW_XFERRANGE   = '0-4000' # every upload that reaches the GPU backend (destination, format, size)
     MKSM_GS_HW_STATS       = '1'     # draws, batches, textures and skipped primitives every 5 s
     MKSM_GS_HW_RTLOG       = '1'     # render targets as they are created
@@ -35,7 +34,7 @@ $diagnostics = [ordered]@{
     MKSM_GS_HW_RTDUMPRANGE = '1-15'
     MKSM_GS_HW_TEXDUMP     = '16'    # the first 16 textures the GPU backend decodes (RGB)
     MKSM_GS_HW_DISPDUMP    = '900'   # the displayed buffer 900 frames after its size last changed
-    MKSM_HOST_SHOT         = '1200'  # the window at host frame 1200 (~20 s)
+    MKSM_HOST_SHOT         = '600,1200,1700' # the window at host frames 600, 1200 and 1700 (~10, 20 and 28 s)
 }
 foreach ($name in $diagnostics.Keys) {
     if (-not [Environment]::GetEnvironmentVariable($name)) { Set-Item -Path ('env:' + $name) -Value $diagnostics[$name] }

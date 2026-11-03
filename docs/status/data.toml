@@ -61,8 +61,8 @@ skip = true
 [[libraries.group]]
 name = "libsdr"
 start = 0x00382C70
-status = "pending"
-note = "sceSdRemote* (SDRDRV.IRX) stubbed to runtime handlers; CRI ADX audio runs over LIBSD"
+status = "partial"
+note = "sceSdRemoteInit/sceSdTransToIOP/sceSdRemote recompiled, not stubbed: the EE uploads the sound-effect samples through SDRDRV.IRX (RPC 0x80000701) to the native libsd; the stubs faked the transfers and the effects were silent"
 
 [[libraries.group]]
 name = "libgraph"
@@ -207,7 +207,7 @@ name = "EE"
   name = "DMA controller"
   status = "partial"
   weight = 2
-  note = "Native DMA service with the scratchpad (SPR) address bit; no controller model"
+  note = "Native DMA service with the scratchpad (SPR) address bit and the D_STAT channel status the game polls; no controller model"
 
   [[hardware.group.component]]
   short = "Timers"
