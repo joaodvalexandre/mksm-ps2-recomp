@@ -11,7 +11,7 @@ pointer in data (a C++ vtable, a callback table), and does not register jumps in
   3. adds there too every code address stored in data that is not a function start and follows a return
      (jr $ra and its delay slot), the shape of a function only called through a pointer.
 
-Usage:  python tools/funcmap_fixup.py game/SLES_535.24 [--check]
+Usage:  python tools/funcmap_fixup.py game/SLUS_210.87 [--check]
         --check only reports, and fails if something is missing.
 """
 from __future__ import annotations

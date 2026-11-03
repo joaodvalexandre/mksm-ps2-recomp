@@ -115,7 +115,7 @@ def main() -> int:
         if name in LIBM_DOUBLE:
             errors.append(f"stubs: {name}@0x{address:08X} is the software double libm; "
                           "the runtime's float handler does not respect its ABI")
-        if name in LIBSDR_EE or address in (0x00382C70, 0x00382D20, 0x00382DB0):
+        if name in LIBSDR_EE:
             errors.append(f"stubs: {name}@0x{address:08X} is the EE's libsdr, which must be recompiled: "
                           "the runtime's handlers fake the SPU2 sample transfers (see docs/MKSM.md, 2026-11-03)")
 

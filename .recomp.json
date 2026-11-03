@@ -5,8 +5,8 @@
   "system": "PS2",
   "type": "recomp",
   "original": {
-    "region": "Europe",
-    "serial": "SLES-53524"
+    "region": "USA",
+    "serial": "SLUS-21087"
   },
   "project": "Mortal Kombat: Shaolin Monks — PS2 Static Recompilation",
   "status": "in-progress",
@@ -35,6 +35,6 @@
     "Sofdec SFD movies (IPU)",
     "PAL 50 Hz timing"
   ],
-  "tags": ["PAL", "widescreen"],
+  "tags": ["NTSC-U", "widescreen"],
   "notes": "Boots to the main menu: menus render cleanly, the controller works and the memory card is detected, menu music and announcer play (with crackle). 16:9 option. Character and difficulty select work; loading into a fight does not finish yet. Not playable."
 }

@@ -24,11 +24,11 @@ function Get-MksmWorkDir {
 
 # Game executable. Search order:
 #   1. the MKSM_ELF environment variable
-#   2. game\SLES_535.24 (Mortal Kombat: Shaolin Monks, PAL) inside the repository
+#   2. game\SLUS_210.87 (Mortal Kombat: Shaolin Monks, NTSC-U) inside the repository
 function Get-MksmElf {
     $candidates = @()
     if ($env:MKSM_ELF) { $candidates += $env:MKSM_ELF }
-    $candidates += (Join-Path $RepoRoot 'game\SLES_535.24')
+    $candidates += (Join-Path $RepoRoot 'game\SLUS_210.87')
     foreach ($c in $candidates) {
         if (Test-Path -LiteralPath $c) { return (Resolve-Path -LiteralPath $c).Path }
     }

@@ -5,168 +5,168 @@
 # Statuses: "ok" (works), "partial" (works with flaws or unverified), "pending" (does not work / not emulated).
 
 # ---------------------------------------------------------------------------------------------------------
-# Panel 1: static Sony SDK libraries linked into the game ELF (SLES_535.24).
+# Panel 1: static Sony SDK libraries linked into the game ELF (SLUS_210.87).
 # Each function of config/funcmap.csv between `from` and `to` is a cell. A library starts at `start` and runs
 # until the start of the next one. The starts come from the SDK names the analyzer found (config/funcmap.csv).
 # This ELF links the libraries in several runs with game code in between: those ranges are `skip = true`.
 # Several entries with the same `name` are merged.
 # ---------------------------------------------------------------------------------------------------------
 [libraries]
-from = 0x00201380
-to = 0x00489B80
+from = 0x00201108
+to = 0x004898C0
 
 [[libraries.group]]
 name = "C++ EH"
-start = 0x00201380
+start = 0x00201108
 status = "pending"
 
 [[libraries.group]]
 name = "libgcc"
-start = 0x00206198
+start = 0x00205F20
 status = "pending"
 
 [[libraries.group]]
 name = "libgraph"
-start = 0x002062A8
+start = 0x00206030
 status = "pending"
 note = "sceGs* stubbed to runtime handlers"
 
 [[libraries.group]]
 name = "libpad"
-start = 0x002064E0
+start = 0x00206268
 status = "pending"
 note = "Classic libpad (PADMAN/SIO2MAN); scePad* stubbed to the runtime's EE-side handlers"
 
 [[libraries.group]]
 name = "libm"
-start = 0x002076C8
+start = 0x00207450
 status = "pending"
 note = "Single precision; the software double functions (floor, sqrt, log) are recompiled, not stubbed"
 
 [[libraries.group]]
 name = "game code"
-start = 0x0020A3D8
+start = 0x0020A160
 skip = true
 
 [[libraries.group]]
 name = "libvu0"
-start = 0x00214098
+start = 0x00213E08
 status = "pending"
 
 [[libraries.group]]
 name = "game code"
-start = 0x00214200
+start = 0x00213F70
 skip = true
 
 [[libraries.group]]
 name = "libsdr"
-start = 0x00382C70
+start = 0x003829C0
 status = "partial"
 note = "sceSdRemoteInit/sceSdTransToIOP/sceSdRemote recompiled, not stubbed: the EE uploads the sound-effect samples through SDRDRV.IRX (RPC 0x80000701) to the native libsd; the stubs faked the transfers and the effects were silent"
 
 [[libraries.group]]
 name = "libgraph"
-start = 0x003831F0
+start = 0x00382F40
 status = "pending"
 
 [[libraries.group]]
 name = "libdma"
-start = 0x00384408
+start = 0x00384158
 status = "pending"
 
 [[libraries.group]]
 name = "libdev"
-start = 0x00384A30
+start = 0x00384780
 status = "pending"
 
 [[libraries.group]]
 name = "libpkt"
-start = 0x00384CC8
+start = 0x00384A18
 status = "pending"
 
 [[libraries.group]]
 name = "libvu0"
-start = 0x00385660
+start = 0x003853B0
 status = "pending"
 
 [[libraries.group]]
 name = "libcdvd"
-start = 0x00385C80
+start = 0x003859D0
 status = "pending"
 note = "Reads the disc files extracted next to the ELF (.disc_layout); the ISO only with MKSM_ISO"
 
 [[libraries.group]]
 name = "libmc"
-start = 0x00386B88
+start = 0x003868D8
 status = "pending"
 note = "Classic libmc (MCMAN/MCSERV); sceMc* stubbed to the runtime's EE-side handlers"
 
 [[libraries.group]]
 name = "game code"
-start = 0x00387998
+start = 0x003876E8
 skip = true
 
 [[libraries.group]]
 name = "libm"
-start = 0x0040AB10
+start = 0x0040A860
 status = "pending"
 
 [[libraries.group]]
 name = "game code"
-start = 0x0040CBB8
+start = 0x0040C908
 skip = true
 
 [[libraries.group]]
 name = "libcdvd"
-start = 0x00467BF0
+start = 0x00467940
 status = "pending"
 
 [[libraries.group]]
 name = "libmpeg"
-start = 0x00467F28
+start = 0x00467C78
 status = "pending"
 note = "Sofdec .SFD movies (MPEG-2 through the IPU); sceMpeg* stubbed to the runtime's native decoder"
 
 [[libraries.group]]
 name = "libipu"
-start = 0x0046F4C8
+start = 0x0046F218
 status = "pending"
 
 [[libraries.group]]
 name = "libc"
-start = 0x00470DE8
+start = 0x00470B38
 status = "pending"
 
 [[libraries.group]]
 name = "game code"
-start = 0x004716A0
+start = 0x004713F0
 skip = true
 
 [[libraries.group]]
 name = "libkernel"
-start = 0x004805B0
+start = 0x004802F0
 status = "pending"
 
 [[libraries.group]]
 name = "sif"
-start = 0x00482A28
+start = 0x00482768
 status = "pending"
 note = "SIF commands and RPC"
 
 [[libraries.group]]
 name = "fileio"
-start = 0x00483BD8
+start = 0x00483918
 status = "pending"
 
 [[libraries.group]]
 name = "loadfile"
-start = 0x00485708
+start = 0x00485448
 status = "pending"
 note = "IOP heap and module loading"
 
 [[libraries.group]]
 name = "libkernel"
-start = 0x00486278
+start = 0x00485FB8
 status = "pending"
 
 # ---------------------------------------------------------------------------------------------------------
@@ -181,7 +181,7 @@ name = "EE"
   name = "R5900 CPU (recompiled to C++)"
   status = "partial"
   weight = 5
-  note = "13,630 functions recompiled; boots to the main menu and the character select"
+  note = "13,688 functions recompiled; the PAL build booted to the main menu and the character select, NTSC pending its first run"
 
   [[hardware.group.component]]
   short = "Kernel"
@@ -200,7 +200,7 @@ name = "EE"
   name = "INTC: VSync and GS interrupt"
   status = "pending"
   weight = 2
-  note = "The runtime's VBlank is fixed at NTSC 59.94 Hz; this game is PAL (50 Hz)"
+  note = "The runtime's VBlank is fixed at NTSC 59.94 Hz, the rate of this release"
 
   [[hardware.group.component]]
   short = "DMAC"

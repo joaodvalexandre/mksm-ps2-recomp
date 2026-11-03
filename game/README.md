@@ -1,12 +1,12 @@
 # game/
 
-Put the files of **your own copy** of *Mortal Kombat: Shaolin Monks* (PAL, `SLES-53524`) here. The ISO can sit
+Put the files of **your own copy** of *Mortal Kombat: Shaolin Monks* (NTSC-U, `SLUS-21087`) here. The ISO can sit
 in this folder too.
 
 To recompile, only the executable and the IOP modules are needed:
 
 ```
-game/SLES_535.24
+game/SLUS_210.87
 game/SYSTEM.CNF
 game/IOP/*.IRX
 game/IOP/IOPRP300.IMG
@@ -15,7 +15,7 @@ game/IOP/IOPRP300.IMG
 To run, extract the whole disc with its layout (`GAMEDATA.WA*`, `FRONT/MOVIES/*.SFD` and the `.disc_layout` index):
 
 ```bat
-python tools\iso_extract.py "game\SLES_535.24.Mortal Kombat Shaolin Monks.iso" game --layout
+python tools\iso_extract.py "<your disc>.iso" game --layout
 ```
 
 `docs/MKSM.md` has the `--only` command for the minimal set.

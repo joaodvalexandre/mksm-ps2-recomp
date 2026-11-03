@@ -1,7 +1,8 @@
 # Mortal Kombat: Shaolin Monks — port log
 
-Research log of the port of *Mortal Kombat: Shaolin Monks* (MKSM, PAL `SLES-53524`). Current goal: **get the game
-to boot and run smoothly on Windows**; everything else (improvements, higher frame rates, etc.) comes later.
+Research log of the port of *Mortal Kombat: Shaolin Monks* (MKSM, NTSC-U `SLUS-21087`; the port started on the PAL
+`SLES-53524` executable and switched on November 3, 2026, see that entry). Current goal: **get the game to boot and run
+smoothly on Windows**; everything else (improvements, higher frame rates, etc.) comes later.
 
 _Last updated: November 3, 2026_
 
@@ -237,7 +238,9 @@ causes, three fixes (each with a regression test that fails without it):
   wider than tall). `patches/ps2recomp-host-aspect.patch`: 4:3 by default, `MKSM_ASPECT=16:9` for a widescreen TV;
   `scripts/run.ps1` now opens a 720x540 window.
 
-`scripts\4_diagnose.cmd` runs the game for 30 s with the GS and DMA diagnostics on and moves everything to
+`scripts\5_scripted_run.cmd` runs the game with a pad script (`-Pad`, by default the sequence to the difficulty
+select), captures the window every three seconds (`-Shots` for other frames) and writes `logs\scripted-<tag>\`
+with the logs, the captures and a summary (presses, captures, last thread snapshot). `scripts\4_diagnose.cmd` runs the game for 30 s with the GS and DMA diagnostics on and moves everything to
 `logs\diag-<date>-<time>\`: `run.log`, `run_err.log`, PNG captures (display, render targets after each batch, host
 window) and a `summary.txt` with the last thread snapshot, GS counters, render targets and likely problems.
 
@@ -332,6 +335,52 @@ window) and a `summary.txt` with the last thread snapshot, GS counters, render t
   flickers, and the music crackles. The sound engine's pitch model is the SPU2's (4.12, `0x1000` = 48 kHz), so a wrong
   select sound most likely plays data that is not its sample: SNDF's bank upload is skipped (the capacity checks of the
   evening entry of October 28), and its voices point at whatever is in sound RAM, such as the ADX stream buffers.
+
+### 2026-11-03 (evening) — the NTSC-U executable replaces the PAL one
+
+Decision: the port targets the NTSC-U release **SLUS-21087** from now on; PAL support is dropped (git history keeps it).
+Everything found on PAL is engine-level and carries over; only the addresses change.
+
+- **Disc.** `S-MKSM.ISO` (3.49 GB, single layer, 68 files): `SYSTEM.CNF` boots `cdrom0:\SLUS_210.87;1`, `VER = 1.02`,
+  `VMODE = NTSC`. Same `GAMEDATA.WAD`-`.WAJ` volumes, `FILELIST.DIR`, `WADCRC.BIN`, `IOP\` (same nine modules) and
+  `FRONT\MOVIES` (with `BLITZ.SFD` and `GAUNTLET.SFD`, which the PAL disc lacked), plus `MODULES\` (the IRX again and
+  `MTAPMAN.IRX`), `JARVOS.ELF`, `CLASSIC\MK2.SR` and `MAT2.SR` (the classic MK II), and `SURREAL\ENGLISH\LEVELS_STRTH`
+  (one level as loose `.ADU/.CDU/.LDU/...` files, probably a development leftover). Extracted into `game\` with
+  `tools\iso_extract.py --layout`.
+- **Executable.** `SLUS_210.87`: entry **`0x0011C070`**, `.text` `0x00100000`-`0x0049A708`, `.vutext` `0x0049A710`,
+  `.data` `0x004A6180`, `.bss` `0x005B2080`-`0x00780898`, no symbols. The analyzer finds 13,685 functions (PAL: 13,627);
+  with `tools/funcmap_fixup.py` (3 gaps, 908 jump targets) the map has 13,688 and 1,228 entry points; 150 stubs after
+  removing the software double libm and the EE's libsdr, as on PAL.
+- **Addresses.** `tools/port_addresses.py` ports an address from one build to the other by fingerprinting its function
+  (instruction words with the J/JAL targets and the address immediates masked) and reading the data addresses the
+  matched function builds. The key PAL addresses of this log map to:
+
+  | What | PAL | NTSC-U |
+  |---|---|---|
+  | Entry | `0x11C038` | `0x11C070` |
+  | Boot function | `0x2131E8` | `0x212F70` |
+  | Movie player (skipped) | `0x270038` | `0x26FD80` |
+  | Frame loop / flip | `0x274898` / `0x275870` | `0x2745E0` / `0x2755B8` |
+  | libpkt: GifPkCloseGifTag, GifPkAddGsAD, Vif1PkOpenDirectCode, Vif1PkCloseGifTag, Vif1PkAddGsAD | `0x384F10`, `0x384FE0`, `0x385388`, `0x385428`, `0x385610` | `0x384C60`, `0x384D30`, `0x3850D8`, `0x385178`, `0x385360` |
+  | sceCdLayerSearchFile / sceCdRead / scePadRead | `0x385F90` / `0x467BF0` / `0x206C48` | `0x385CE0` / `0x467940` / `0x2069D0` |
+  | Pad reader / pad object | `0x212808` / `0x652200` | `0x212590` / `0x651F00` |
+  | Widescreen scale float / its setter | `0x4F4E08` / `0x2268B0` | `0x4F4B38` / `0x226620` |
+  | File table | `0x4D3D00` | `0x4D3A10` |
+  | CRI thread setup / ADX server | `0x414FF0` / `0x319CB8` | `0x414D40` / `0x3199E0` |
+  | Loading flag / its loop | `0x755DB8` / `0x3794B0` | `0x755AB8` / `0x3791D8` |
+  | VU0 upload wait (D_STAT) | `0x40E4D8` | `0x40E228` |
+  | Sync path (bc2t) / GS register send | `0x24E910` / `0x27D6D0` | `0x24E680` / `0x27D418` |
+  | Fight GS setup | `0x22E6B8` | `0x22E428` |
+  | Last wait seen on PAL | `0x17C218` | `0x17C2B8` |
+  | Sample upload through libsdr / SNDF client / bank DMA | `0x463BF8` / `0x4629F0` / `0x462FE8` | `0x463948` / `0x462740` / `0x462D38` |
+  | libsdr (recompiled) | `0x382C70`-`0x383130` | `0x3829C0`-`0x382E90` |
+
+  The earlier entries of this log keep their PAL addresses.
+- **Repository.** `config/` regenerated for `SLUS_210.87`; `src/mksm_overrides.cpp` registered for `SLUS_210.87`, entry
+  `0x11C070`, with the addresses above; `scripts/common.ps1` looks for `game\SLUS_210.87`; the status map's library
+  boundaries ported by name; the God of War state word the optional GS replay capture waited for (`0x29E560`) removed.
+  The PAL disc files were moved to `game_pal\` (git-ignored) and will be deleted once the NTSC port is at parity.
+- In the game: pending the first NTSC build.
 
 ## Work folders
 

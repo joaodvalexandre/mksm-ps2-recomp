@@ -24,7 +24,7 @@
    builds in parallel (with LTCG, linking ~13,600 generated files is unworkable).
 5. **Recompiler** — builds the `ps2_recomp` target.
 6. **C++ generation** — fills in `config/recomp.template.toml` (`@ELF@`, `@MAP@`, `@OUT@`) and runs `ps2_recomp`
-   on the game ELF (`SLES_535.24` for Mortal Kombat: Shaolin Monks).
+   on the game ELF (`SLUS_210.87` for Mortal Kombat: Shaolin Monks).
 7. **Native IOP (optional)** — if `MKSM_IOP_MODULOS` points to a folder with `modules.txt`,
    `tools/iop/iopn_gen.py` compiles the game's IRX modules ahead of time to C++ in `ps2xIOP/src/native/`. The
    folder is obtained by running the game once with `PS2X_IOP_DUMP_MODULES=<folder>`. Without it the IRX run in
@@ -49,23 +49,25 @@ these build options.
 
 `config/funcmap.csv` (`Name,Start,End,Size`) defines the function boundaries of the ELF.
 
-`SLES_535.24` has no symbols, so both files come from PS2Recomp's analyzer:
+`SLUS_210.87` has no symbols, so both files come from PS2Recomp's analyzer:
 
 ```sh
-PS2X_ANALYZER_FUNCMAP=config/funcmap.csv ps2_analyzer game/SLES_535.24 <out>.toml   # map + stubs
-python tools/funcmap_fixup.py game/SLES_535.24                                      # gaps and jump targets
+PS2X_ANALYZER_FUNCMAP=config/funcmap.csv ps2_analyzer game/SLUS_210.87 <out>.toml   # map + stubs
+python tools/funcmap_fixup.py game/SLUS_210.87                                      # gaps and jump targets
 ```
 
 The analyzer's TOML becomes the template by replacing its paths with `@ELF@`, `@MAP@` and `@OUT@`, and removing the
 software double `floor`/`sqrt`/`log` stubs (`tools/ci/validate_config.py` rejects them: the runtime's float
 handlers do not follow their ABI). `PS2X_ANALYZER_FUNCMAP` comes from `ps2recomp-analyzer-funcmap.patch`; the
 analyzer finds functions from `JAL` targets, so `tools/funcmap_fixup.py` adds the code only reached by `J` (tail
-calls) and the jumps into the middle of other functions.
+calls) and the jumps into the middle of other functions. The template also drops the EE's libsdr stubs, which
+`tools/ci/validate_config.py` enforces.
 
 ## Overrides (`src/mksm_overrides.cpp`)
 
-They are registered with `PS2_REGISTER_GAME_OVERRIDE` for a given ELF name and entry address: `SLES_535.24`,
-entry `0x0011C038`. The file does the game-independent setup (disc files, the runtime's private heap below the ELF,
+They are registered with `PS2_REGISTER_GAME_OVERRIDE` for a given ELF name and entry address: `SLUS_210.87`,
+entry `0x0011C070`. `tools/port_addresses.py` finds the addresses of another build of the game from a known one
+(function fingerprints with the position-dependent fields masked), which is how the PAL addresses were ported. The file does the game-independent setup (disc files, the runtime's private heap below the ELF,
 the diagnostics behind `MKSM_THREAD_WATCH`, `MKSM_CD_READ_TRACE` and `MKSM_PAD_SCRIPT`) and replaces the game
 functions that the runs showed to need it: the movie player (skipped until the IPU exists), the five stubbed libpkt
 functions (the game's own code), `sceCdLayerSearchFile` bound to the native `sceCdSearchFile`, and the widescreen

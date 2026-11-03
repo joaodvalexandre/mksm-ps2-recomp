@@ -150,9 +150,10 @@ namespace mksm_gs_replay
                 // The presentation thread must not read variables that the EE writes.
                 // Only start when receiving its draw/transfer commands.
                 if(memory && !allowStart) return false;
-                uint32_t state=0;
-                if(memory && memory->getRDRAM()) std::memcpy(&state,memory->getRDRAM()+0x29E560u,4);
-                if((memory && state!=11) || std::chrono::duration<double>(now-created).count()<after) return false;
+                // MKSM-Port: no game-state gate (the previous port waited for God of War's state word to be 11);
+                // the capture starts with the first draw commands after the configured delay.
+                const uint32_t state=0;
+                if(std::chrono::duration<double>(now-created).count()<after) return false;
                 started=now; active=snapshot(Op::Initial);
                 if(!active) { finished=true; file.close(); std::fprintf(stderr,"[mksm-gs:replay] error de estado inicial\n"); return false; }
                 std::fprintf(stderr,"[mksm-gs:replay] inicio state=%u host=%.3f texflush=%u\n",state,

@@ -2,7 +2,7 @@
 
 # Mortal Kombat: Shaolin Monks — PS2 Static Recompilation
 
-**A native Windows port of *Mortal Kombat: Shaolin Monks* (PS2, PAL `SLES-53524`) built by statically recompiling
+**A native Windows port of *Mortal Kombat: Shaolin Monks* (PS2, NTSC-U `SLUS-21087`) built by statically recompiling
 MIPS R5900 code to C++.**
 
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-0078D6)
@@ -38,7 +38,7 @@ MIPS R5900 code to C++.**
 
 ## What is this?
 
-Instead of emulating the PlayStation 2, this project **translates the game's original executable (`SLES_535.24`)
+Instead of emulating the PlayStation 2, this project **translates the game's original executable (`SLUS_210.87`)
 into C++** with [PS2Recomp](https://github.com/ran-j/PS2Recomp) and compiles it into a native Windows program.
 
 The runtime is PS2Recomp's with [Waffle565](https://github.com/Waffle565)'s native runtime on top, which replaces
@@ -46,7 +46,7 @@ the PS2 hardware with native code:
 
 | Layer | Native replacement | Shaolin Monks |
 |---|---|---|
-| **EE CPU** (game code) | Static recompilation to C++ | 13,630 functions from the analyzer (the ELF has no symbols) |
+| **EE CPU** (game code) | Static recompilation to C++ | 13,688 functions from the analyzer (the ELF has no symbols) |
 | **VU1** (vector microcode) | Microprograms compiled ahead of time to C++, interpreter as fallback | Interpreter; the 3D view is not reached yet |
 | **GS** (graphics) | OpenGL render-target renderer, 2x internal resolution | Menus render cleanly (field blend, Z clamp); 4:3 by default, `MKSM_ASPECT=16:9` |
 | **IOP** (I/O CPU) | IRX modules in the interpreter, or compiled ahead of time to C++ | The 9 disc IRX modules run in the interpreter |
@@ -54,7 +54,7 @@ the PS2 hardware with native code:
 | **Pad / memory card** | EE-side handlers, no SIO2 model | Classic libpad/libmc stubbed to those handlers; pad works, the empty card is detected |
 | **Movies** (IPU) | MPEG-2 through native libmpeg2 | Sofdec `.SFD` movies decode through the IPU, which is not emulated: skipped (`MKSM_MOVIES=1` plays them) |
 | **Disc** | Files extracted from the disc, each at its original sector | Works as is |
-| **Video timing** | VBlank at 59.94 Hz | The game is PAL (50 Hz): field rate has to become configurable |
+| **Video timing** | VBlank at 59.94 Hz | NTSC-U: matches the runtime's field rate |
 
 This repository contains only what is specific to the game:
 
@@ -72,15 +72,15 @@ This repository contains only what is specific to the game:
 | Milestone | Status |
 |---|:---:|
 | Disc extracted with its sector layout | ✅ |
-| Function map and recompiler configuration for `SLES_535.24` | ✅ |
-| `SLES_535.24` recompiled to C++ and native executable (MSVC, x64) | ✅ |
+| Function map and recompiler configuration for `SLUS_210.87` | ✅ |
+| `SLUS_210.87` recompiled to C++ and native executable (MSVC, x64) | ✅ |
 | Boot through the SDK startup (`_InitSys`) | ✅ |
 | Main menu (movies skipped) | ✅ |
 | Pad and memory card | ✅ pad; card detected, saving untested |
 | ADX music | 🔧 plays, with crackle |
 | SNDF sound effects and SFD movies | ⏳ pending |
 | Loading into a fight | 🔧 in progress |
-| Gameplay at full speed, PAL 50 Hz timing | ⏳ pending |
+| Gameplay at full speed | ⏳ pending |
 | Extras (higher frame rates, widescreen, improvements) | 🔧 16:9 option (`MKSM_ASPECT`) |
 
 <a href="docs/status/details.md"><img src="docs/status/map.svg" alt="Port status map: Sony SDK library functions and PS2 hardware components, colored by status" width="100%"></a>
@@ -101,7 +101,7 @@ Per-library and per-component breakdown: [`docs/status/details.md`](docs/status/
 │   ├── MKSM.md                   # Research log and next steps
 │   ├── ARCHITECTURE.md           # Pipeline, overrides, runtime patches and CI
 │   └── status/                   # Status map data and generated SVG/tables
-├── game/                         # YOUR disc files go here: SLES_535.24, IOP\, GAMEDATA.WA*, .disc_layout (git-ignored)
+├── game/                         # YOUR disc files go here: SLUS_210.87, IOP\, GAMEDATA.WA*, .disc_layout (git-ignored)
 ├── mksm-work/                    # PS2Recomp clone and build output (git-ignored, created by the build)
 ├── patches/                      # PS2Recomp patches, applied in scripts/build.ps1 order
 ├── scripts/
@@ -111,6 +111,7 @@ Per-library and per-component breakdown: [`docs/status/details.md`](docs/status/
 │   ├── 3_run.cmd                 # Runs for 60 s and saves logs
 │   ├── 3_run_manual.cmd          # Runs with no time limit
 │   ├── 4_diagnose.cmd            # Runs for 30 s with diagnostics (logs\diag-*)
+│   ├── 5_scripted_run.cmd        # Runs with a scripted pad and window captures (logs\scripted-*)
 │   └── *.ps1                     # Script logic (common.ps1, build.ps1, run.ps1…)
 ├── src/
 │   ├── mksm_overrides.cpp        # Game-specific overrides
@@ -118,6 +119,8 @@ Per-library and per-component breakdown: [`docs/status/details.md`](docs/status/
 ├── tests/                        # Game-independent tests and known suite failures
 └── tools/
     ├── ci/                       # CI helpers (patch order, config, tests)
+    ├── iop/irx_disasm.py         # Disassembles the game's IRX modules (imports, exports, RPC servers)
+    ├── port_addresses.py         # Finds the addresses of another build of the game (PAL <-> NTSC)
     ├── status/generate.py        # Status map generator
     ├── funcmap_fixup.py          # Completes the analyzer's map: code gaps and jump targets
     ├── iop/iopn_gen.py           # Compiles the game's IRX to C++ (native IOP)
@@ -133,7 +136,7 @@ Per-library and per-component breakdown: [`docs/status/details.md`](docs/status/
 - [Git](https://git-scm.com/)
 - [Python 3](https://www.python.org/) (disc extraction and the native VU1/IOP generators)
 - 16 GB of RAM recommended (the build uses every core) and ~10 GB of disk space for the extracted disc and the build
-- Your own copy of **Mortal Kombat: Shaolin Monks (PAL, SLES-53524)**
+- Your own copy of **Mortal Kombat: Shaolin Monks (NTSC-U, SLUS-21087)**
 
 `scripts\1_install_tools.cmd` installs Git and the Build Tools with `winget`. CMake and Ninja do not need to be on
 `PATH`: `2_build.cmd` loads the MSVC environment of the newest Visual Studio installed.
@@ -144,10 +147,10 @@ Per-library and per-component breakdown: [`docs/status/details.md`](docs/status/
 sector (the ISO is not read). With Python 3:
 
 ```bat
-python tools\iso_extract.py "game\SLES_535.24.Mortal Kombat Shaolin Monks.iso" game --layout
+python tools\iso_extract.py "<your disc>.iso" game --layout
 ```
 
-This leaves `SLES_535.24`, `SYSTEM.CNF`, `IOP\*.IRX`, the `GAMEDATA.WA*` volumes, `FRONT\MOVIES\*.SFD` and the
+This leaves `SLUS_210.87`, `SYSTEM.CNF`, `IOP\*.IRX`, the `GAMEDATA.WA*` volumes, `FRONT\MOVIES\*.SFD` and the
 `.disc_layout` index in `game\`. If the ELF is somewhere else, point `MKSM_ELF` at it; the disc files must sit next
 to it. `MKSM_ISO=<path>` makes the runtime read the image directly instead.
 
@@ -176,6 +179,7 @@ After changing only `src/`, `scripts\2_rebuild_fast.cmd` rebuilds in about a min
 scripts\3_run.cmd          :: 60 seconds, output in logs\
 scripts\3_run_manual.cmd   :: no time limit
 scripts\4_diagnose.cmd     :: 30 seconds with GS/DMA diagnostics: captures and summary.txt in logs\diag-*\
+scripts\5_scripted_run.cmd :: 60 seconds driven by a pad script (to the difficulty select by default), a capture every 3 s, summary in logs\scripted-*\
 ```
 
 The game starts in a 720×540 (4:3) window (`set MKSM_WINDOW=960x720` before running picks another size; `set MKSM_ASPECT=16:9` stretches the picture for a widescreen TV): **F11**
@@ -196,7 +200,7 @@ scripts\2_build.cmd
 
 ```mermaid
 flowchart LR
-    A[SLES_535.24<br/>MIPS R5900 ELF] --> B[ps2_recomp]
+    A[SLUS_210.87<br/>MIPS R5900 ELF] --> B[ps2_recomp]
     M[funcmap.csv] --> B
     C[recomp.template.toml] --> B
     B --> D[Generated C++]

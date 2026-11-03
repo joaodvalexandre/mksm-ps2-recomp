@@ -1,6 +1,6 @@
 # Guide for agents and contributors
 
-Port of *Mortal Kombat: Shaolin Monks* (PS2, PAL `SLES-53524`) by static recompilation with
+Port of *Mortal Kombat: Shaolin Monks* (PS2, NTSC-U `SLUS-21087`) by static recompilation with
 [PS2Recomp](https://github.com/ran-j/PS2Recomp), on top of a native runtime kept as a patch stack. This repository
 does not contain game files or the generated C++: only what is specific to the game. Research log:
 [`docs/MKSM.md`](docs/MKSM.md). Architecture and CI: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
@@ -14,7 +14,7 @@ and integrate the changes (merge, never rewrite published history).
 |---|---|
 | Replacements and diagnostics for game functions | `src/mksm_overrides.cpp` (`applyMksmOverrides`) |
 | Changes to the PS2Recomp runtime/IOP | one patch per topic in `patches/` |
-| Recompiler functions, stubs and entry points | `config/recomp.template.toml`, `config/funcmap.csv` (after a map change, `python tools/funcmap_fixup.py game/SLES_535.24`) |
+| Recompiler functions, stubs and entry points | `config/recomp.template.toml`, `config/funcmap.csv` (after a map change, `python tools/funcmap_fixup.py game/SLUS_210.87`) |
 | Game-independent tests | `tests/` (runtime tests go inside the patch, in `ps2xTest/`) |
 | Port status (README map) | `docs/status/data.toml` |
 | Research log | `docs/MKSM.md` |

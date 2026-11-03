@@ -43,3 +43,7 @@ Thumbs.db
 desktop.ini
 .DS_Store
 __pycache__/
+
+# --- Other regions kept aside while porting (never committed) ---
+game_pal/
+SLUS_*

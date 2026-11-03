@@ -1,4 +1,4 @@
-// MKSM-Port: overrides for Mortal Kombat: Shaolin Monks (SLES-53524).
+// MKSM-Port: overrides for Mortal Kombat: Shaolin Monks (NTSC-U, SLUS-21087).
 // Only game-independent setup for now; game functions are replaced as the first runs show which ones need it.
 #include "runtime/ee_scheduler.h"
 #include "runtime/gs/gs_host_aspect.h"
@@ -72,7 +72,7 @@ namespace
     // (ra = call + 8). A cheap backtrace for a thread that waits inside a stub, whose ra is the stub's caller only.
     std::string stackCallers(const uint8_t *ram, uint32_t sp)
     {
-        constexpr uint32_t kTextStart = 0x00100000u, kTextEnd = 0x0049A9C8u; // SLES_535.24 .text
+        constexpr uint32_t kTextStart = 0x00100000u, kTextEnd = 0x0049A708u; // SLUS_210.87 .text
         std::string out;
         int found = 0;
         for (uint32_t offset = 0; offset < 0x800u && found < 8; offset += 4u)
@@ -177,15 +177,15 @@ namespace
 
     // MKSM-Port: the movies are CRI Sofdec streams that the game decodes through the IPU, which the runtime does not
     // emulate (its MPEG support replaces Sony's libmpeg, not the IPU itself): a movie never reports its end and the
-    // game would wait in the frame loop of 0x270038 (play the movie at a0) forever. Until movies are supported, the
-    // call returns at once as if the movie had finished (4, what 0x32ECE0 expects at the end of a movie);
+    // game would wait in the frame loop of 0x26FD80 (play the movie at a0) forever. Until movies are supported, the
+    // call returns at once as if the movie had finished (4, what its caller expects at the end of a movie);
     // MKSM_MOVIES=1 plays them (to work on movie support).
     void mksmPlayMovie(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         static const bool play = [] { const char *v = std::getenv("MKSM_MOVIES"); return v && v[0] == '1'; }();
-        if (play || ctx->pc != 0x00270038u)
+        if (play || ctx->pc != 0x0026FD80u)
         {
-            sub_00270038_0x270038(rdram, ctx, runtime);
+            sub_0026FD80_0x26fd80(rdram, ctx, runtime);
             return;
         }
         char name[64] = {};
@@ -199,7 +199,7 @@ namespace
 
     // MKSM-Port: libpkt. The config stubs five libpkt functions (the analyzer knows their names) and the rest runs as
     // recompiled game code. The runtime's handlers also rewrite the size of the open DMA tag (sceGifPacket +8) every
-    // time they move the packet pointer, but the game's own terminate (0x384C58, called by the next cnt/end/ref) adds
+    // time they move the packet pointer, but the game's own terminate (0x3849A8, called by the next cnt/end/ref) adds
     // the size when it closes the tag: the tag counts its quadwords twice (a cnt of 4 says 8), the DMAC sends the next
     // tags as GS data and the texture uploads after them never reach the GS (black frames with ~660 draws each).
     // These are the game's own five functions, which leave the DMA tag alone.
@@ -227,17 +227,17 @@ namespace
         ctx->pc = GPR_U32(ctx, 31);
     }
 
-    void mksmGifPkCloseGifTag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) // 0x384F10
+    void mksmGifPkCloseGifTag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) // 0x384C60
     {
         closePacketGifTag(rdram, ctx, runtime, 0x0Cu);
     }
 
-    void mksmVif1PkCloseGifTag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) // 0x385428
+    void mksmVif1PkCloseGifTag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) // 0x385178
     {
         closePacketGifTag(rdram, ctx, runtime, 0x14u);
     }
 
-    void mksmGifPkAddGsAD(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) // 0x384FE0
+    void mksmGifPkAddGsAD(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) // 0x384D30
     {
         const uint32_t packet = GPR_U32(ctx, 4), current = READ32(packet);
         WRITE64(current, GPR_U64(ctx, 6));
@@ -246,7 +246,7 @@ namespace
         ctx->pc = GPR_U32(ctx, 31);
     }
 
-    void mksmVif1PkAddGsAD(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) // 0x385610
+    void mksmVif1PkAddGsAD(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) // 0x385360
     {
         const uint32_t packet = GPR_U32(ctx, 4), current = READ32(packet);
         const uint64_t data = GPR_U64(ctx, 6);
@@ -258,7 +258,7 @@ namespace
         ctx->pc = GPR_U32(ctx, 31);
     }
 
-    // 0x385388: pads the packet up to its fourth word (sceVif1PkAlign(packet, 2, 3), 0x3854D0) and opens a DIRECT
+    // 0x3850D8: pads the packet up to its fourth word (sceVif1PkAlign(packet, 2, 3)) and opens a DIRECT
     // VIFcode there, with the interrupt bit when a1 is not zero; sceVif1PkCloseDirectCode fills in its size.
     void mksmVif1PkOpenDirectCode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
@@ -275,7 +275,7 @@ namespace
         ctx->pc = GPR_U32(ctx, 31);
     }
 
-    // MKSM-Port: MKSM_CD_READ_TRACE=<n> (debug): the first <n> calls of sceCdRead (0x467BF0; CRI's SRD device reads the
+    // MKSM-Port: MKSM_CD_READ_TRACE=<n> (debug): the first <n> calls of sceCdRead (0x467940; CRI's SRD device reads the
     // disc with it): sector, count, destination, caller, result and how many of the bytes read are not zero.
     void mksmTraceCdRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
@@ -296,7 +296,7 @@ namespace
                      dst, ra, static_cast<int>(GPR_U32(ctx, 2)), nonzero, bytes);
     }
 
-    // MKSM-Port: MKSM_PAD_SCRIPT=<s>:<button>[+<button>...],... (testing): scePadRead (0x206C48) also holds those
+    // MKSM-Port: MKSM_PAD_SCRIPT=<s>:<button>[+<button>...],... (testing): scePadRead (0x2069D0) also holds those
     // buttons for a quarter of a second, <s> seconds after start, so a timed run can get past the boot prompts. Buttons:
     // start, select, up, down, left, right, cross, circle, square, triangle, l1, r1, l2, r2.
     struct PadPress
@@ -370,7 +370,7 @@ namespace
     }
 
     // MKSM-Port: MKSM_ASPECT=<w>:<h> wider than 4:3 (16:9, 21:9...) also widens the game's 3D view. The float at
-    // 0x4F4E08 scales the projection horizontally by (4/3) / aspect: the game's own setter (0x2268B0) computes it so but
+    // 0x4F4B38 scales the projection horizontally by (4/3) / aspect: the game's own setter (0x226620) computes it so but
     // is never called, and PCSX2's 16:9 patch by nemesis2000 writes 0.75 there. The 2D screens and the HUD stretch with
     // the window, as with that patch.
     void applyMksmAspect(PS2Runtime &runtime)
@@ -379,11 +379,11 @@ namespace
         const float aspect = gsHostDisplayAspect(setting);
         uint8_t *rdram = runtime.memory().getRDRAM();
         float scale = 0.0f;
-        std::memcpy(&scale, rdram + 0x004F4E08u, sizeof(scale));
+        std::memcpy(&scale, rdram + 0x004F4B38u, sizeof(scale));
         if (aspect <= 4.0f / 3.0f + 0.01f || scale != 1.0f)
             return;
         scale = (4.0f / 3.0f) / aspect;
-        std::memcpy(rdram + 0x004F4E08u, &scale, sizeof(scale));
+        std::memcpy(rdram + 0x004F4B38u, &scale, sizeof(scale));
         std::fprintf(stderr, "[mksm-override] widescreen %s: 3D view scaled by %.4f\n", setting, scale);
     }
 
@@ -396,23 +396,23 @@ namespace
         // trample the game's own heap at the end of .bss.
         runtime.setPrivateGuestHeap(0x000A0000u, 0x000FF000u);
         applyMksmAspect(runtime);
-        // libcdvd's sceCdLayerSearchFile (0x385F90; sceCdSearchFile at 0x386290 calls it with layer 0) binds the IOP
+        // libcdvd's sceCdLayerSearchFile (0x385CE0; sceCdSearchFile calls it with layer 0) binds the IOP
         // CDVDFSV search server 0x80000597 and retries until it exists. The runtime answers libcdvd on the EE side, so
         // the native sceCdSearchFile handler takes it (same fp/name arguments; the disc has a single layer).
-        const bool search = ps2_game_overrides::bindAddressHandler(runtime, 0x00385F90u, "sceCdSearchFile");
-        const bool movie = runtime.replaceFunction(0x00270038u, mksmPlayMovie);
-        const bool libpkt = runtime.replaceFunction(0x00384F10u, mksmGifPkCloseGifTag) &&
-                            runtime.replaceFunction(0x00384FE0u, mksmGifPkAddGsAD) &&
-                            runtime.replaceFunction(0x00385388u, mksmVif1PkOpenDirectCode) &&
-                            runtime.replaceFunction(0x00385428u, mksmVif1PkCloseGifTag) &&
-                            runtime.replaceFunction(0x00385610u, mksmVif1PkAddGsAD);
+        const bool search = ps2_game_overrides::bindAddressHandler(runtime, 0x00385CE0u, "sceCdSearchFile");
+        const bool movie = runtime.replaceFunction(0x0026FD80u, mksmPlayMovie);
+        const bool libpkt = runtime.replaceFunction(0x00384C60u, mksmGifPkCloseGifTag) &&
+                            runtime.replaceFunction(0x00384D30u, mksmGifPkAddGsAD) &&
+                            runtime.replaceFunction(0x003850D8u, mksmVif1PkOpenDirectCode) &&
+                            runtime.replaceFunction(0x00385178u, mksmVif1PkCloseGifTag) &&
+                            runtime.replaceFunction(0x00385360u, mksmVif1PkAddGsAD);
         if (std::getenv("MKSM_CD_READ_TRACE"))
-            runtime.replaceFunction(0x00467BF0u, mksmTraceCdRead);
+            runtime.replaceFunction(0x00467940u, mksmTraceCdRead);
         if (std::getenv("MKSM_PAD_SCRIPT"))
-            runtime.replaceFunction(0x00206C48u, mksmScriptedPadRead);
-        std::fprintf(stderr, "[mksm-override] Mortal Kombat: Shaolin Monks (SLES-53524): sceCdLayerSearchFile=%d movie=%d "
+            runtime.replaceFunction(0x002069D0u, mksmScriptedPadRead);
+        std::fprintf(stderr, "[mksm-override] Mortal Kombat: Shaolin Monks (SLUS-21087): sceCdLayerSearchFile=%d movie=%d "
                      "libpkt=%d\n", search, movie, libpkt);
     }
 }
 
-PS2_REGISTER_GAME_OVERRIDE("Mortal Kombat: Shaolin Monks (SLES-53524)", "SLES_535.24", 0x0011C038u, 0u, applyMksmOverrides)
+PS2_REGISTER_GAME_OVERRIDE("Mortal Kombat: Shaolin Monks (SLUS-21087)", "SLUS_210.87", 0x0011C070u, 0u, applyMksmOverrides)
