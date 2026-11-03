@@ -24,6 +24,17 @@ class DataCodePointerTests(unittest.TestCase):
                       0x20000C: 0x100049})  # not aligned
         self.assertEqual(data_code_pointers([TEXT, DATA], TEXT, word, {0x100048}), set())
 
+    def test_padding_nops_after_the_return_are_skipped(self):
+        # jr $ra; nop (delay slot); nop (padding); the pointed function: NTSC 0x17C2B8 behind 0x17C2AC-0x17C2B4
+        word = space({0x100040: JR_RA, 0x100044: 0, 0x100048: 0, 0x10004C: 0x27BDFFC0, 0x200004: 0x10004C})
+        self.assertEqual(data_code_pointers([TEXT, DATA], TEXT, word, set()), {0x10004C})
+        # jr $ra; lw (delay slot); nop (padding); the function
+        word = space({0x100040: JR_RA, 0x100044: 0x8C8200C0, 0x100048: 0, 0x10004C: 0x27BDFFC0, 0x200004: 0x10004C})
+        self.assertEqual(data_code_pointers([TEXT, DATA], TEXT, word, set()), {0x10004C})
+        # but a run of nops without a return before them is not a function boundary
+        word = space({0x100040: 0x24020001, 0x100044: 0, 0x100048: 0, 0x10004C: 0x27BDFFC0, 0x200004: 0x10004C})
+        self.assertEqual(data_code_pointers([TEXT, DATA], TEXT, word, set()), set())
+
     def test_code_words_inside_text_are_not_pointers(self):
         word = space({0x100040: JR_RA, 0x100060: 0x100048})
         self.assertEqual(data_code_pointers([TEXT, DATA], TEXT, word, set()), set())

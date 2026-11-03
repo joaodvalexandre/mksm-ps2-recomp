@@ -171,6 +171,33 @@ namespace
                             break;
                     }
                 }
+                // MKSM_WATCH_IOP_WORDS=<addr>:<count>,... also prints those IOP RAM words at every tick (a sound driver's
+                // state, a bank uploaded to the IOP).
+                if (const char *spec = std::getenv("MKSM_WATCH_IOP_WORDS"))
+                {
+                    for (const char *p = spec; *p;)
+                    {
+                        char *end = nullptr;
+                        const uint32_t address = static_cast<uint32_t>(std::strtoul(p, &end, 16)) & 0x001FFFFCu;
+                        uint32_t count = 1u;
+                        if (end && *end == ':')
+                            count = static_cast<uint32_t>(std::strtoul(end + 1, &end, 0));
+                        std::string line;
+                        for (uint32_t i = 0; i < count && i < 64u; ++i)
+                        {
+                            uint32_t value = 0;
+                            if (!runtime.readIopMemory(address + i * 4u, &value, sizeof(value)))
+                                break;
+                            char item[16];
+                            std::snprintf(item, sizeof(item), " %08x", value);
+                            line += item;
+                        }
+                        std::fprintf(stderr, "[mksm-iop-words] %08x:%s\n", address, line.c_str());
+                        p = (end && *end == ',') ? end + 1 : (end ? end : p + std::strlen(p));
+                        if (end && *end == '\0')
+                            break;
+                    }
+                }
             }
         }).detach();
     }

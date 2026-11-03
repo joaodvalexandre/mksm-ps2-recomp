@@ -62,10 +62,22 @@ def load_elf(path: Path):
 JR_RA = 0x03E00008
 
 
+def follows_return(word, text_start: int, address: int) -> bool:
+    """True when the code before `address` is a return (jr $ra and its delay slot), possibly followed by the nop
+    padding the compiler puts before an aligned function."""
+    q = address - 4
+    skipped = 0
+    while skipped < 4 and q > text_start and word(q) == 0:  # trailing nops; the delay slot may be one of them
+        q -= 4
+        skipped += 1
+    return q > text_start and (word(q) == JR_RA or word(q - 4) == JR_RA)
+
+
 def data_code_pointers(ranges, text, word, starts) -> set[int]:
     """Words outside .text (in the loaded `ranges`) that point at an instruction of .text which is not a function
     start but follows a return: functions reached only through a pointer (Shaolin Monks' 0x38C730, a vtable entry
-    the analyzer merged into the getter before it, killed the main thread at the first virtual call)."""
+    the analyzer merged into the getter before it, killed the main thread at the first virtual call; 0x17C2B8 of
+    the NTSC build sits behind a padding nop after the return of the function before it)."""
     text_start, text_end = text
     found = set()
     for begin, end in ranges:
@@ -73,7 +85,7 @@ def data_code_pointers(ranges, text, word, starts) -> set[int]:
             if text_start <= address < text_end:
                 continue
             value = word(address)
-            if text_start < value < text_end and value % 4 == 0 and value not in starts and word(value - 8) == JR_RA:
+            if text_start < value < text_end and value % 4 == 0 and value not in starts and                     follows_return(word, text_start, value):
                 found.add(value)
     return found
 

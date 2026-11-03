@@ -404,6 +404,7 @@ Any other repository that is needed must also be cloned inside `D:\Projects\Reco
 | `MKSM_THREAD_WATCH_RING=<n>` | With `MKSM_THREAD_WATCH`, the tick that dumps the last 256 inter-function branches (default 3) |
 | `MKSM_MOVIES=1` | Play the movies instead of skipping them (they need the IPU, which the runtime does not emulate yet) |
 | `MKSM_WATCH_WORDS=<addr>:<n>,...` | With `MKSM_THREAD_WATCH`, also print `<n>` guest RAM words at each `<addr>` (hex) |
+| `MKSM_WATCH_IOP_WORDS=<addr>:<n>,...` | With `MKSM_THREAD_WATCH`, also print `<n>` IOP RAM words at each `<addr>` (hex): a driver's state, a bank uploaded to the IOP |
 | `MKSM_CD_READ_TRACE=<n>` | Log the first `<n>` `sceCdRead` calls: sector, count, destination, caller, result, non-zero bytes |
 | `MKSM_PAD_SCRIPT=<s>:<button>[+<button>],...` | Hold those pad buttons for 0.25 s at `<s>` seconds after start, on top of the real pad (`start`, `select`, `cross`, `circle`, `square`, `triangle`, `up`, `down`, `left`, `right`, `l1`, `r1`, `l2`, `r2`), e.g. `12:start,15:cross` |
 | `MKSM_ASPECT=16:9` | Show the picture at 16:9 instead of the game's 4:3 |
