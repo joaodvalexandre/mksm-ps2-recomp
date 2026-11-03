@@ -52,3 +52,10 @@ independent of that runtime:
 - Build: `scripts\build.cmd` (patches, CMake/Ninja, tools, analyzer, generation, runner); `scripts\run.cmd`.
 - The disc is served from the files in `game\` (upstream's `sceCdSearchFile` registers each file with a pseudo
   sector number); `MKSM_ISO=<image>` also gives the runtime the image for reads outside those files.
+- **First build stopped by the user ("super slow"): the recompiler was hanging on the configuration, not compiling.**
+  `ps2_recomp` printed `parsing config` and then sat at 4.6 MB forever. Bisecting the TOML showed every section
+  parses; the culprit was a hand-written header comment containing a backspace character (`scriptsuild.ps1`
+  typed through a non-raw string became `scripts<BS>uild.ps1`): toml11 loops on a control character inside a
+  comment instead of rejecting it (worth an upstream report). With the comment rewritten the recompiler finishes
+  the whole generation in under a minute: 13,588 functions discovered on the stripped ELF, 0 decode failures.
+
