@@ -29,6 +29,8 @@ LIBM_DOUBLE = {"sin", "cos", "tan", "atan", "atan2", "sqrt", "pow", "exp", "log"
 # The EE side of libsdr: the game uploads its sound-effect samples through these (sceSifSetDma + rSdVoiceTrans to
 # SDRDRV.IRX); the runtime's handlers only faked the transfers and the effects were silent. They stay recompiled.
 LIBSDR_EE = {"sceSdRemoteInit", "sceSdTransToIOP", "sceSdRemote"}
+# Names with a runtime handler that must stay recompiled (the complete handler list is only known with --runtime).
+STUBBED_BY_NAME = {"floor", "sqrt", "log"} | LIBSDR_EE
 SELECTOR = re.compile(r"^(?P<name>[A-Za-z_$][\w$.]*)@0x(?P<addr>[0-9A-Fa-f]{1,8})$")
 
 errors: list[str] = []
@@ -111,6 +113,14 @@ def main() -> int:
 
     # The game's libm is a software double ($a0 -> $v0); the runtime handlers are float
     # ($f12 -> $f0). Replacing it returns the argument unchanged (the sine table came out as sin(x) = x).
+    # The recompiler also stubs any function whose *name* is a runtime handler, whatever the stubs list says
+    # (ps2_recompiler.cpp isStubFunction -> ps2_runtime_calls::isStubName). The software double libm and the EE's
+    # libsdr therefore carry a prefix in funcmap.csv (libm_dp_*, libsdr_*); the analyzer's names would bring the
+    # float handlers back (log(1.0) returned 1.0 and every sound effect played 17 semitones low).
+    for name, start, _end in functions:
+        if name in STUBBED_BY_NAME:
+            errors.append(f"funcmap.csv: {name}@0x{start:08X} would be stubbed by name by the recompiler; "
+                          f"rename it (libm_dp_{name} / libsdr_{name}) and keep it recompiled")
     for name, address in stubs:
         if name in LIBM_DOUBLE:
             errors.append(f"stubs: {name}@0x{address:08X} is the software double libm; "
@@ -129,6 +139,11 @@ def main() -> int:
     if args.runtime:
         call_list = args.runtime / "ps2xRuntime" / "include" / "ps2_call_list.h"
         handlers = set(re.findall(r"X\((\w+)\)", call_list.read_text(encoding="utf-8")))
+        stub_names = {name for name, _address in stubs}
+        for name, start, _end in functions:
+            if name in handlers and name not in stub_names:
+                errors.append(f"funcmap.csv: {name}@0x{start:08X} has a runtime handler and is not in the stubs list: "
+                              "the recompiler would stub it by name; rename it or list it")
         for name, address in stubs:
             if name not in handlers and name.lstrip("_") not in handlers:
                 errors.append(f"stubs: {name}@0x{address:08X} has no handler in ps2_call_list.h")

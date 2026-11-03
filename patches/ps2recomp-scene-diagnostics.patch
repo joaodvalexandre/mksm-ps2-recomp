@@ -1,0 +1,280 @@
+diff --git a/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp b/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+index b63f701..e55d221 100644
+--- a/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gpu/gs_hw_backend.cpp
+@@ -1635,6 +1635,7 @@ struct GSHwBackend::Impl
+         if (fpsm != GS_PSM_CT32 && fpsm != GS_PSM_CT24 && fpsm != GS_PSM_CT16 && fpsm != GS_PSM_CT16S)
+         {
+             ++stats.skippedPsm;
++            dumpSkipped(s, b, "fpsm"); // MKSM-Port: with MKSM_GS_HW_DUMPAT, say which frame format was refused
+             return;
+         }
+         // a draw through a different-format view (CT16) of memory that a CT32/CT24 target already owns writes bit fields of its
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index 7c5ac42..502e0cf 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -1837,10 +1837,46 @@ namespace
+     }
+ }
+ 
++// MKSM-Port: MKSM_DMA_CHAINDUMP=<file>:<from s>:<len s>: append [u32 path][u32 source address][u32 bytes][data] of
++// every DMA transfer delivered in the window, exactly as the VIF/GIF receives it (tag VIFcodes and scratchpad data
++// included; the block dump above only keeps RAM blocks without their tags).
++static void mksmChainDump(PS2Memory::DmaPath path, uint32_t source, const std::vector<uint8_t> &bytes)
++{
++    static const char *spec = std::getenv("MKSM_DMA_CHAINDUMP");
++    if (!spec || bytes.empty())
++        return;
++    static std::string dumpPath;
++    static double from = 0.0, len = 1.0;
++    static const bool init = [] {
++        dumpPath = spec;
++        const size_t c2 = dumpPath.rfind(':');
++        const size_t c1 = (c2 == std::string::npos || c2 == 0) ? std::string::npos : dumpPath.rfind(':', c2 - 1);
++        if (c1 != std::string::npos && c2 != std::string::npos)
++        {
++            from = std::atof(dumpPath.c_str() + c1 + 1);
++            len = std::atof(dumpPath.c_str() + c2 + 1);
++            dumpPath.resize(c1);
++        }
++        return true;
++    }();
++    (void)init;
++    const double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_mksmProcStart).count();
++    if (now < from || now >= from + len)
++        return;
++    if (FILE *df = std::fopen(dumpPath.c_str(), "ab"))
++    {
++        const uint32_t header[3] = {static_cast<uint32_t>(path), source, static_cast<uint32_t>(bytes.size())};
++        std::fwrite(header, sizeof(uint32_t), 3, df);
++        std::fwrite(bytes.data(), 1, bytes.size(), df);
++        std::fclose(df);
++    }
++}
++
+ void PS2Memory::sendDma(DmaPath path, uint32_t address, uint32_t qwc)
+ {
+     std::vector<uint8_t> bytes = takeDmaBuffer();
+     appendGuestBytes(address, qwc * 16u, bytes);
++    mksmChainDump(path, address, bytes);
+     deliverDma(path, std::move(bytes));
+ }
+ 
+@@ -1850,6 +1886,7 @@ void PS2Memory::sendDma(DmaPath path, uint32_t address, uint32_t qwc)
+ void PS2Memory::sendDmaChain(DmaPath path, uint32_t tagAddress)
+ {
+     static constexpr int kMaxTags = 1 << 20;
++    const uint32_t firstTag = tagAddress; // MKSM-Port: MKSM_DMA_CHAINDUMP
+     const uint32_t chcr = path == DmaPath::Vif0 ? 0x10008000u : path == DmaPath::Vif1 ? 0x10009000u : 0x1000A000u;
+     const auto config = m_ioRegisters.find(chcr);
+     const bool transferTags = path != DmaPath::Gif && config != m_ioRegisters.end() && (config->second & 0x40u) != 0u;
+@@ -1912,7 +1949,9 @@ void PS2Memory::sendDmaChain(DmaPath path, uint32_t tagAddress)
+         {
+             // MKSM_DMA_BLOCKDUMP=<file>:<from s>:<len s>: append [u32 addr][u32 qwc][data] of every VIF chain block.
+             static const char *spec = std::getenv("MKSM_DMA_BLOCKDUMP");
+-            if (spec && path != DmaPath::Gif && qwc >= 4u && qwc <= 2000u)
++            // MKSM-Port: MKSM_DMA_BLOCKDUMP_MAXQWC=<n> raises the 2000-qword limit (the game sends 16384-qword display lists).
++            static const uint32_t maxQwc = std::getenv("MKSM_DMA_BLOCKDUMP_MAXQWC") ? static_cast<uint32_t>(std::strtoul(std::getenv("MKSM_DMA_BLOCKDUMP_MAXQWC"), nullptr, 10)) : 2000u;
++            if (spec && path != DmaPath::Gif && qwc >= 4u && qwc <= maxQwc)
+             {
+                 static std::string dumpPath; static double from = 0, len = 1;
+                 static const auto t0 = g_mksmProcStart;
+@@ -1938,6 +1977,7 @@ void PS2Memory::sendDmaChain(DmaPath path, uint32_t tagAddress)
+     if (tags >= kMaxTags)
+         std::fprintf(stderr, "[dma] chain on path %u stopped after %d tags at 0x%08x\n", static_cast<unsigned>(path), tags,
+                      tagAddress);
++    mksmChainDump(path, firstTag, bytes);
+     deliverDma(path, std::move(bytes));
+ }
+ 
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index fc5acf3..ec8aed5 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1,3 +1,4 @@
++#include <vector>
+ #include "ps2_runtime.h"
+ #include "runtime/gs/gs_stage.h"
+ #include "vu_pcsx2/pcsx2_vu1_bridge.h"
+@@ -1538,6 +1539,8 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
+ // MKSM-Port branch trace ring
+ struct MksmBranchRec { uint32_t src, dst, ra, kind; };
+ MksmBranchRec g_mksmRing[256]; std::atomic<uint32_t> g_mksmRingPos{0};
++static const auto g_mksmRuntimeStart = std::chrono::steady_clock::now(); // MKSM-Port: MKSM_CALL_HIST clock
++
+ void mksmDumpBranchRing(const char *why)
+ {
+     uint32_t pos = g_mksmRingPos.load();
+@@ -1643,6 +1646,44 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+     ctx->pc = targetPc;
+     const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
+ 
++    // MKSM-Port: MKSM_CALL_HIST=<from s>:<len s>: count the calls to every function inside the window and print the
++    // histogram (target pc: calls, most called first, 400 at most) when it closes, to see what a frame does.
++    {
++        static const char *histSpec = std::getenv("MKSM_CALL_HIST");
++        if (histSpec && isCall)
++        {
++            static const double histFrom = std::atof(histSpec);
++            static const double histLen = std::strchr(histSpec, ':') ? std::atof(std::strchr(histSpec, ':') + 1) : 0.05;
++            static std::unordered_map<uint32_t, uint32_t> histCounts;
++            static int histState = 0; // 0 before the window, 1 inside, 2 printed
++            if (histState < 2)
++            {
++                const double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_mksmRuntimeStart).count();
++                if (histState == 0 && now >= histFrom)
++                    histState = 1;
++                if (histState == 1)
++                {
++                    if (now < histFrom + histLen)
++                        ++histCounts[targetPc];
++                    else
++                    {
++                        histState = 2;
++                        std::vector<std::pair<uint32_t, uint32_t>> sorted(histCounts.begin(), histCounts.end());
++                        std::sort(sorted.begin(), sorted.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
++                        std::fprintf(stderr, "[mksm-call-hist] %zu functions called in %.3f s from %.2f s\n", sorted.size(), histLen, histFrom);
++                        size_t printed = 0;
++                        for (const auto &entry : sorted)
++                        {
++                            if (++printed > 400u)
++                                break;
++                            std::fprintf(stderr, "[mksm-call-hist] 0x%X:%u\n", entry.first, entry.second);
++                        }
++                    }
++                }
++            }
++        }
++    }
++
+     // Every inter-function transfer is also a deterministic EE safe point.
+     // Backward edges inside generated functions use eeCheckpointDue(), while
+     // this charge bounds straight-line call chains that have no local loop.
+@@ -1772,6 +1813,35 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
+                   m_gs, &m_memory,
+                   startPC, 0u, ctx->vu0_itop, 4096);
+     copyVu0StateToContext(m_vu0.state(), ctx);
++    // MKSM-Port: MKSM_VU0_DIAG=1: every 5 s, the VU0 microprograms run (start pc -> runs, and how many hit the cycle
++    // budget), to tell whether a scene's culling or skinning on VU0 is cut short.
++    {
++        static const bool diag = std::getenv("MKSM_VU0_DIAG") != nullptr;
++        if (diag)
++        {
++            static std::map<uint32_t, std::pair<uint64_t, uint64_t>> runs;
++            static auto last = std::chrono::steady_clock::now();
++            auto &entry = runs[startPC];
++            ++entry.first;
++            if (m_vu0.lastRunHitBudget())
++                ++entry.second;
++            const auto now = std::chrono::steady_clock::now();
++            if (now - last >= std::chrono::seconds(5))
++            {
++                std::string line;
++                for (const auto &[pc, counts] : runs)
++                {
++                    char item[64];
++                    std::snprintf(item, sizeof(item), " 0x%X:%llu/%llu", pc, static_cast<unsigned long long>(counts.first),
++                                  static_cast<unsigned long long>(counts.second));
++                    line += item;
++                }
++                std::fprintf(stderr, "[mksm-vu0] runs/budget-hits:%s" "\n", line.c_str());
++                runs.clear();
++                last = now;
++            }
++        }
++    }
+ }
+ 
+ void PS2Runtime::vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
+diff --git a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+index 9a542d5..e62e27f 100644
+--- a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
++++ b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+@@ -12,6 +12,9 @@
+ #include <cstdio>
+ #include <cstdlib>
+ 
++static std::map<uint32_t, uint32_t> g_vifLaunchCounts; // MKSM-Port: MKSM_VIF_LAUNCH_HIST
++
++
+ enum VIFCmd : uint8_t
+ {
+     VIF_NOP = 0x00,
+@@ -402,7 +405,10 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+             if (traceVif)
+             {
+                 static unsigned launches = 0u;
+-                if (++launches <= 24u && m_vu1Data)
++                // MKSM-Port: MKSM_VIF_LAUNCH_FROM=<n> moves the 40-launch window to the n-th launch (default: the first 24).
++                static const unsigned long launchFrom = std::getenv("MKSM_VIF_LAUNCH_FROM") ? std::strtoul(std::getenv("MKSM_VIF_LAUNCH_FROM"), nullptr, 10) : 0ul;
++                ++launches;
++                if (((launchFrom == 0ul && launches <= 24u) || (launchFrom != 0ul && launches >= launchFrom && launches < launchFrom + 40u)) && m_vu1Data)
+                 {
+                     uint64_t lo = 0u, hi = 0u;
+                     std::memcpy(&lo, m_vu1Data + runItop * 16u, 8u);
+@@ -412,6 +418,31 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+                                  static_cast<unsigned long long>(hi), static_cast<unsigned long long>(lo), pos - 4u);
+                 }
+             }
++            // MKSM-Port: MKSM_VIF_LAUNCH_HIST=1: every 5 s, the microprograms launched since the last report (start pc
++            // -> launches, 0xFFFF = MSCNT), to see which VU1 programs a scene runs.
++            {
++                static const bool launchHist = std::getenv("MKSM_VIF_LAUNCH_HIST") != nullptr;
++                if (launchHist)
++                {
++                    std::map<uint32_t, uint32_t> &counts = g_vifLaunchCounts;
++                    static auto last = std::chrono::steady_clock::now();
++                    ++counts[startPC];
++                    const auto now = std::chrono::steady_clock::now();
++                    if (now - last >= std::chrono::seconds(5))
++                    {
++                        std::string line;
++                        for (const auto &[pc, n] : counts)
++                        {
++                            char item[32];
++                            std::snprintf(item, sizeof(item), " 0x%X:%u", pc, n);
++                            line += item;
++                        }
++                        std::fprintf(stderr, "[mksm-vif-launches]%s" "\n", line.c_str());
++                        counts.clear();
++                        last = now;
++                    }
++                }
++            }
+             vif1_regs.top = runTop;
+             vif1_regs.itop = runItop;
+ 
+@@ -428,6 +459,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+         }
+         else if (opcode == VIF_MSCNT)
+         {
++            // MKSM-Port: MKSM_VIF_LAUNCH_HIST=1 counts MSCNT continuations under the key 0xFFFF.
++            {
++                static const bool launchHist = std::getenv("MKSM_VIF_LAUNCH_HIST") != nullptr;
++                if (launchHist)
++                    ++g_vifLaunchCounts[0xFFFFu];
++            }
+             const uint32_t runTop = vif1_regs.tops & 0x3FFu;
+             const uint32_t runItop = vif1_regs.itops & 0x3FFu;
+             vif1_regs.top = runTop;
+@@ -493,6 +530,19 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+                 {
+                     std::memcpy(m_vu1Code + destAddr, data + pos, copyBytes);
+                     markVU1CodeModified(destAddr, destAddr + copyBytes); // MKSM-Port: only that range changed
++                    // MKSM-Port: MKSM_VIF_LAUNCH_HIST=1 also lists the first 96 microprogram uploads (address, size, hash).
++                    {
++                        static const bool launchHist = std::getenv("MKSM_VIF_LAUNCH_HIST") != nullptr;
++                        static unsigned mpgs = 0u;
++                        if (launchHist && ++mpgs <= 96u)
++                        {
++                            uint64_t hash = 1469598103934665603ull;
++                            for (uint32_t i = 0; i < copyBytes; ++i)
++                                hash = (hash ^ data[pos + i]) * 1099511628211ull;
++                            std::fprintf(stderr, "[mksm-vif-mpg] #%u addr=0x%X instructions=%u hash=%016llx" "\n", mpgs, destAddr,
++                                         copyBytes / 8u, static_cast<unsigned long long>(hash));
++                        }
++                    }
+                 }
+                 else
+                     std::fprintf(stderr, "[vif1] MPG cut: dest=%x bytes=%u have=%u\n", destAddr, copyBytes, sizeBytes - pos);

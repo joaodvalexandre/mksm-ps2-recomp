@@ -380,7 +380,57 @@ Everything found on PAL is engine-level and carries over; only the addresses cha
   `0x11C070`, with the addresses above; `scripts/common.ps1` looks for `game\SLUS_210.87`; the status map's library
   boundaries ported by name; the God of War state word the optional GS replay capture waited for (`0x29E560`) removed.
   The PAL disc files were moved to `game_pal\` (git-ignored) and will be deleted once the NTSC port is at parity.
-- In the game: pending the first NTSC build.
+- **First NTSC runs.** The boot, the menus, the sound and the character and difficulty select match the PAL build at
+  the first attempt (`scripts_scripted_run.cmd`, default pad script). The level loader then called `0x17C2B8`
+  through a vtable: a function the map had merged into `0x17C0E8` because the return of the function before it is
+  followed by a padding `nop` (the same thing stopped the PAL build at `0x17C218`; the thread watch showed it as a
+  thread that no longer ran). `tools/funcmap_fixup.py` now skips padding nops after a return (651 more entry points,
+  test added). **Verified:** the level loads, the fight HUD ("LIU KANG", EXP, health bar) is drawn at 60 fps.
+- **The 3D world is white (open).** With `MKSM_GS_HW_DUMPAT` every batch of a level frame is a sprite (the full-screen
+  passes, a 320x128 blur chain into `fbp=140`, the particle sprites, the HUD) or the 1024x256 backdrop strip; no
+  triangle geometry reaches the renderer. The 180 draws per frame the renderer refuses (`skippedPsm`, now logged with
+  `[gs-hw-skip] fpsm`) are only the game copying its depth buffer into a PSMZ24 target in 32x32 tiles. The VU1 runs
+  (`MKSM_VIF_LAUNCH_HIST=1`, new): per frame 32 launches of the program at `0x0` (2-vertex particle packets, XGKICK
+  at `0x90`/`0xE8`/`0x138`/`0x148`), one launch of the mesh program at `0x790` and two `MSCNT` continuations, and
+  about 25 VIF commands: the EE submits almost no mesh work, so the world is culled or never queued on the EE side.
+  The VU0 microprograms (`MKSM_VU0_DIAG=1`, new) run `0x8`, `0x4B8` and `0x588` about 180 times a frame without hitting
+  the cycle budget; `MKSM_XGKICK_IMMEDIATE=1`, `MKSM_VU1_COLAS=1` and `PS2X_VU1_LEGACY=1` change nothing; the disc keeps
+  streaming during the level. The user sees the characters' place as a void.
+- **The sound effects played 17 semitones low (fixed, pending the rebuild).** `MKSM_SND_CALLLOG=1` shows every menu
+  effect keyed with pitch `0x02B4` (a third of a 22 kHz sample's `0x758`). SNDF computes its pitch in cents and
+  subtracts a base the game sends in its init command; the base read from IOP memory (`MKSM_WATCH_IOP_WORDS`, new)
+  was 1731 = 1200 / ln 2, what `1200 * log(x) / log(2)` gives when `log(x)` returns its argument (1.0). The game's
+  init (`0x462918`) calls the **software double `log`** (`0x470B38`), which the generated code still routed to the
+  runtime's float handler: the recompiler stubs any function whose *name* is a runtime handler, whatever the stubs
+  list says (`ps2_recompiler.cpp isStubFunction` → `isStubName`), so removing `floor`/`sqrt`/`log` from the list
+  never had an effect, on PAL either. The three are now `libm_dp_*` in `config/funcmap.csv` (like `libsdr_*`), and
+  `tools/ci/validate_config.py` rejects any map name that has a runtime handler without being in the stubs list.
+- **Sound effects: verified.** After the rebuild the menu effects key with pitch `0x0759` and the SNDF base is 0;
+  the user confirms the effects sound right. The remaining crackle is in the **ADX music**, to be looked at after
+  the 3D rendering (user's priority).
+- **Every object was culled: the recompiler's VCLIPw set the clip flags in the wrong order (fixed, patch pending the
+  full build).** The faithful DMA capture (`MKSM_DMA_CHAINDUMP`, decoded by `tools/gs/vifdump.py`) showed an intro
+  frame as 284 KB of 2D GIF data (54 sprites, texture uploads) plus a single mesh launch with three small vertex
+  chunks; the per-frame call histogram (`MKSM_CALL_HIST=55:0.05`, 3 frames) pointed at `0x22C838`, called 290 times
+  a frame: it transforms a bounding sphere, runs `vclipw` twice and returns 0 (invisible) if `cfc2 vi18 & 0xAAA` is
+  not zero, i.e. if the sphere is behind any of the six frustum planes (the "< -w" bits of the last two clips;
+  `& 0x555 == 0x555` means fully inside). `vu_translator.cpp` emitted bit 0 for "< -w" and bit 1 for "> +w", the
+  reverse of the hardware order (VU manual, PCSX2 `_vuCLIP`), so every object comfortably inside the frustum
+  tested as behind a plane and only huge meshes crossing all planes survived. `patches/ps2recomp-vu0-clip-flags.patch`
+  swaps the bits (test in `code_generator_tests.cpp`); it is registered in `scripts/build.ps1` but the executable
+  tested so far has the five generated clip functions (`0x213980`, `0x22C630`, `0x22C838`, `0x24D178`, `0x268218`)
+  hand-patched: with it the intro submits thousands of VU1 launches a frame (`0x6F0`, `0xB40`, `0xE50`, `0xEF0`,
+  28000 MSCNT per 5 s) and the renderer draws textured triangle strips into `fbp=0x70` (`MKSM_GS_HW_DUMPAT=70`:
+  three passes per object, PSMT8 128x128 textures plus a 512x256 one, dark vertex colors). **The screen is still
+  white**: the display is filled by untextured full-screen sprites (`rgba 128,128,128,0`, `abe=1`, 2940 in a
+  fog-diag window, `fb=0`) and the renderer reports `unsupportedBlend` about 37,000 times per 5 s, so the final
+  composite / flash passes are the next suspect. Batch dump: `logs/scripted-ntsc-clipfix-dump/run_err.log`.
+- **Ruled out on the way.** The DMA chain code handles every tag, TTE and the SPR bit; the disc reads of the level
+  are healthy (`MKSM_CD_READ_TRACE=200000`: 1 MB chunks, `ret=1`, non-zero data); `fmod`/`rint` are software double
+  but not stubbed (no runtime handler); the character select is 2D (no VU1 work at all in a 0.1 s window).
+- **Tools.** `tools/ee_disasm.py` (capstone) disassembles any function or range of the ELF with map names and the
+  COP2/MMI instructions decoded; `tools/gs/vifdump.py` decodes a chain dump (VIFcodes, launches, DIRECT GIF packets).
+- **Session end (23:30).** The user asked for a frame counter (pending) and then to stop and rethink the approach.
 
 ## Work folders
 
@@ -405,6 +455,12 @@ Any other repository that is needed must also be cloned inside `D:\Projects\Reco
 | `MKSM_MOVIES=1` | Play the movies instead of skipping them (they need the IPU, which the runtime does not emulate yet) |
 | `MKSM_WATCH_WORDS=<addr>:<n>,...` | With `MKSM_THREAD_WATCH`, also print `<n>` guest RAM words at each `<addr>` (hex) |
 | `MKSM_WATCH_IOP_WORDS=<addr>:<n>,...` | With `MKSM_THREAD_WATCH`, also print `<n>` IOP RAM words at each `<addr>` (hex): a driver's state, a bank uploaded to the IOP |
+| `MKSM_VIF_LAUNCH_HIST=1` | Every 5 s, the VU1 microprograms launched (start pc -> launches, `0xFFFF` = MSCNT) and the first 96 microprogram uploads; with `MKSM_VIF_DIAG=1`, `MKSM_VIF_LAUNCH_FROM=<n>` dumps 40 launches from the n-th |
+| `MKSM_VU0_DIAG=1` | Every 5 s, the VU0 microprograms run (start pc -> runs / runs that hit the cycle budget) |
+| `MKSM_DMA_CHAINDUMP=<file>:<from s>:<len s>` | Appends every DMA transfer delivered in the window as the VIF/GIF receives it (`[u32 path][u32 source][u32 bytes][data]`); decode with `python tools/gs/vifdump.py <file>` |
+| `MKSM_DMA_BLOCKDUMP_MAXQWC=<n>` | Raises the 2000-qword limit of `MKSM_DMA_BLOCKDUMP` (the game sends 16384-qword display lists) |
+| `MKSM_CALL_HIST=<from s>:<len s>` | Histogram of the function calls made in the window (`[mksm-call-hist] pc:calls`, 400 at most) |
+| `MKSM_SND_CALLLOG=1` | The sound engine's voice volume and pitch writes that change a value, and the key-on/off switches |
 | `MKSM_CD_READ_TRACE=<n>` | Log the first `<n>` `sceCdRead` calls: sector, count, destination, caller, result, non-zero bytes |
 | `MKSM_PAD_SCRIPT=<s>:<button>[+<button>],...` | Hold those pad buttons for 0.25 s at `<s>` seconds after start, on top of the real pad (`start`, `select`, `cross`, `circle`, `square`, `triangle`, `up`, `down`, `left`, `right`, `l1`, `r1`, `l2`, `r2`), e.g. `12:start,15:cross` |
 | `MKSM_ASPECT=16:9` | Show the picture at 16:9 instead of the game's 4:3 |

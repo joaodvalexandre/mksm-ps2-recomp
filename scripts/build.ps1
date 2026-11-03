@@ -149,6 +149,10 @@ $dmacStatPatch = Join-Path $RepoRoot 'patches\ps2recomp-dmac-stat.patch'
 # MKSM-Port: the recompiler's BC2F/BC2T test VU0 busy (VPU_STAT.VBS0), not the Z flag of the VU0 STATUS register: the
 # game's sync path waits with "bc2t ." for its VU0 microprogram and spun forever.
 $bc2VpuStatPatch = Join-Path $RepoRoot 'patches\ps2recomp-bc2-vpu-stat.patch'
+# MKSM-Port: scene diagnostics: [gs-hw-skip] names the refused frame format, MKSM_VIF_LAUNCH_HIST (VU1 launches, MPG
+# uploads, launch window), MKSM_VU0_DIAG (VU0 runs and budget hits).
+$sceneDiagnosticsPatch = Join-Path $RepoRoot 'patches\ps2recomp-scene-diagnostics.patch'
+$vu0ClipFlagsPatch = Join-Path $RepoRoot 'patches\ps2recomp-vu0-clip-flags.patch'
 $overrides = Join-Path $RepoRoot 'src\mksm_overrides.cpp'
 
 $git = 'git'
@@ -243,6 +247,8 @@ Run $git @('apply', '--ignore-whitespace', '--verbose', $iopLibsdImportsPatch)
 Run $git @('apply', '--ignore-whitespace', '--verbose', $hostShotListPatch)
 Run $git @('apply', '--ignore-whitespace', '--verbose', $dmacStatPatch)
 Run $git @('apply', '--ignore-whitespace', '--verbose', $bc2VpuStatPatch)
+Run $git @('apply', '--ignore-whitespace', '--verbose', $sceneDiagnosticsPatch)
+Run $git @('apply', '--ignore-whitespace', '--verbose', $vu0ClipFlagsPatch)
 Pop-Location
 
 # The generated code includes <ps2_recompiled_functions.h> from src/runner
