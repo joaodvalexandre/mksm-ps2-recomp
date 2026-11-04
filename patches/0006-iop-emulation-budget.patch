@@ -1,0 +1,168 @@
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index e5f63a9..873c8e3 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -19,6 +19,7 @@
+ 
+ #include <algorithm>
+ #include <cctype>
++#include <chrono>
+ #include <map>
+ #include <optional>
+ #include <span>
+@@ -131,6 +132,8 @@ namespace ps2x::iop::detail
+             totalCycles = 0;
+             totalInstructions = 0;
+             eeCycleCarry = 0;
++            iopCycleDebt = 0;
++            budgetSpentNs = 0;
+             activeCpu = nullptr;
+             lastError.clear();
+             servicingDmaInterrupts = false;
+@@ -702,6 +705,9 @@ namespace ps2x::iop::detail
+         uint64_t totalCycles = 0;
+         uint64_t totalInstructions = 0;
+         uint64_t eeCycleCarry = 0;
++        uint64_t iopCycleDebt = 0;                              // MKSM: large cycle steps still owed to the IOP
++        std::chrono::steady_clock::time_point budgetWindowStart; // MKSM: host time budget window
++        int64_t budgetSpentNs = 0;                              // MKSM: host time spent in the IOP this window
+         CpuState *activeCpu = nullptr;
+         std::string lastError;
+         bool servicingDmaInterrupts = false;
+@@ -744,8 +750,42 @@ namespace ps2x::iop::detail
+         const uint64_t total = m_impl->eeCycleCarry + eeCycles;
+         const uint64_t iopCycles = total / 8u;
+         m_impl->eeCycleCarry = total % 8u;
+-        if (iopCycles)
++        if (iopCycles == 0u)
++            return;
++        // MKSM: the IOP is emulated on the EE executor thread, in lock step with the EE cycles the generated code
++        // accounts. Small steps run as they come. A large step (the EE clock catching up with the host clock after
++        // an idle wait or a slow guest loop) on a busy IOP would interpret hundreds of thousands of instructions
++        // at once and stall the EE for longer than a frame, so large steps are queued as a bounded debt and run in
++        // chunks while the IOP has used less than a quarter of the host time of the current 10 ms window; beyond
++        // that the IOP falls behind instead of the EE. An idle IOP skips ahead at no cost, so the budget only
++        // matters when IOP code spins.
++        constexpr uint64_t kSmallStep = 256u;
++        constexpr uint64_t kChunk = 2048u;
++        constexpr uint64_t kMaxDebt = 36864ull * 20ull; // 20 ms of IOP time
++        constexpr int64_t kWindowNs = 10000000;         // 10 ms windows
++        constexpr int64_t kBudgetNs = kWindowNs / 4;    // the IOP may use a quarter of each window
++        if (iopCycles < kSmallStep && m_impl->iopCycleDebt == 0u)
++        {
+             m_impl->runCycles(iopCycles);
++            return;
++        }
++        m_impl->iopCycleDebt = std::min(m_impl->iopCycleDebt + iopCycles, kMaxDebt);
++        const auto now = std::chrono::steady_clock::now();
++        if (now - m_impl->budgetWindowStart >= std::chrono::nanoseconds(kWindowNs))
++        {
++            m_impl->budgetWindowStart = now;
++            m_impl->budgetSpentNs = 0;
++        }
++        while (m_impl->iopCycleDebt != 0u && m_impl->budgetSpentNs < kBudgetNs)
++        {
++            const uint64_t chunk = std::min(m_impl->iopCycleDebt, kChunk);
++            const auto chunkStart = std::chrono::steady_clock::now();
++            m_impl->runCycles(chunk);
++            m_impl->budgetSpentNs += std::chrono::duration_cast<std::chrono::nanoseconds>(
++                                         std::chrono::steady_clock::now() - chunkStart)
++                                         .count();
++            m_impl->iopCycleDebt -= chunk;
++        }
+     }
+ 
+     RpcResult IopEmulator::handleRpc(const RpcRequest &request)
+diff --git a/ps2xIOP/tests/iop_emulator_tests.cpp b/ps2xIOP/tests/iop_emulator_tests.cpp
+index 44c2494..4b7a1c2 100644
+--- a/ps2xIOP/tests/iop_emulator_tests.cpp
++++ b/ps2xIOP/tests/iop_emulator_tests.cpp
+@@ -561,6 +561,64 @@ namespace
+         std::memcpy(host.guest.data() + address + codeOffset, segment.data(), segment.size());
+     }
+ 
++    // MKSM: a module whose only thread spins forever, to exercise the IOP emulation budget.
++    void writeSpinningThreadIrx(TestHost &host, uint32_t address)
++    {
++        constexpr uint32_t codeOffset = 0x100u;
++        constexpr uint32_t loadAddress = 0x00010000u;
++        constexpr uint32_t spinThreadAddress = loadAddress + 0x100u;
++        constexpr uint32_t thbaseTableAddress = loadAddress + 0x180u;
++        constexpr uint32_t createThreadStub = thbaseTableAddress + 20u;
++        constexpr uint32_t startThreadStub = createThreadStub + 8u;
++        constexpr uint32_t threadDescriptor = loadAddress + 0x300u;
++
++        ElfHeader header{};
++        header.ident[0] = 0x7Fu; header.ident[1] = 'E'; header.ident[2] = 'L'; header.ident[3] = 'F';
++        header.ident[4] = 1u; header.ident[5] = 1u; header.ident[6] = 1u;
++        header.type = 2u; header.machine = 8u; header.version = 1u;
++        header.entry = loadAddress; header.phoff = sizeof(ElfHeader);
++        header.ehsize = sizeof(ElfHeader); header.phentsize = sizeof(ProgramHeader); header.phnum = 1u;
++
++        ProgramHeader program{};
++        program.type = 1u; program.offset = codeOffset; program.vaddr = loadAddress; program.paddr = loadAddress;
++        program.filesz = 0x500u; program.memsz = 0x500u; program.flags = 7u; program.align = 4u;
++
++        const auto jal = [](uint32_t target) { return 0x0C000000u | ((target >> 2u) & 0x03FFFFFFu); };
++        const auto jump = [](uint32_t target) { return 0x08000000u | ((target >> 2u) & 0x03FFFFFFu); };
++        const uint32_t entry[] = {
++            0x27BDFFE0u, 0xAFBF001Cu,
++            0x3C040001u, 0x34840300u, jal(createThreadStub), 0x00000000u,
++            0x00402021u, 0x00002821u, jal(startThreadStub), 0x00000000u, // StartThread(v0, 0)
++            0x8FBF001Cu, 0x00001021u, 0x27BD0020u, 0x03E00008u, 0x00000000u,
++        };
++        const uint32_t spinThread[] = {
++            jump(spinThreadAddress), 0x00000000u,
++        };
++        const uint32_t thbaseImports[] = {
++            0x41E00000u, 0u, 0x00000101u,
++            0x61626874u, 0x00006573u, // "thbase"
++            0x03E00008u, 0x24000004u, // CreateThread
++            0x03E00008u, 0x24000006u, // StartThread
++            0u, 0u,
++        };
++        const uint32_t descriptor[] = {0u, 0u, spinThreadAddress, 0x400u, 10u};
++
++        std::vector<uint8_t> segment(program.filesz, 0u);
++        const auto put = [&](uint32_t offset, const void *data, size_t size)
++        {
++            std::memcpy(segment.data() + offset, data, size);
++        };
++        put(0u, entry, sizeof(entry));
++        put(0x100u, spinThread, sizeof(spinThread));
++        put(0x180u, thbaseImports, sizeof(thbaseImports));
++        put(0x300u, descriptor, sizeof(descriptor));
++
++        std::memset(host.guest.data() + address, 0, codeOffset + program.filesz);
++        std::memcpy(host.guest.data() + address, &header, sizeof(header));
++        std::memcpy(host.guest.data() + address + sizeof(header), &program, sizeof(program));
++        std::memcpy(host.guest.data() + address + codeOffset, segment.data(), segment.size());
++    }
++
+     void writeSifDmaIrx(TestHost &host, uint32_t address)
+     {
+         constexpr uint32_t codeOffset = 0x100u;
+@@ -1051,6 +1109,23 @@ int main()
+     if (!expect(lowPriorityMarker == 1u,
+                 "WaitVblankEnd returned immediately and starved a lower-priority IOP thread")) return 1;
+ 
++    // MKSM: a busy IOP must not stall the EE executor; a large cycle request is served within a host time budget.
++    iop.reset();
++    writeSpinningThreadIrx(host, 0x100u);
++    const ModuleLoadResult spinningModule = iop.loadModuleBuffer(0x100u);
++    if (!expect(spinningModule.handled && spinningModule.startResult == 0,
++                "Synthetic spinning-thread IRX did not start")) return 1;
++    {
++        const uint64_t cyclesBefore = iop.cycles();
++        const auto start = std::chrono::steady_clock::now();
++        iop.runEeCycles(8ull * 36864ull * 500ull); // half a second of IOP time requested at once
++        const auto elapsed = std::chrono::steady_clock::now() - start;
++        if (!expect(elapsed < std::chrono::milliseconds(250),
++                    "a spinning IOP thread stalled the caller for the whole requested time")) return 1;
++        if (!expect(iop.cycles() - cyclesBefore < 36864ull * 500ull,
++                    "the IOP budget should leave part of a large request unrun")) return 1;
++    }
++
+     iop.reset();
+     host.logs.clear();
+     writeMcmanRegistrationIrx(host, 0x100u);

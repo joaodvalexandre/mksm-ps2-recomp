@@ -94,6 +94,9 @@ stubs = [
   "sceVu0NormalLightMatrix@0x00385A40",
   "sceVu0LightColorMatrix@0x00385B00",
   "sceVu0RotTransPers@0x00385B70",
+  # Hand edit: sceCdLayerSearchFile binds the IOP server 0x80000597 lazily and retries forever when it is
+  # missing; the runtime has no cdvdfsv server but serves sceCdSearchFile from the files next to the ELF.
+  "sceCdSearchFile@0x00385F90",
   "sceCdNcmdDiskReady@0x00386408",
   "sceCdSync@0x003864A0",
   "sceCdSyncS@0x00386540",

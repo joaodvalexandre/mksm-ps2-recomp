@@ -1,0 +1,132 @@
+diff --git a/ps2xRuntime/include/runtime/ee_scheduler.h b/ps2xRuntime/include/runtime/ee_scheduler.h
+index f247ff9..e35b54c 100644
+--- a/ps2xRuntime/include/runtime/ee_scheduler.h
++++ b/ps2xRuntime/include/runtime/ee_scheduler.h
+@@ -449,6 +449,8 @@ private:
+     uint32_t m_gsVSyncCallbackSp = 0;
+     std::unordered_map<uint64_t, uint32_t> m_invocationStackTops;
+     std::atomic<uint64_t> m_nextDeadlineCycle{0};
++    std::atomic<int64_t> m_nextDeadlineHostNs{0}; // MKSM: host time of the next deadline (steady clock, ns)
++    uint32_t m_hostClockChecks = 0u;              // MKSM: checkpoints since the last host clock comparison
+ 
+     mutable std::mutex m_snapshotMutex;
+     EeKernelSnapshot m_snapshot;
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index 34d3a55..a136601 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -357,6 +357,32 @@ void EeScheduler::postEvent(EeEvent event)
+ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
+ {
+     accountCycles(cycles);
++    // MKSM: the EE clock must not fall behind the host clock. A guest loop that spends host time in each
++    // iteration (syscalls, locks) accounts only the checkpoint cycles, so a VBlank whose host deadline passed
++    // long ago would still be millions of cycles away, and a game waiting for its vsync callback (or for the
++    // threads that callback wakes) would wait forever. When the host deadline of the next event has passed, the
++    // cycle counter catches up to it; the timers and the IOP advance with it.
++    if ((++m_hostClockChecks & 63u) == 0u)
++    {
++        const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
++        const int64_t hostDeadlineNs = m_nextDeadlineHostNs.load(std::memory_order_acquire);
++        if (nextEventCycle != 0u && m_eeCycle < nextEventCycle && hostDeadlineNs != 0)
++        {
++            const int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
++                                      std::chrono::steady_clock::now().time_since_epoch())
++                                      .count();
++            if (nowNs >= hostDeadlineNs)
++            {
++                uint64_t remaining = nextEventCycle - m_eeCycle;
++                while (remaining > 0u)
++                {
++                    const uint32_t step = static_cast<uint32_t>(std::min<uint64_t>(remaining, std::numeric_limits<uint32_t>::max()));
++                    accountCycles(step);
++                    remaining -= step;
++                }
++            }
++        }
++    }
+ 
+     if (m_checkpointPending.load(std::memory_order_acquire) ||
+         m_stopRequested.load(std::memory_order_acquire))
+@@ -2073,6 +2099,7 @@ void EeScheduler::updateNextDeadline()
+     if (m_deadlines.empty())
+     {
+         m_nextDeadlineCycle.store(0u, std::memory_order_release);
++        m_nextDeadlineHostNs.store(0, std::memory_order_release); // MKSM
+         return;
+     }
+     const auto it = std::min_element(m_deadlines.begin(), m_deadlines.end(),
+@@ -2085,6 +2112,8 @@ void EeScheduler::updateNextDeadline()
+                                          return left.sequence < right.sequence;
+                                      });
+     m_nextDeadlineCycle.store(it->deadlineCycle, std::memory_order_release);
++    m_nextDeadlineHostNs.store(std::chrono::duration_cast<std::chrono::nanoseconds>(it->hostDeadline.time_since_epoch()).count(),
++                               std::memory_order_release); // MKSM: the catch-up in checkpointDue()
+ }
+ 
+ bool EeScheduler::hasReadyAtOrAbovePriority(int priority) const
+diff --git a/ps2xTest/src/ps2_runtime_interrupt_tests.cpp b/ps2xTest/src/ps2_runtime_interrupt_tests.cpp
+index 4261bfa..513e2da 100644
+--- a/ps2xTest/src/ps2_runtime_interrupt_tests.cpp
++++ b/ps2xTest/src/ps2_runtime_interrupt_tests.cpp
+@@ -175,6 +175,33 @@ namespace
+         runtime->requestStop();
+     }
+ 
++    constexpr uint32_t kSpinningGuestPc = 0x00160300u;
++    std::atomic<bool> g_spinSawVSync{false};
++    std::chrono::steady_clock::time_point g_spinStart{};
++
++    // MKSM: a guest loop that spends host time in each iteration but accounts only the generated checkpoint
++    // cycles, like a game polling a status under a lock. It stops at the first VBlank, or after three host seconds.
++    void spinningGuest(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        ctx->pc = kSpinningGuestPc;
++        for (int i = 0; i < 4; ++i)
++        {
++            std::this_thread::sleep_for(std::chrono::microseconds(250));
++            const bool sawVSync = runtime->eeScheduler().currentVSyncTick() >= 1u;
++            if (sawVSync || std::chrono::steady_clock::now() - g_spinStart > std::chrono::seconds(3))
++            {
++                g_spinSawVSync = sawVSync;
++                ctx->pc = 0u;
++                runtime->requestStop();
++                return;
++            }
++            if (runtime->eeCheckpointDue())
++            {
++                return;
++            }
++        }
++    }
++
+     void schedulerIntcHandler(uint8_t *, R5900Context *ctx, PS2Runtime *)
+     {
+         g_dispatchTrace.push_back(2);
+@@ -525,6 +552,26 @@ void register_ps2_runtime_interrupt_tests()
+                      "the first VBlank should publish GS CSR.FIELD before resuming guest code");
+         });
+ 
++        // MKSM: a guest loop that spends host time in each iteration (syscalls, locks) accounts only a few EE
++        // cycles per checkpoint, so the VBlank deadline would be reached minutes of host time late and a game
++        // waiting for its vsync callback (which wakes its worker threads) would wait forever. The EE clock catches
++        // up with the host clock at checkpoints.
++        tc.Run("a guest loop that spends host time still receives the VBlank", [](TestCase &t)
++        {
++            TestEnv env;
++            t.IsTrue(env.runtime.memory().initialize(), "runtime memory initialize should succeed");
++            env.runtime.registerFunction(kSpinningGuestPc, spinningGuest);
++            g_spinSawVSync = false;
++            g_spinStart = std::chrono::steady_clock::now();
++            R5900Context mainContext{};
++            mainContext.pc = kSpinningGuestPc;
++            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
++            env.runtime.eeScheduler().run();
++            t.IsTrue(g_spinSawVSync, "the VBlank must arrive in host time, not after millions of checkpoints");
++            t.IsTrue(std::chrono::steady_clock::now() - g_spinStart < std::chrono::seconds(2),
++                     "the VBlank should arrive within a couple of host vblank periods");
++        });
++
+         tc.Run("VBlank IRQ invocation completes before the resumed base context", [](TestCase &t)
+         {
+             TestEnv env;

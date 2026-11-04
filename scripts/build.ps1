@@ -10,12 +10,18 @@
 #   -Jobs <n>     parallel compile jobs (default 8; the release link is single-threaded anyway)
 #   -ToolsOnly    stop after building ps2_analyzer and ps2_recomp
 #   -Regenerate   regenerate the C++ even if config\recomp.toml and the ELF are older than the last generation
+#   -Reset        check out the pinned PS2Recomp again and re-apply the patches even if the tree already matches
 #   -Tests        also build and run the PS2Recomp test suite (ps2x_tests)
+#
+# Only what changed is rebuilt: the submodule is left alone while it is exactly the pinned commit plus the patches,
+# and regenerated functions are copied into the runtime only when their content differs, so a configuration or
+# recompiler change recompiles the affected unity batches instead of all 13,000 functions.
 param(
     [switch]$Release,
     [int]$Jobs = 8,
     [switch]$ToolsOnly,
     [switch]$Regenerate,
+    [switch]$Reset,
     [switch]$Tests
 )
 $ErrorActionPreference = 'Stop'
@@ -26,6 +32,72 @@ function Run($exe, [string[]]$arguments) {
     & $exe @arguments
     if ($LASTEXITCODE -ne 0) { throw "$exe $($arguments -join ' ') failed with code $LASTEXITCODE" }
 }
+function Hash-Text([string]$text) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return [System.BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($text))) -replace '-', '' }
+    finally { $sha.Dispose() }
+}
+function Tree-State($repo) {
+    # The diff of the tracked files plus the untracked files outside the generated code and the builds (a patch may add
+    # a file): identical for "pinned commit + patches", different as soon as anything else is touched.
+    $untracked = git -C $repo ls-files --others --exclude-standard |
+        Where-Object { $_ -notlike 'ps2xRuntime/src/runner/*' -and $_ -notlike 'out/*' -and $_ -notlike 'ps2xRuntime/include/ps2_recompiled_*' }
+    return Hash-Text ((git -C $repo diff --no-color | Out-String) + "`n" + (($untracked | Sort-Object) -join "`n"))
+}
+# File comparison and copying in C#: 13,000 generated files are too many for a PowerShell loop.
+Add-Type @"
+using System;
+using System.Collections.Generic;
+using System.IO;
+public static class MksmBuild {
+    public static bool SameContent(string a, string b) {
+        if (new FileInfo(a).Length != new FileInfo(b).Length) return false;
+        byte[] ba = File.ReadAllBytes(a); byte[] bb = File.ReadAllBytes(b);
+        for (int i = 0; i < ba.Length; i++) if (ba[i] != bb[i]) return false;
+        return true;
+    }
+    // Copies the sources into targetDir when their content differs and, with removeOthers, removes the files of
+    // targetDir that are neither a source nor in keepNames; returns the names copied or removed.
+    public static string[] Sync(string[] sources, string targetDir, string[] keepNames, bool removeOthers) {
+        var changed = new List<string>();
+        var wanted = new HashSet<string>(keepNames, StringComparer.OrdinalIgnoreCase);
+        foreach (string source in sources) {
+            string name = Path.GetFileName(source);
+            wanted.Add(name);
+            string target = Path.Combine(targetDir, name);
+            if (File.Exists(target) && SameContent(source, target)) continue;
+            File.Copy(source, target, true);
+            changed.Add(name);
+        }
+        if (!removeOthers) return changed.ToArray();
+        foreach (string existing in Directory.GetFiles(targetDir)) {
+            string name = Path.GetFileName(existing);
+            if (wanted.Contains(name)) continue;
+            File.Delete(existing);
+            changed.Add(name);
+        }
+        return changed.ToArray();
+    }
+    // Sets the modification time of the unity sources that include one of the names (or of all of them).
+    public static int TouchUnity(string unityDir, string[] names, bool all) {
+        var set = new HashSet<string>(names, StringComparer.OrdinalIgnoreCase);
+        int touched = 0;
+        foreach (string unity in Directory.GetFiles(unityDir, "*.cxx")) {
+            bool hit = all;
+            if (!hit) {
+                foreach (string line in File.ReadLines(unity)) {
+                    int start = line.IndexOf('"'); int end = line.LastIndexOf('"');
+                    if (!line.StartsWith("#include") || start < 0 || end <= start) continue;
+                    string included = line.Substring(start + 1, end - start - 1);
+                    if (set.Contains(Path.GetFileName(included))) { hit = true; break; }
+                }
+            }
+            if (hit) { File.SetLastWriteTimeUtc(unity, DateTime.UtcNow); touched++; }
+        }
+        return touched;
+    }
+}
+"@
 
 $rec = $PS2RecompDir
 $profile = if ($Release) { 'release' } else { 'quick' }
@@ -36,18 +108,35 @@ $elf = Get-GameElf
 $config = Join-Path $RepoRoot 'config\recomp.toml'
 
 Step "PS2Recomp at $PS2RecompCommit with the patches of patches\ (profile: $profile)"
-Run 'git' @('-C', $rec, 'checkout', '-q', '-f', $PS2RecompCommit)
-# The patched sources and the generated code are not part of the pinned tree; out\ keeps the builds.
-Run 'git' @('-C', $rec, 'clean', '-fdq', '-e', 'out')
-Run 'git' @('-C', $rec, 'submodule', 'update', '--init', '--recursive', '--quiet')
-foreach ($patch in (Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'patches') -Filter '*.patch' | Sort-Object Name)) {
-    Write-Host ("  applying {0}" -f $patch.Name)
-    Run 'git' @('-C', $rec, 'apply', '--ignore-whitespace', $patch.FullName)
+$patches = @(Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'patches') -Filter '*.patch' | Sort-Object Name)
+# The state of the tree is "pinned commit + patches" when HEAD is the pinned commit and the working tree matches what
+# was recorded after the last application; then nothing is touched and the tools keep their timestamps.
+New-Item -ItemType Directory -Path (Join-Path $rec 'out') -Force | Out-Null
+$stateFile = Join-Path $rec 'out\.patched-state'
+$wanted = $PS2RecompCommit + ' ' + (($patches | ForEach-Object { (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }) -join ' ')
+$head = (git -C $rec rev-parse HEAD 2>$null | Out-String).Trim()
+$recorded = if (Test-Path -LiteralPath $stateFile) { (Get-Content -LiteralPath $stateFile -Raw).Trim() } else { '' }
+if (-not $Reset -and $head.StartsWith($PS2RecompCommit) -and $recorded -eq ($wanted + ' ' + (Tree-State $rec))) {
+    Write-Host '  the tree is already the pinned commit with the patches applied'
+} else {
+    Run 'git' @('-C', $rec, 'checkout', '-q', '-f', $PS2RecompCommit)
+    # The patched sources are not part of the pinned tree; out\ keeps the builds and the generated code stays in
+    # place (the sync below removes what a regeneration no longer produces).
+    Run 'git' @('-C', $rec, 'clean', '-fdq', '-e', 'out', '-e', 'ps2xRuntime/src/runner', '-e', 'ps2xRuntime/include/ps2_recompiled_functions.h', '-e', 'ps2xRuntime/include/ps2_recompiled_stubs.h')
+    Run 'git' @('-C', $rec, 'submodule', 'update', '--init', '--recursive', '--quiet')
+    foreach ($patch in $patches) {
+        Write-Host ("  applying {0}" -f $patch.Name)
+        Run 'git' @('-C', $rec, 'apply', '--ignore-whitespace', $patch.FullName)
+    }
+    Set-Content -LiteralPath $stateFile -Value ($wanted + ' ' + (Tree-State $rec)) -Encoding ASCII
 }
 
 Step 'Configuring CMake'
 $common = @('-S', $rec, '-B', $bld, '-G', 'Ninja', '-DPS2X_BUILD_STUDIO=OFF', '-DPS2X_ENABLE_SCCACHE=OFF',
-            '-DPS2X_ENABLE_RUNNER_UNITY_BUILD=ON', '-DPS2X_ENABLE_RUNNER_PCH=ON', '-DPS2X_ENABLE_LTO=OFF')
+            '-DPS2X_ENABLE_RUNNER_UNITY_BUILD=ON', '-DPS2X_ENABLE_RUNNER_PCH=ON', '-DPS2X_ENABLE_LTO=OFF',
+            # Upstream's very verbose logs cost more than the game: with them on, writing log files took two thirds
+            # of the EE thread's time. The regular runtime logs (PS2X_ENABLE_RUNTIME_LOGS) stay on.
+            '-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF', '-DPS2X_IOP_BUILD_TESTS=ON')
 if ($Release) {
     Run 'cmake' ($common + @('-DCMAKE_BUILD_TYPE=Release'))
 } else {
@@ -96,35 +185,37 @@ if ($needGenerate) {
     Step 'Generated code is up to date (use -Regenerate to force)'
 }
 
-Step 'Copying the generated code and the override module into the runtime'
-Get-ChildItem -LiteralPath $runner -File | Where-Object { $_.Name -ne 'main.cpp' } | Remove-Item -Force
-Get-ChildItem -LiteralPath $gen -Filter '*.cpp' -File | Copy-Item -Destination $runner
+Step 'Syncing the generated code and the override module into the runtime'
+# Files are copied only when their content differs, and the runner files that no longer exist are removed, so that
+# ninja recompiles only the unity batches that changed. The unity sources include the runner .cpp files; with a
+# localized MSVC ninja does not record those dependencies, so the unity files that include a changed file are
+# touched by hand (the CMake re-run below rewrites the unity files when the set of sources changed).
+$overrides = @(Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'src') -File -Recurse |
+    Where-Object { $_.Extension -in '.cpp', '.h' } | ForEach-Object { $_.FullName })
+# Comparing the 13,000 generated files takes a minute, so it is done after a generation (the stamp written at the
+# end of a complete sync disappears with the regenerated folder); otherwise only the override module is synced.
+$syncStamp = Join-Path $gen '.synced'
+if ($needGenerate -or -not (Test-Path -LiteralPath $syncStamp)) {
+    $generated = @(Get-ChildItem -LiteralPath $gen -Filter '*.cpp' -File | ForEach-Object { $_.FullName })
+    $changed = @([MksmBuild]::Sync([string[]]($generated + $overrides), $runner, [string[]]@('main.cpp'), $true))
+    Set-Content -LiteralPath $syncStamp -Value (Get-Date -Format 'o')
+} else {
+    $changed = @([MksmBuild]::Sync([string[]]$overrides, $runner, [string[]]@('main.cpp'), $false))
+}
+$headerChanged = $false
 foreach ($header in @('ps2_recompiled_functions.h', 'ps2_recompiled_stubs.h')) {
     $source = Join-Path $gen $header
-    if (Test-Path -LiteralPath $source) { Copy-Item -LiteralPath $source -Destination (Join-Path $include $header) -Force }
+    $target = Join-Path $include $header
+    if (-not (Test-Path -LiteralPath $source)) { continue }
+    if ((Test-Path -LiteralPath $target) -and [MksmBuild]::SameContent($source, $target)) { continue }
+    Copy-Item -LiteralPath $source -Destination $target -Force
+    $headerChanged = $true
 }
-$overrides = Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'src') -File -Recurse |
-    Where-Object { $_.Extension -in '.cpp', '.h' }
-$overrides | Copy-Item -Destination $runner
-# The unity sources include the runner .cpp files; with a localized MSVC ninja does not record those dependencies.
-# After a regeneration every runner object (and the precompiled header) is removed so that everything is rebuilt;
-# otherwise only the unity files that include a changed override file are touched. This runs before the CMake
-# re-run below, which regenerates the unity sources and the precompiled header source it may have removed.
-$runnerDir = Join-Path $bld 'ps2xRuntime\CMakeFiles\ps2EntryRunner.dir'
-$unity = Join-Path $runnerDir 'Unity'
+Write-Host ("  runner files copied or removed: {0}, generated headers changed: {1}" -f $changed.Count, $headerChanged)
+$unity = Join-Path $bld 'ps2xRuntime\CMakeFiles\ps2EntryRunner.dir\Unity'
 if (Test-Path -LiteralPath $unity) {
-    if ($needGenerate) {
-        Get-ChildItem -LiteralPath $runnerDir -Recurse -File |
-            Where-Object { $_.Extension -in '.obj', '.pch', '.pdb' } | Remove-Item -Force
-    } else {
-        foreach ($file in $overrides) {
-            foreach ($unityFile in (Get-ChildItem -LiteralPath $unity -Filter '*.cxx' -File)) {
-                if ((Get-Content -LiteralPath $unityFile.FullName -Raw) -match [regex]::Escape($file.Name)) {
-                    (Get-Item -LiteralPath $unityFile.FullName).LastWriteTime = Get-Date
-                }
-            }
-        }
-    }
+    $touched = [MksmBuild]::TouchUnity($unity, [string[]]$changed, $headerChanged)
+    Write-Host ("  unity batches touched: {0}" -f $touched)
 }
 Run 'cmake' @('-S', $rec, '-B', $bld)
 
@@ -134,9 +225,15 @@ Run 'cmake' @('--build', $bld, '-j', $Jobs, '--target', 'ps2EntryRunner')
 if ($Tests) {
     Step 'Building and running ps2x_tests'
     Run 'cmake' @('--build', $bld, '-j', $Jobs, '--target', 'ps2x_tests')
-    $tests = Get-ChildItem $bld -Recurse -Filter 'ps2x_tests.exe' | Select-Object -First 1
+    $testsExe = Get-ChildItem $bld -Recurse -Filter 'ps2x_tests.exe' | Select-Object -First 1
     Push-Location $rec
-    try { Run $tests.FullName @() } finally { Pop-Location }
+    try { Run $testsExe.FullName @() } finally { Pop-Location }
+    Step 'Building and running the IOP emulator tests'
+    Run 'cmake' @('--build', $bld, '-j', $Jobs, '--target', 'ps2_iop_emulator_tests', '--target', 'ps2_iop_import_tests')
+    foreach ($name in @('ps2_iop_emulator_tests.exe', 'ps2_iop_import_tests.exe')) {
+        $iopTest = Get-ChildItem $bld -Recurse -Filter $name | Select-Object -First 1
+        if ($iopTest) { Run $iopTest.FullName @() }
+    }
 }
 
 $exe = Get-ChildItem $bld -Recurse -Filter 'ps2EntryRunner.exe' | Select-Object -First 1

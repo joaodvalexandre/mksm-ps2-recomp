@@ -19,10 +19,18 @@ index d0fc95d..474bd02 100644
                          inst.rd, inst.rt, inst.rt, shuffle_pattern);
                  }
 diff --git a/ps2xTest/src/code_generator_tests.cpp b/ps2xTest/src/code_generator_tests.cpp
-index 463b6cf..70512b6 100644
+index 463b6cf..d36b422 100644
 --- a/ps2xTest/src/code_generator_tests.cpp
 +++ b/ps2xTest/src/code_generator_tests.cpp
-@@ -1056,6 +1056,28 @@ void register_code_generator_tests()
+@@ -2,6 +2,7 @@
+ #include "ps2recomp/code_generator.h"
+ #include "ps2recomp/instructions.h"
+ #include "ps2recomp/ps2_recompiler.h"
++#include "ps2recomp/r5900_decoder.h" // MKSM: the VCLIPw clip-flag test decodes a real instruction
+ #include "ps2recomp/types.h"
+ #include <filesystem>
+ #include <fstream>
+@@ -1056,6 +1057,28 @@ void register_code_generator_tests()
                  t.IsTrue(ctc2Code.find("Unimplemented") == std::string::npos, "CTC2 VI4 should be implemented");
          });
  

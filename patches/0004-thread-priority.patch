@@ -1,0 +1,101 @@
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index c5e31c4..34d3a55 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -423,7 +423,9 @@ void EeScheduler::setupCurrentThread(uint32_t stack, uint32_t stackSize, uint32_
+ int EeScheduler::createThread(const EeThreadCreateParams &params)
+ {
+     assertExecutor();
+-    if (params.priority < 1 || params.priority >= kPriorityCount)
++    // MKSM: priorities are 0 to 127 on the EE kernel, and the main thread starts at 0; a game that creates its
++    // workers with the main thread's priority (as ReferThreadStatus reports it) passes 0.
++    if (params.priority < 0 || params.priority >= kPriorityCount)
+     {
+         return KE_ILLEGAL_PRIORITY;
+     }
+@@ -701,7 +703,7 @@ int EeScheduler::cancelWakeup(int id)
+ int EeScheduler::changePriority(int id, int priority, bool interruptSafe, int &oldPriority)
+ {
+     assertExecutor();
+-    if (priority < 1 || priority >= kPriorityCount)
++    if (priority < 0 || priority >= kPriorityCount) // MKSM: 0 is a valid priority
+     {
+         return KE_ILLEGAL_PRIORITY;
+     }
+diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/Thread.cpp b/ps2xRuntime/src/lib/Kernel/Syscalls/Thread.cpp
+index 5110ee2..0a2022c 100644
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/Thread.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/Thread.cpp
+@@ -112,7 +112,8 @@ namespace ps2_syscalls
+             const int priority = static_cast<int>(getRegU32(ctx, 5));
+             int oldPriority = 0;
+             const int result = ee.changePriority(id, priority, interruptSafe, oldPriority);
+-            setReturnS32(ctx, result);
++            // MKSM: the EE kernel returns the previous priority; games save it to restore it later.
++            setReturnS32(ctx, result == KE_OK ? oldPriority : result);
+             ee.transferIfRequested(interruptSafe);
+         }
+ 
+diff --git a/ps2xTest/src/ps2_runtime_kernel_tests.cpp b/ps2xTest/src/ps2_runtime_kernel_tests.cpp
+index 63b12d9..e36a29f 100644
+--- a/ps2xTest/src/ps2_runtime_kernel_tests.cpp
++++ b/ps2xTest/src/ps2_runtime_kernel_tests.cpp
+@@ -630,6 +630,58 @@ void register_ps2_runtime_kernel_tests()
+             t.Equals(semaphore->option, semaParam.option, "semaphore option must be decoded from offset 0x14");
+         });
+ 
++        // MKSM: the EE kernel's priorities are 0 to 127 and the main thread starts at 0, so a game that creates its
++        // worker threads with the priority ReferThreadStatus reports for the main thread passes 0. Rejecting it left
++        // such a game without its workers.
++        tc.Run("CreateThread and ChangeThreadPriority accept priority 0", [](TestCase &t)
++        {
++            TestEnv env;
++            EeThreadCreateAbi threadParam{};
++            threadParam.func = K_SCHED_HIGH;
++            threadParam.stack = 0x00018000u;
++            threadParam.stack_size = 0x1000;
++            threadParam.gp_reg = 0x00123400u;
++            threadParam.initial_priority = 0;
++            std::memcpy(env.rdram.data() + K_PARAM_ADDR, &threadParam, sizeof(threadParam));
++
++            setRegU32(env.ctx, 4, K_PARAM_ADDR);
++            CreateThread(env.rdram.data(), &env.ctx, &env.runtime);
++            const int threadId = getRegS32(env.ctx, 2);
++            const GuestThread *thread = env.runtime.eeScheduler().thread(threadId);
++            t.IsTrue(threadId >= 2 && thread != nullptr, "priority 0 is a valid initial priority");
++            if (thread != nullptr)
++            {
++                t.Equals(thread->currentPriority, 0, "the thread keeps priority 0");
++            }
++
++            int oldPriority = -1;
++            t.Equals(env.runtime.eeScheduler().changePriority(threadId, 5, false, oldPriority), KE_OK,
++                     "a priority change away from 0 succeeds");
++            t.Equals(oldPriority, 0, "the previous priority was 0");
++            t.Equals(env.runtime.eeScheduler().changePriority(threadId, 0, false, oldPriority), KE_OK,
++                     "a priority change to 0 succeeds");
++            t.Equals(oldPriority, 5, "the previous priority was 5");
++            constexpr int kIllegalPriority = -403; // KE_ILLEGAL_PRIORITY
++            t.Equals(env.runtime.eeScheduler().changePriority(threadId, -1, false, oldPriority), kIllegalPriority,
++                     "a negative priority is still illegal");
++            t.Equals(env.runtime.eeScheduler().changePriority(threadId, 128, false, oldPriority), kIllegalPriority,
++                     "a priority of 128 is still illegal");
++
++            // The syscall returns the previous priority (the EE kernel's contract), not KE_OK: a critical section
++            // helper of the game raises the current thread with ChangeThreadPriority(id, 1) and restores whatever that
++            // call returned.
++            setRegU32(env.ctx, 4, static_cast<uint32_t>(threadId));
++            setRegU32(env.ctx, 5, 9u);
++            ChangeThreadPriority(env.rdram.data(), &env.ctx, &env.runtime);
++            t.Equals(getRegS32(env.ctx, 2), 0, "ChangeThreadPriority returns the previous priority (0)");
++            setRegU32(env.ctx, 5, 3u);
++            ChangeThreadPriority(env.rdram.data(), &env.ctx, &env.runtime);
++            t.Equals(getRegS32(env.ctx, 2), 9, "ChangeThreadPriority returns the previous priority (9)");
++            setRegU32(env.ctx, 5, 200u);
++            ChangeThreadPriority(env.rdram.data(), &env.ctx, &env.runtime);
++            t.Equals(getRegS32(env.ctx, 2), kIllegalPriority, "an illegal priority still returns the error");
++        });
++
+         tc.Run("EE scheduler selects absolute priority then FIFO", [](TestCase &t)
+         {
+             TestEnv env;

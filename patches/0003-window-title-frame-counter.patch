@@ -1,0 +1,225 @@
+diff --git b/ps2xRuntime/include/ps2_frame_counter.h b/ps2xRuntime/include/ps2_frame_counter.h
+new file mode 100644
+index 0000000..7abe52c
+--- /dev/null
++++ b/ps2xRuntime/include/ps2_frame_counter.h
+@@ -0,0 +1,87 @@
++#pragma once
++
++// MKSM: frame counter for the window title. A displayed frame is a change of a DISPFB register (the guest's
++// display buffer flip); the two output circuits are counted separately and the busier one is reported, so a
++// game that writes both registers every frame is counted once per frame.
++
++#include <algorithm>
++#include <atomic>
++#include <cstdint>
++#include <cstdio>
++#include <string>
++
++namespace ps2_frame_counter
++{
++    constexpr uint32_t kDispfb1Offset = 0x0070u; // DISPFB1 in the GS privileged register block
++    constexpr uint32_t kDispfb2Offset = 0x0090u; // DISPFB2
++
++    inline std::atomic<uint64_t> &circuitFrames(unsigned circuit)
++    {
++        static std::atomic<uint64_t> counters[2]{};
++        return counters[circuit & 1u];
++    }
++
++    inline void reset()
++    {
++        circuitFrames(0).store(0u, std::memory_order_relaxed);
++        circuitFrames(1).store(0u, std::memory_order_relaxed);
++    }
++
++    // Called by the GS privileged register writes with the register offset and its value before and after.
++    inline void noteGsRegisterWrite(uint32_t regOff, uint64_t before, uint64_t after)
++    {
++        if (before == after)
++            return;
++        if (regOff == kDispfb1Offset)
++            circuitFrames(0).fetch_add(1u, std::memory_order_relaxed);
++        else if (regOff == kDispfb2Offset)
++            circuitFrames(1).fetch_add(1u, std::memory_order_relaxed);
++    }
++
++    inline uint64_t displayedFrames()
++    {
++        return std::max(circuitFrames(0).load(std::memory_order_relaxed),
++                        circuitFrames(1).load(std::memory_order_relaxed));
++    }
++
++    // "<base> | frame 1234 | 50.0 fps"
++    inline std::string windowTitle(const std::string &base, uint64_t frames, double fps)
++    {
++        char suffix[64];
++        std::snprintf(suffix, sizeof(suffix), " | frame %llu | %.1f fps",
++                      static_cast<unsigned long long>(frames), fps);
++        return base + suffix;
++    }
++
++    // Frame rate over the last refresh interval; refresh() returns true when the title should be updated.
++    class RateTracker
++    {
++    public:
++        bool refresh(uint64_t frames, double now, double interval = 0.5)
++        {
++            if (!m_started)
++            {
++                m_started = true;
++                m_lastFrames = frames;
++                m_lastTime = now;
++                return true;
++            }
++            const double elapsed = now - m_lastTime;
++            if (elapsed < interval)
++                return false;
++            const uint64_t advanced = frames >= m_lastFrames ? frames - m_lastFrames : 0u;
++            m_fps = elapsed > 0.0 ? static_cast<double>(advanced) / elapsed : 0.0;
++            m_lastFrames = frames;
++            m_lastTime = now;
++            return true;
++        }
++
++        double fps() const { return m_fps; }
++
++    private:
++        bool m_started = false;
++        uint64_t m_lastFrames = 0u;
++        double m_lastTime = 0.0;
++        double m_fps = 0.0;
++    };
++}
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index 37b6a4d..a13be03 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -1,4 +1,5 @@
+ #include "runtime/ps2_memory.h"
++#include "ps2_frame_counter.h"
+ #include "runtime/ps2_address.h"
+ #include "runtime/gs/gs_frontend.h"
+ #include "ps2_log.h"
+@@ -965,6 +966,7 @@ void PS2Memory::write32(uint32_t address, uint32_t value)
+         {
+             uint64_t mask = 0xFFFFFFFFULL << (off * 8);
+             uint64_t newVal = (*reg & ~mask) | ((uint64_t)value << (off * 8));
++            ps2_frame_counter::noteGsRegisterWrite(regOff, *reg, newVal); // MKSM: frame counter
+             *reg = newVal;
+         }
+         return;
+@@ -1022,6 +1024,7 @@ void PS2Memory::write64(uint32_t address, uint64_t value)
+         }
+         else if (uint64_t *reg = gsRegPtr(gs_regs, address))
+         {
++            ps2_frame_counter::noteGsRegisterWrite(regOff, *reg, value); // MKSM: frame counter
+             *reg = value;
+         }
+         return;
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 45cb9d2..60f5066 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -11,6 +11,7 @@
+ #include "Kernel/Stubs/GS.h"
+ #include "Kernel/Stubs/MPEG.h"
+ #include "ps2_host_backend.h"
++#include "ps2_frame_counter.h"
+ #include "ps2_iop_host.h"
+ #include "ps2x/iop/iop_subsystem.h"
+ 
+@@ -92,6 +93,8 @@ namespace
+     constexpr uint32_t kGuestHeapSafetyPad = 0x1000u;
+     constexpr uint32_t kGuestHeapHardLimit = 0x01F00000u;
+ 
++    std::string g_windowTitle; // MKSM: the title given to initialize(), extended with the frame counter
++
+     constexpr uint32_t COP0_CAUSE_EXCCODE_MASK = 0x0000007Cu;
+     constexpr uint32_t COP0_CAUSE_BD = 0x80000000u;
+     constexpr uint32_t COP0_STATUS_EXL = 0x00000002u;
+@@ -728,6 +731,7 @@ bool PS2Runtime::initialize(const char *title)
+             std::cerr << "Failed to bind runtime core subsystems" << std::endl;
+             return false;
+         }
++        g_windowTitle = title ? title : ""; // MKSM: frame counter
+ #if defined(PLATFORM_VITA)
+         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
+ #else
+@@ -2385,6 +2389,10 @@ void PS2Runtime::run()
+         }
+         gameThreadFinished.store(true, std::memory_order_release); });
+ 
++    // MKSM: the window title shows the displayed frames (DISPFB changes) and their rate, refreshed twice a second.
++    ps2_frame_counter::reset();
++    ps2_frame_counter::RateTracker frameRate;
++
+     uint64_t tick = 0;
+     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
+     {
+@@ -2420,6 +2428,15 @@ void PS2Runtime::run()
+ 
+             }
+         });
++#if !defined(PLATFORM_VITA)
++        {
++            const uint64_t frames = ps2_frame_counter::displayedFrames();
++            if (frameRate.refresh(frames, GetTime()))
++            {
++                SetWindowTitle(ps2_frame_counter::windowTitle(g_windowTitle, frames, frameRate.fps()).c_str());
++            }
++        }
++#endif
+         uint32_t presentWidth = FB_WIDTH;
+         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
+         UploadFrame(frameTex, this, presentWidth, presentHeight);
+diff --git a/ps2xTest/src/ps2_memory_tests.cpp b/ps2xTest/src/ps2_memory_tests.cpp
+index 0b22fe0..0fa29bc 100644
+--- a/ps2xTest/src/ps2_memory_tests.cpp
++++ b/ps2xTest/src/ps2_memory_tests.cpp
+@@ -1,5 +1,6 @@
+ #include "MiniTest.h"
+ #include "runtime/ps2_memory.h"
++#include "ps2_frame_counter.h"
+ #include "runtime/gs/gs_frontend.h"
+ #include "runtime/gs/ps2_gs_psmct32.h"
+ #include "ps2_runtime.h"
+@@ -179,6 +180,38 @@ void register_ps2_memory_tests()
+             t.Equals(mem.read32(0x00103000u), 0x2468ACE0u, "writes through 0x3010 alias should land in base RDRAM");
+         });
+ 
++        // MKSM: the window title frame counter counts the changes of the DISPFB registers (the buffer flips).
++        tc.Run("DISPFB changes count the displayed frames", [](TestCase &t)
++        {
++            PS2Memory mem;
++            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
++            ps2_frame_counter::reset();
++
++            const uint32_t dispfb1 = PS2_GS_PRIV_REG_BASE + ps2_frame_counter::kDispfb1Offset;
++            const uint32_t dispfb2 = PS2_GS_PRIV_REG_BASE + ps2_frame_counter::kDispfb2Offset;
++            const uint64_t initial = mem.read64(dispfb1);
++            mem.write64(dispfb1, initial);                 // same buffer again: not a flip
++            t.Equals(ps2_frame_counter::displayedFrames(), 0ull, "rewriting the same DISPFB value is not a frame");
++            mem.write64(dispfb1, initial ^ 0x50ull);       // another buffer
++            mem.write64(dispfb1, initial);                 // and back
++            mem.write32(dispfb1, static_cast<uint32_t>(initial ^ 0x50ull)); // low half through a 32-bit write
++            t.Equals(ps2_frame_counter::displayedFrames(), 3ull, "each DISPFB1 change is a displayed frame");
++            mem.write64(dispfb2, initial ^ 0x50ull);       // the other circuit is counted separately
++            t.Equals(ps2_frame_counter::displayedFrames(), 3ull, "the busier circuit is reported, not the sum");
++            mem.write64(PS2_GS_PRIV_REG_BASE + 0x80u, 0x1234ull); // DISPLAY1 is not a frame
++            t.Equals(ps2_frame_counter::displayedFrames(), 3ull, "other privileged registers do not count");
++
++            t.Equals(ps2_frame_counter::windowTitle("PS2-Recomp | X", 1234u, 49.96),
++                     std::string("PS2-Recomp | X | frame 1234 | 50.0 fps"), "title format");
++
++            ps2_frame_counter::RateTracker rate;
++            t.IsTrue(rate.refresh(0u, 10.0), "the first refresh updates the title");
++            t.IsFalse(rate.refresh(10u, 10.25), "no refresh before the interval has elapsed");
++            t.IsTrue(rate.refresh(30u, 11.0), "refresh after the interval");
++            t.Equals(rate.fps(), 30.0, "30 frames in one second");
++            ps2_frame_counter::reset();
++        });
++
+         tc.Run("translateAddress handles kseg and uncached aliases", [](TestCase &t)
+         {
+             PS2Memory mem;

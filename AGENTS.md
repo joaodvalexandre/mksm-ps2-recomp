@@ -16,6 +16,7 @@ scripts and the research log ([`docs/MKSM.md`](docs/MKSM.md)). No game files and
 | `scripts/` | `build.cmd` (everything), `run.cmd` (run with a time limit) |
 | `game/` | the extracted PAL disc (git-ignored): `SLES_535.24`, `SYSTEM.CNF`, `IOP\`, the data files |
 | `docs/MKSM.md` | research log: what was tried, with what result, and the next steps |
+| `tools/ee_disasm.py` | disassembler for the game ELF (capstone), with the names of the generated code and of the configuration |
 
 ## Rules
 
@@ -43,8 +44,12 @@ scripts and the research log ([`docs/MKSM.md`](docs/MKSM.md)). No game files and
    optimization, 8 jobs) builds the tools, generates the C++ from the ELF when the configuration or the ELF
    changed, and builds the runner into `PS2Recomp\out\build-quick`. `scripts\build.cmd -Release` builds the
    optimized profile into `out\build-release` (still without LTO: `patches/0002-lto-option.patch`). Other
-   switches: `-Jobs n`, `-ToolsOnly`, `-Regenerate`, `-Tests`. Logs in `logs\build.log`.
+   switches: `-Jobs n`, `-ToolsOnly`, `-Regenerate`, `-Reset` (check out and patch the submodule again), `-Tests`.
+   Only what changed is rebuilt: the submodule is left alone while it is the pinned commit plus the patches, and
+   regenerated functions are copied only when their content differs. Logs in `logs\build.log`.
 4. `scripts\run.cmd [seconds]` runs the quick build (`-Release` for the other); the game's output goes to
    `logs\run.log` and `logs\run_err.log`. Set `MKSM_ISO` to the disc image path (kept outside the repository)
    for the sector reads the game does outside the extracted files; the image is never part of the build.
    `scripts\screenshot.ps1` saves a PNG of the game window.
+   The window title shows the displayed frames and their rate (`patches/0003`); `F1` hides and shows upstream's
+   runtime debug panel (registers, threads, IOP, RPC history, GS, logs), which opens over the game by default.
