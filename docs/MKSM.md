@@ -58,4 +58,10 @@ independent of that runtime:
   typed through a non-raw string became `scripts<BS>uild.ps1`): toml11 loops on a control character inside a
   comment instead of rejecting it (worth an upstream report). With the comment rewritten the recompiler finishes
   the whole generation in under a minute: 13,588 functions discovered on the stripped ELF, 0 decode failures.
+- **Second build stopped by the user: the final link, not the compile.** All 425 unity objects had compiled in
+  about 20 minutes; what then sat there eating memory was `link.exe` with `/LTCG` (upstream's
+  `EnableFastReleaseMode` adds `/GL` and `/LTCG` to Release builds). `patches/0002-lto-option.patch` adds
+  `PS2X_ENABLE_LTO` (default ON, as upstream) and the build turns it off. The default build is now a **quick
+  profile** (RelWithDebInfo, `/O1`, debug info, 8 jobs, `outuild-quick`), with `-Release` for the optimized one,
+  and the C++ is only regenerated when `configecomp.toml`, the ELF or the recompiler changed.
 

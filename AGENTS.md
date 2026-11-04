@@ -39,6 +39,12 @@ scripts and the research log ([`docs/MKSM.md`](docs/MKSM.md)). No game files and
 
 1. Visual Studio 2022 or later with the C++ tools, CMake and Ninja (the Visual Studio installer provides them).
 2. Extract the PAL disc into `game\` (7-Zip: `7z x "<image>.iso" -ogame`).
-3. `scripts\build.cmd` (first run: builds the tools, generates the C++ from the ELF, builds the runner;
-   `-ToolsOnly`, `-NoGenerate`, `-Tests` as needed). Logs in `logs\build.log`.
-4. `scripts\run.cmd [seconds]`; the output is in `logs\run.log` and `logs\run_err.log`.
+3. `scripts\build.cmd`: the **quick profile** (default; RelWithDebInfo, `/O1`, debug info, no whole-program
+   optimization, 8 jobs) builds the tools, generates the C++ from the ELF when the configuration or the ELF
+   changed, and builds the runner into `PS2Recomp\out\build-quick`. `scripts\build.cmd -Release` builds the
+   optimized profile into `out\build-release` (still without LTO: `patches/0002-lto-option.patch`). Other
+   switches: `-Jobs n`, `-ToolsOnly`, `-Regenerate`, `-Tests`. Logs in `logs\build.log`.
+4. `scripts\run.cmd [seconds]` runs the quick build (`-Release` for the other); the game's output goes to
+   `logs\run.log` and `logs\run_err.log`. Set `MKSM_ISO` to the disc image path (kept outside the repository)
+   for the sector reads the game does outside the extracted files; the image is never part of the build.
+   `scripts\screenshot.ps1` saves a PNG of the game window.

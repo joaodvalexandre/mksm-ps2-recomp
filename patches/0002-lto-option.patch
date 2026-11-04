@@ -1,0 +1,33 @@
+diff --git a/ps2xRuntime/cmake/ReleaseMode.cmake b/ps2xRuntime/cmake/ReleaseMode.cmake
+index 92ef0d5..15e8cdb 100644
+--- a/ps2xRuntime/cmake/ReleaseMode.cmake
++++ b/ps2xRuntime/cmake/ReleaseMode.cmake
+@@ -2,6 +2,10 @@ include(CheckIPOSupported)
+ 
+ check_ipo_supported(RESULT IPO_SUPPORTED OUTPUT IPO_ERROR)
+ 
++# MKSM: whole-program optimization (/GL + /LTCG) makes the final link of a large recompiled game take tens of
++# minutes and many GB of memory; PS2X_ENABLE_LTO=OFF keeps the other optimizations and a normal link.
++option(PS2X_ENABLE_LTO "Enable whole-program optimization (/GL, /LTCG) in Release builds" ON)
++
+ function(EnableFastReleaseMode TargetName)
+     message("> Enabling optimization for: ${TargetName}")
+     if(MSVC)
+@@ -10,7 +14,7 @@ function(EnableFastReleaseMode TargetName)
+                 /O2 # speed
+                 /Ob2 # inline aggressively
+                 /Oi # intrinsics
+-                /GL # whole program opt
++                $<$<BOOL:${PS2X_ENABLE_LTO}>:/GL> # whole program opt (MKSM: PS2X_ENABLE_LTO)
+                 /Gy # function-level linking
+                 /Gw # global data in COMDAT
+                 /GF # string pooling
+@@ -26,7 +30,7 @@ function(EnableFastReleaseMode TargetName)
+         if(TARGET ${TargetName})
+             target_link_options(${TargetName} PRIVATE
+                 $<$<CONFIG:Release>:
+-                    /LTCG # link-time code generation
++                    $<$<BOOL:${PS2X_ENABLE_LTO}>:/LTCG> # link-time code generation (MKSM: PS2X_ENABLE_LTO)
+                     /OPT:REF # remove unreferenced
+                     /OPT:ICF # fold identical COMDATs
+                 >
