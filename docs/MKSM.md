@@ -186,3 +186,128 @@ independent of that runtime:
   what pointed at the IOP rather than at the frame budget.
 - **Not usable:** `PS2Runtime::iopDebugSnapshot()` returned zero cycles, instructions and threads from a host
   thread while nine modules were loaded; the IOP instruction rate had to be inferred from the profile.
+- **Hang 5: a 64-bit sign test compiled as 32-bit.** With the logs off the loader loop runs at full speed
+  (28 million polls a minute) but its last request never completes. The WAD set's table of contents (`PWF `
+  header, 8-byte entries, `0x19000000`-byte file segments) has two entry formats, told apart by bit 63 of the
+  entry loaded with `ld`: `0x211B74 ld a2; bgez a2` (plain offset/size pair) versus a packed form. The recompiler
+  translated `bgez` as `GPR_S32(ctx, 6) >= 0`, the sign of the low word (`0x6D400028`, positive), so the packed
+  entry `6D400028 803AA002` was read as offset `0x6D400028` (file 4, WAH, at `0x09400028`) with size
+  `0x803AA002`: a negative sector count, a failed device read, status 1 instead of 3, and the loader polls for
+  ever. On the R5900 `blez`, `bgtz`, `bltz`, `bgez` and their likely/link forms test the whole 64-bit register
+  (for a 32-bit value the result is the same, since results are sign-extended).
+  `patches/0007-branch-sign-tests-64bit.patch` emits `GPR_S64` for those branches (test in the code generator
+  tests). Found with `MKSM_TRACE_CALLS` on the loader's request chain and `MKSM_TRACE_WATCH` on the device and
+  CD objects, then by reading the WAD header and the decode routine `0x211AF0`.
+- **Crash 6: guest callbacks ran on the main thread's stack.** With patch 0007 the game got through its loader,
+  and a new, intermittent failure appeared: the game thread died with "No mapping for the Unicode character
+  exists in the target multi-byte code page" while loading its second IOP module. `MKSM_TRACE_STRINGS=1` on the
+  module-load wrapper showed the path buffer (on the main thread's stack at `0x1FFFF20`) with garbage in its
+  first eight bytes and the name cut after eight; a run with watches instead of string dumps did not crash at
+  all. Upstream reserves the stacks for guest invocations (the vsync callback, interrupt handlers) from the top
+  of RAM (`m_asyncCallbackStackTop = PS2_RAM_SIZE`), which is where the game's main thread keeps its stack
+  (SetupThread with stack -1: sp just below `0x2000000`), so a vsync callback that fires inside a function
+  overwrites that function's locals. It became visible once the vsync ran in real time (patch 0005) and the
+  boot was slow enough (the string dumps) for a callback to land during the path build.
+  `patches/0008-callback-stacks-below-main-stack.patch` moves the invocation stacks to `0x1F40000`-`0x1FE0000`,
+  above the runtime's guest pools and below any plausible main stack (test: the IRQ handler's sp is in that
+  range).
+- **Crash 7: `sceDmaRecvN` was not implemented.** With patches 0007 and 0008 the game finished its loader in
+  about two seconds and went on (new vsync-waiting loops at `0x271A58`, 25 frames, and `0x226EA8`), then ended
+  with "Unimplemented PS2 stub called: sceDmaRecvN" from `0x43DF60`, a routine that saves the scratchpad:
+  `sceDmaGetChan(8)` (fromSPR), a direct write of SADR (`sw` to `0x1000D080`) and
+  `sceDmaRecvN(chan, 0x75F400, 0x400)` (0x400 quadwords, the whole 16 KB). Upstream implements the sends, not the
+  receives, although its memory model already performs scratchpad transfers (`tryProcessScratchpadDma`).
+  `patches/0009-dma-recv-normal.patch`: normal-mode receive (MADR, QWC, CHCR with STR, normal mode, direction
+  to memory, exactly what the game's own libdma does at `0x3848B0`), test in the memory tests.
+- **Background audit.** A read-only workflow (two auditors, two skeptical verifiers) was started to list, ahead
+  of the crashes, the stubs the game binds that upstream leaves unimplemented or incomplete, and other 32/64-bit
+  translation errors of the kind fixed by patch 0007.
+- **The game runs without crashing.** With patch 0009 the game ran a full 75-second session: the vsync callback
+  at the real rate (4,200 in 71 s), the scratchpad save 8,000 times, the EE thread idle 78 per cent of the time,
+  every guest thread asleep between frames. A backtrace of the main thread (heuristic: stack words that follow a
+  `jal`/`jalr`, printed by the override's thread dump) shows the frame loop
+  `0x1DB9F8` -> ... -> `0x272DE0` -> `0x43E0F8` -> `0x4158D8`, the game's frame sync: it sets "main waiting"
+  (`0x53443C`) and sleeps until worker thread 3 (`0x4148B0`) wakes it after its per-frame job. That is the
+  normal steady state of a frame loop, not a hang.
+- **The frame counter never counted.** The title kept saying `frame 0` because this game flips with
+  `sceGsSwapDBuff`/`sceGsPutDispEnv`, which upstream implements as handlers that assign the display registers
+  directly (`applyGsDispEnv`), bypassing the privileged register stores that patch 0003 hooked. Patch 0003 now
+  counts at each vertical blank in the EE scheduler: a frame is a vblank at which DISPFB1 or DISPFB2 differs
+  from the previous vblank, whatever wrote it (test updated).
+- **The magenta screen** is upstream's placeholder when the GS backend finds no valid display (PMODE without an
+  enabled circuit or an empty DISPLAY/DISPFB), not a rendering of the game. The override's call tracer now also
+  prints PMODE, SMODE2, DISPFB1/2, DISPLAY1/2 and BGCOLOR with each summary (`[mksm-gs]`).
+- **The display comes up, the first movie never shows.** With the frame counter fixed the title read `frame 3`:
+  `sceGsResetGraph(0, 1, 3, 1)` (PAL), `sceGsSetDefDBuff(psm 0, 512 x 512)` and one `sceGsSwapDBuff`, after
+  which PMODE, DISPFB and DISPLAY describe a valid 512 x 512 display and the window turns black instead of
+  magenta. The main thread was then in CRI's Sofdec movie player (`0x270038`, `c:/Projects/Ps2/Cri/movie.cpp` in
+  the ELF, the Midway logo): once per vsync it sleeps in the frame sync and runs one step (`0x26FEA8`); it
+  created its MPEG decoder (`sceMpegCreate`, `sceMpegInit`, four `sceMpegAddCallback`) but never called
+  `sceMpegGetPicture` in 1,500 steps, so no picture, no swap request (`0x4FC09C`, cleared only by the vsync
+  pump `0x272E08` that calls `sceGsSwapDBuff`), and the game would stay on that movie. Movie playback (Sofdec's
+  stream through the IOP, the runtime's MPEG/IPU handlers) is left for later.
+- **Movie skip.** The player's loop leaves when the word at offset `0x1EC` of the player object is 1 and then
+  tears the movie down as on a normal stop. The override wraps the step function to set it:
+  `MKSM_SKIP_MOVIES` (default on, `MKSM_SKIP_MOVIES=0` plays the movies), logged as `[mksm] movie skipped`.
+- **Missing targets.** After the skip the game tail-jumped to `0x468B50`, which had no recompiled function:
+  "[guest-branch:missing-target] ... target=0x468b50". It is libmpeg's `sceMpegDelete` (`jr ra; li v0, 1`), merged
+  by the analyzer into the stubbed `sceMpegInit` range. `tools/missing_targets.py` lists every direct `jal`/`j`
+  whose target is neither a generated function nor a resume label of one: 76, of which 72 come from
+  `sub_0049A9A0`, a "function" spanning the last megabyte of the code segment (data decoded as code), two
+  only from stubbed functions whose bodies never run, and two real: `0x385BD8` (the libcdvd callback dispatch,
+  merged into the stubbed `sceVu0RotTransPers` range, reached from the CD read interrupt) and `0x487890` (the
+  end of the kernel init after `iSetTimerAlarm`). `config/recomp.toml` now binds `sceMpegDelete@0x00468B50` and
+  declares the other two as entry points.
+- **Translation audit.** A read-only audit of the recompiler for 32/64-bit and MMI errors (the workflow above)
+  found, among others: `CVT.W.S` rounded to nearest (`nearbyintf`) where the EE truncates toward zero and
+  saturates, so every float-to-int conversion of the game could be one off; `PABSW`/`PABSH` read `rs` (always
+  0 in that encoding), so their 25 uses in the game (seven functions around `0x2A6260`-`0x2ACCA0`) always gave 0;
+  `PHMADH` squared its operands and accumulated into one 64-bit value (12 uses in `0x438280`, a 32-tap
+  fixed-point filter); `PEXEW` and `PEXEH` swapped adjacent pairs instead of exchanging elements 0 and 2;
+  `PROT3W` rotated all four words; `MOVZ`/`MOVN` copied 128 bits. `patches/0010-mmi-fpu-semantics.patch` fixes
+  them (tests in the code generator and float semantics tests). Not changed: `LQ`/`SQ` do not clear the low four
+  address bits (no unaligned use found in the game), and latent errors in instructions the game does not use
+  (`BLTZALL`/`BGEZALL` link, `PMTHI`/`PMFHI` widths, `PSLLVW` lanes).
+- **The game renders.** With the movies skipped and `sceMpegDelete` reachable, the window title reached
+  `frame 815 | 10.0 fps` after 80 seconds: the game flips its 640-wide double buffer (`DISPFB` `FBP 0`/`0x50`)
+  and the host profile is dominated by the CPU GS backend (`WritePixel`, `DrawTriangle`, texture sampling with
+  CLUT). The window still showed the magenta placeholder: PMODE and SMODE2 were 0, so no read circuit was on.
+- **`sceGsSetDefDispEnv` left PMODE at 0.** The only code that writes the display registers is
+  `sceGsPutDispEnv` (a runtime handler) from a structure filled by `sceGsSetDefDispEnv` (also a handler). The
+  game's own libgraph version (`0x3831F0`) stores `pmode = 0x66` (read circuit 2) and SMODE2 from the video mode
+  (2 non-interlaced, 3 interlaced field, 1 interlaced frame); upstream's handler only wrote DISPFB and DISPLAY,
+  leaving zeros in a fresh structure. `patches/0011-gs-def-disp-env-pmode.patch` fills both (test in the GS
+  tests). DISPLAY's DX/DY still ignore the video mode's base offsets (the host presentation does not use them).
+- **Stub bindings need a function start.** `sceIpuSync@0x0046F700`, `sceVu0RotMatrixX@0x00385898`,
+  `InitTLB@0x00487C10` and `sceMpegDelete@0x00468B50` are in the stubs list but nothing is bound: the recompiler
+  applies a stub only to an existing function start, and the analyzer merged these into the previous range. An
+  entry point at the same address makes the recompiler synthesize the function (or a resume label), which then
+  runs the game's own code; the runtime handler is still not bound to it. `sceMpegDelete` works that way (the
+  game's body is `return 1`). A recompiler change (split the range at a stub address) would be the real fix.
+- **Builds were full rebuilds.** Upstream tracks a placeholder `register_functions.cpp` in the runner directory;
+  the build overwrote it with the generated one, so the "pinned commit + patches" check never matched and every
+  build reset the submodule, rewriting all patched files; since patch 0010 changes the runtime macros header of
+  the precompiled header, every build recompiled all 425 unity batches. `scripts\build.ps1` now leaves the
+  generated files out of the check and, when a reset is needed (a new or edited patch), gives the files whose
+  content did not change their previous time stamps back, so only what a patch changes is rebuilt.
+- **First screen (2026-11-04, 23:47).** With patch 0011 the display is on (PMODE `0x66`, SMODE2 3) and the
+  window shows the game's first screen: a dialog frame with ornate gold corners on a dark blue panel and a faint
+  dragon emblem in the middle, at a steady 12 frames per second (the game flips every frame it finishes; the
+  quick build is CPU-bound in the GS rasterizer). The picture does not change over a minute and has no text: it
+  is most likely the boot message box (memory card check) waiting for something, with the text missing. Two
+  audit findings can explain the missing text and are next: the libpkt tag counts doubled by the stubbed helpers
+  (2D drawing) and `sceGsExecLoadImage` uploading images eight times too far into VRAM.
+- **Debug panel.** Upstream's runtime debugger now starts hidden (`patches/0012-debug-panel-starts-hidden.patch`,
+  F1 shows it), so the window shows the game. No test: the panel is only built into the runner.
+- **Build state check, again.** After a reset the checkout restores upstream's placeholder
+  `register_functions.cpp`; with nothing to regenerate, the copy of the generated code was skipped and the runner
+  was built with an empty dispatch table ("No exact recompiled function for guest PC 0x26fea8", the entry point
+  missing). A reset now forces a complete copy of the generated code (the `.synced` stamp is removed).
+- **Audit results (all verified by a second agent).** Confirmed and pending: libpkt double QWC (remove the five
+  libpkt stubs, the game's own library is plain memory code), `sceGsExecLoadImage`/`StoreImage` DBP times 8,
+  `sceGsPutDrawEnv` ignoring NLOOP (TEST_1, context 2 and the clear sprite never applied) and `sceGsSetDefClear`
+  writing nothing, `sceGsSetDefDBuff` reading arguments 5-7 from the stack instead of `$t0`-`$t2` (EE ABI),
+  `sceVu0RotTransPers` with the 12.4/integer modes swapped, `sceVu0InnerProduct`/`Normalize`/
+  `NormalLightMatrix` using w, `rand` returning 15-bit host values instead of the game's LCG, the IOP heap
+  library half stubbed (free and query do nothing), and the MPEG HLE having no data path for Sofdec (movies).
+  Refuted as unreachable today: `sceSdTransToIOP` (TODO), `sceSifSendCmd`, and the unbound stub entries.

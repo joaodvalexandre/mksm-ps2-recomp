@@ -3,7 +3,8 @@
 An attempt to run *Mortal Kombat: Shaolin Monks* (PlayStation 2, PAL release `SLES-53524`) natively on Windows by
 static recompilation of its MIPS executable to C++ with [PS2Recomp](https://github.com/ran-j/PS2Recomp).
 
-**Status: exploring.** The project restarted on 2026-11-03 on upstream PS2Recomp. The previous attempt (NTSC-U
+**Status: boots to its first screen.** The project restarted on 2026-11-03 on upstream PS2Recomp; on 2026-11-04
+the PAL build boots, runs its loaders and threads and shows its first screen (without text yet, movies skipped). The previous attempt (NTSC-U
 release on a heavily patched runtime) is kept in the branch `archive/ntsc-waffle-runtime`; what it taught about the
 game is summarized in the [research log](docs/MKSM.md).
 

@@ -1,0 +1,56 @@
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 60f5066..69db623 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -92,6 +92,12 @@ namespace
+     constexpr uint32_t kGuestHeapDefaultAlignment = 16u;
+     constexpr uint32_t kGuestHeapSafetyPad = 0x1000u;
+     constexpr uint32_t kGuestHeapHardLimit = 0x01F00000u;
++    // MKSM: the stacks of guest invocations (the vsync callback, interrupt and RPC handlers) used to be reserved
++    // from the top of RAM, where a game's main thread keeps its own stack (SetupThread with stack -1), so a
++    // callback that fired inside a function overwrote that function's locals. They now live above the runtime's
++    // guest pools (0x1F00000-0x1F3FFFF) and below any plausible main stack.
++    constexpr uint32_t kAsyncCallbackStackFloor = 0x01F40000u;
++    constexpr uint32_t kAsyncCallbackStackTop = 0x01FE0000u;
+ 
+     std::string g_windowTitle; // MKSM: the title given to initialize(), extended with the frame counter
+ 
+@@ -506,8 +512,8 @@ PS2Runtime::PS2Runtime()
+     m_guestHeapLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
+     m_guestHeapSuggestedBase = kGuestHeapDefaultBase;
+     m_guestHeapConfigured = false;
+-    m_asyncCallbackStackFloor = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
+-    m_asyncCallbackStackTop = PS2_RAM_SIZE;
++    m_asyncCallbackStackFloor = kAsyncCallbackStackFloor; // MKSM
++    m_asyncCallbackStackTop = kAsyncCallbackStackTop;     // MKSM
+ }
+ 
+ void PS2Runtime::setDebugUiCallbacks(DebugUiCallback initCallback,
+@@ -976,8 +982,10 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
+     {
+         std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
+         const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
+-        m_asyncCallbackStackFloor = std::min(std::max(hardLimit, suggestedHeapBase), PS2_RAM_SIZE);
+-        m_asyncCallbackStackTop = PS2_RAM_SIZE;
++        // MKSM: see kAsyncCallbackStackFloor; the floor stays above the guest heap, the top below the main stack.
++        m_asyncCallbackStackFloor = std::max(kAsyncCallbackStackFloor,
++                                             std::min(std::max(hardLimit, suggestedHeapBase), PS2_RAM_SIZE));
++        m_asyncCallbackStackTop = std::max(kAsyncCallbackStackTop, m_asyncCallbackStackFloor);
+     }
+ 
+     LoadedModule module;
+diff --git a/ps2xTest/src/ps2_runtime_interrupt_tests.cpp b/ps2xTest/src/ps2_runtime_interrupt_tests.cpp
+index 513e2da..095d66c 100644
+--- a/ps2xTest/src/ps2_runtime_interrupt_tests.cpp
++++ b/ps2xTest/src/ps2_runtime_interrupt_tests.cpp
+@@ -617,6 +617,10 @@ void register_ps2_runtime_interrupt_tests()
+                      "IRQ handler must not reuse the transient stack captured at registration");
+             t.Equals(guardAfter, guard,
+                      "IRQ handler stack writes must not clobber the registering thread's live frame");
++            // MKSM: the invocation stacks live between the runtime's guest pools and the main thread's stack at
++            // the top of RAM, never inside it.
++            t.IsTrue(g_irqObservedSp >= 0x01F40000u && g_irqObservedSp <= 0x01FE0000u,
++                     "invocation stacks must sit between the runtime pools and the main thread's stack");
+         });
+ 
+         tc.Run("pending async callbacks execute sequentially on a reusable invocation stack", [](TestCase &t)

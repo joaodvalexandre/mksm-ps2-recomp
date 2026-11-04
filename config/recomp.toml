@@ -122,6 +122,9 @@ stubs = [
   "sceCdBreak@0x00467E70",
   "sceMpegCreate@0x00467FF8",
   "sceMpegInit@0x00468AA0",
+  # Hand edit: sceMpegDelete (jr ra; li v0, 1) follows sceMpegInit and was merged into its range; the movie
+  # player's teardown tail-jumps to it.
+  "sceMpegDelete@0x00468B50",
   "sceMpegGetPicture@0x00468B60",
   "sceMpegGetPictureRAW8@0x00468BA8",
   "sceMpegReset@0x00468C00",
@@ -187,6 +190,12 @@ stubs = [
 # Guest functions without runtime handlers that may be referenced by address.
 # PS2Recomp keeps their guest implementation and exposes exact callable entries.
 entry_points = [
+  # Hand edits (tools/missing_targets.py): functions the analyzer merged into the previous range, reached by a
+  # tail jump: the libcdvd callback dispatch after the stubbed range at 0x385B70, the end of the kernel init.
+  "mksm_cdvd_callback@0x00385BD8",
+  "mksm_kernel_init_tail@0x00487890",
+  # A stub binding only applies to a function start: this entry creates the function the sceMpegDelete stub binds.
+  "mksm_mpeg_delete@0x00468B50",
   "__terminate@0x00201380",
   "__throw_type_match@0x002013A8",
   "new_eh_context@0x002013E0",

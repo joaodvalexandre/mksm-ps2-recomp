@@ -15,6 +15,7 @@
 #include "ps2_runtime.h"
 #include "runtime/ee_scheduler.h"
 #include "ps2x/iop/iop_types.h"
+#include "runtime/gs/gs_types.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -72,6 +73,55 @@ namespace
         }
         writeU32(rdram, kHeapBreakAddress, next);
         setReturnU32(ctx, current);
+    }
+
+    // MKSM_SKIP_MOVIES (default 1): the CRI Sofdec movies (c:/Projects/Ps2/Cri/movie.cpp in the game) do not play
+    // yet: the player never gets a decodable picture, so the game would stay on the first movie forever. The
+    // player's frame loop (0x270038) leaves when the word at offset 0x1EC of the player object is 1, then tears the
+    // movie down as on a normal stop; the per-frame step (0x26FEA8) is wrapped to set that word.
+    // MKSM_SKIP_MOVIES=0 plays the movies (for working on the playback).
+    constexpr uint32_t kMovieStepAddress = 0x0026FEA8u;
+    constexpr uint32_t kMovieStepFirstWord = 0x27BDFF20u; // addiu sp, sp, -0xe0
+    constexpr uint32_t kMovieStopFlagOffset = 0x1ECu;
+    PS2Runtime::RecompiledFunction g_originalMovieStep = nullptr;
+    uint32_t g_moviesSkipped = 0;
+
+    void skippingMovieStep(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t player = getRegU32(ctx, 4);
+        if (ctx->pc == kMovieStepAddress && player != 0u && (player & 0x1FFFFFFFu) < 0x02000000u - 0x200u)
+        {
+            if (readU32(rdram, player + kMovieStopFlagOffset) != 1u && g_moviesSkipped < 64u)
+                std::fprintf(stderr, "[mksm] movie skipped (player 0x%08X)\n", player);
+            ++g_moviesSkipped;
+            writeU32(rdram, player + kMovieStopFlagOffset, 1u);
+        }
+        g_originalMovieStep(rdram, ctx, runtime);
+        if (player != 0u && (player & 0x1FFFFFFFu) < 0x02000000u - 0x200u)
+            writeU32(rdram, player + kMovieStopFlagOffset, 1u);
+    }
+
+    void installMovieSkip(PS2Runtime &runtime)
+    {
+        const char *flag = std::getenv("MKSM_SKIP_MOVIES");
+        if (flag && *flag == '0')
+        {
+            std::fprintf(stderr, "[mksm] movies play (MKSM_SKIP_MOVIES=0)\n");
+            return;
+        }
+        const uint8_t *rdram = runtime.memory().getRDRAM();
+        if (readU32(rdram, kMovieStepAddress) != kMovieStepFirstWord)
+        {
+            std::fprintf(stderr, "[mksm] movie player step not found at 0x%08X, movies are not skipped\n", kMovieStepAddress);
+            return;
+        }
+        g_originalMovieStep = runtime.lookupFunction(kMovieStepAddress);
+        if (!g_originalMovieStep || !runtime.replaceFunction(kMovieStepAddress, skippingMovieStep))
+        {
+            std::fprintf(stderr, "[mksm] movie skip could not be installed\n");
+            return;
+        }
+        std::fprintf(stderr, "[mksm] movies are skipped (MKSM_SKIP_MOVIES=0 plays them)\n");
     }
 
     void replaceSbrk(PS2Runtime &runtime)
@@ -229,6 +279,37 @@ namespace
         }
     }
 
+    // A heuristic backtrace: the words on the guest stack that point just after a jal or jalr in the game's code.
+    void printGuestBacktrace(const uint8_t *rdram, uint32_t ra, uint32_t sp)
+    {
+        constexpr uint32_t kCodeStart = 0x00100000u;
+        constexpr uint32_t kCodeEnd = 0x005B2294u;
+        const auto isCallReturn = [&](uint32_t address)
+        {
+            if (address < kCodeStart + 8u || address >= kCodeEnd || (address & 3u) != 0u)
+                return false;
+            const uint32_t call = readU32(rdram, address - 8u);
+            const bool jal = (call >> 26) == 0x03u;
+            const bool jalr = (call >> 26) == 0u && (call & 0x3Fu) == 0x09u;
+            return jal || jalr;
+        };
+        std::fprintf(stderr, "    ra=0x%08X sp=0x%08X frames:", ra, sp);
+        uint32_t printed = 0;
+        for (uint32_t offset = 0; offset < 0x800u && printed < 12u; offset += 4u)
+        {
+            const uint32_t address = (sp & 0x1FFFFFFFu) + offset;
+            if (address + 4u > 0x02000000u)
+                break;
+            const uint32_t value = readU32(rdram, address);
+            if (isCallReturn(value))
+            {
+                std::fprintf(stderr, " 0x%08X", value);
+                ++printed;
+            }
+        }
+        std::fprintf(stderr, "\n");
+    }
+
     void printThreads(PS2Runtime *runtime, uint32_t stamp)
     {
         const EeKernelSnapshot snapshot = runtime->eeScheduler().snapshot();
@@ -240,6 +321,15 @@ namespace
                          thread.pc, thread.currentPriority, thread.wakeupCount);
         }
         std::fprintf(stderr, "\n");
+        const uint8_t *rdram = runtime->memory().getRDRAM();
+        for (const EeThreadSnapshot &thread : snapshot.threads)
+        {
+            if (thread.status == EeThreadStatus::Waiting || thread.status == EeThreadStatus::Ready)
+            {
+                std::fprintf(stderr, "[mksm-threads]   id=%d", thread.id);
+                printGuestBacktrace(rdram, thread.ra, thread.sp);
+            }
+        }
     }
 
     // MKSM_TRACE_CALLS=0xADDR,0xADDR,...: counts the calls of up to 32 guest functions and logs the first eight of
@@ -258,6 +348,7 @@ namespace
     TracedCall g_tracedCalls[kMaxTracedCalls];
     size_t g_tracedCallCount = 0;
     uint32_t g_traceSummaryInterval = 3000; // MKSM_TRACE_SUMMARY=<calls of the first traced function>
+    bool g_traceStrings = false;              // MKSM_TRACE_STRINGS=1
     std::chrono::steady_clock::time_point g_traceStart;
 
     void tracedCallEntry(size_t index, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -270,6 +361,27 @@ namespace
         else
         {
             ++entry.calls;
+            if (entry.calls <= 8u && g_traceStrings)
+            {
+                // MKSM_TRACE_STRINGS=1: the bytes at a0, for calls that take a string or a small structure.
+                const uint32_t a0 = getRegU32(ctx, 4);
+                std::fprintf(stderr, "[mksm-calls] 0x%08X #%u a0 bytes:", entry.address, entry.calls);
+                if (a0 != 0u && (a0 & 0x1FFFFFFFu) + 40u < 0x02000000u)
+                {
+                    for (uint32_t i = 0; i < 40u; ++i)
+                    {
+                        const uint8_t byte = rdram[(a0 & 0x1FFFFFFFu) + i];
+                        std::fprintf(stderr, " %02X", byte);
+                    }
+                    std::fprintf(stderr, " |");
+                    for (uint32_t i = 0; i < 40u; ++i)
+                    {
+                        const uint8_t byte = rdram[(a0 & 0x1FFFFFFFu) + i];
+                        std::fputc((byte >= 32u && byte < 127u) ? static_cast<int>(byte) : '.', stderr);
+                    }
+                }
+                std::fputc(10, stderr);
+            }
             if (entry.calls <= 8u)
             {
                 std::fprintf(stderr, "[mksm-calls] 0x%08X #%u a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X ra=0x%08X\n",
@@ -289,6 +401,13 @@ namespace
                 std::fprintf(stderr, "\n");
                 printWatches(rdram);
                 printThreads(runtime, entry.calls);
+                const GSRegisters &gs = runtime->memory().gs();
+                std::fprintf(stderr,
+                             "[mksm-gs] pmode=0x%llX smode2=0x%llX dispfb1=0x%llX display1=0x%llX dispfb2=0x%llX display2=0x%llX bgcolor=0x%llX\n",
+                             static_cast<unsigned long long>(gs.pmode), static_cast<unsigned long long>(gs.smode2),
+                             static_cast<unsigned long long>(gs.dispfb1), static_cast<unsigned long long>(gs.display1),
+                             static_cast<unsigned long long>(gs.dispfb2), static_cast<unsigned long long>(gs.display2),
+                             static_cast<unsigned long long>(gs.bgcolor));
             }
         }
         const auto start = std::chrono::steady_clock::now();
@@ -314,6 +433,8 @@ namespace
         const char *list = std::getenv("MKSM_TRACE_CALLS");
         if (!list || !*list)
             return;
+        if (const char *strings = std::getenv("MKSM_TRACE_STRINGS"))
+            g_traceStrings = *strings && *strings != '0';
         if (const char *interval = std::getenv("MKSM_TRACE_SUMMARY"))
             g_traceSummaryInterval = std::max(1u, static_cast<uint32_t>(std::strtoul(interval, nullptr, 10)));
         g_traceStart = std::chrono::steady_clock::now();
@@ -574,6 +695,7 @@ namespace
         std::setvbuf(stdout, nullptr, _IONBF, 0);
         configureDiscImage();
         replaceSbrk(runtime);
+        installMovieSkip(runtime);
         installSyncVTrace(runtime);
         installThreadTrace(runtime);
         parseWatches();

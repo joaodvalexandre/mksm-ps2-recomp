@@ -1,0 +1,84 @@
+diff --git a/ps2xRecomp/src/lib/control_flow_emitter.cpp b/ps2xRecomp/src/lib/control_flow_emitter.cpp
+index 4bf8dc5..b5f514d 100644
+--- a/ps2xRecomp/src/lib/control_flow_emitter.cpp
++++ b/ps2xRecomp/src/lib/control_flow_emitter.cpp
+@@ -404,12 +404,15 @@ namespace ps2recomp
+         case OPCODE_BNE:
+         case OPCODE_BNEL:
+             return fmt::format("GPR_U64(ctx, {}) != GPR_U64(ctx, {})", rsReg, rtReg);
++        // MKSM: the R5900 tests the whole 64-bit register (bit 63 is the sign). A 32-bit result is sign-extended,
++        // so the 64-bit test gives the same answer for it, but a value loaded with ld (or produced by a doubleword
++        // operation) whose low word happens to be positive was branching the wrong way.
+         case OPCODE_BLEZ:
+         case OPCODE_BLEZL:
+-            return fmt::format("GPR_S32(ctx, {}) <= 0", rsReg);
++            return fmt::format("GPR_S64(ctx, {}) <= 0", rsReg);
+         case OPCODE_BGTZ:
+         case OPCODE_BGTZL:
+-            return fmt::format("GPR_S32(ctx, {}) > 0", rsReg);
++            return fmt::format("GPR_S64(ctx, {}) > 0", rsReg);
+         case OPCODE_REGIMM:
+             switch (m_branchInst.rt)
+             {
+@@ -417,12 +420,12 @@ namespace ps2recomp
+             case REGIMM_BLTZL:
+             case REGIMM_BLTZAL:
+             case REGIMM_BLTZALL:
+-                return fmt::format("GPR_S32(ctx, {}) < 0", rsReg);
++                return fmt::format("GPR_S64(ctx, {}) < 0", rsReg); // MKSM: 64-bit sign
+             case REGIMM_BGEZ:
+             case REGIMM_BGEZL:
+             case REGIMM_BGEZAL:
+             case REGIMM_BGEZALL:
+-                return fmt::format("GPR_S32(ctx, {}) >= 0", rsReg);
++                return fmt::format("GPR_S64(ctx, {}) >= 0", rsReg); // MKSM: 64-bit sign
+             default:
+                 return "false";
+             }
+diff --git a/ps2xTest/src/code_generator_tests.cpp b/ps2xTest/src/code_generator_tests.cpp
+index d36b422..8bbfa34 100644
+--- a/ps2xTest/src/code_generator_tests.cpp
++++ b/ps2xTest/src/code_generator_tests.cpp
+@@ -449,6 +449,42 @@ void register_code_generator_tests()
+                  "coalesced delay-slot CHCR store should not remain as an individual WRITE32");
+     });
+ 
++        // MKSM: blez/bgtz/bltz/bgez test the 64-bit register on the R5900. A game's table-of-contents decoder loads
++        // an 8-byte entry with ld and branches on bgez: with the low word tested instead, entries whose low word
++        // was positive took the wrong format path.
++        tc.Run("sign-test branches compare the whole 64-bit register", [](TestCase &t) {
++            R5900Decoder decoder;
++            Function func;
++            func.name = "sign_tests";
++            func.start = 0x1000;
++            func.end = 0x1030;
++            func.isRecompiled = true;
++            func.isStub = false;
++
++            std::vector<Instruction> instructions;
++            instructions.push_back(decoder.decodeInstruction(0x1000u, 0xDCE60000u)); // ld   $a2, 0($a3)
++            instructions.push_back(decoder.decodeInstruction(0x1004u, 0x04C10003u)); // bgez $a2, +3
++            instructions.push_back(decoder.decodeInstruction(0x1008u, 0x00000000u)); // nop (delay slot)
++            instructions.push_back(decoder.decodeInstruction(0x100Cu, 0x04E00002u)); // bltz $a3, +2
++            instructions.push_back(decoder.decodeInstruction(0x1010u, 0x00000000u)); // nop
++            instructions.push_back(decoder.decodeInstruction(0x1014u, 0x18800001u)); // blez $a0, +1
++            instructions.push_back(decoder.decodeInstruction(0x1018u, 0x00000000u)); // nop
++            instructions.push_back(decoder.decodeInstruction(0x101Cu, 0x1CA00001u)); // bgtz $a1, +1
++            instructions.push_back(decoder.decodeInstruction(0x1020u, 0x00000000u)); // nop
++            instructions.push_back(decoder.decodeInstruction(0x1024u, 0x03E00008u)); // jr $ra
++            instructions.push_back(decoder.decodeInstruction(0x1028u, 0x00000000u)); // nop
++
++            CodeGenerator gen({}, {});
++            const std::string generated = gen.generateFunction(func, instructions, false);
++            printGeneratedCode("sign-test branches compare the whole 64-bit register", generated);
++
++            t.IsTrue(generated.find("GPR_S64(ctx, 6) >= 0") != std::string::npos, "bgez must test the 64-bit value");
++            t.IsTrue(generated.find("GPR_S64(ctx, 7) < 0") != std::string::npos, "bltz must test the 64-bit value");
++            t.IsTrue(generated.find("GPR_S64(ctx, 4) <= 0") != std::string::npos, "blez must test the 64-bit value");
++            t.IsTrue(generated.find("GPR_S64(ctx, 5) > 0") != std::string::npos, "bgtz must test the 64-bit value");
++            t.IsTrue(generated.find("GPR_S32(ctx, 6) >= 0") == std::string::npos, "no 32-bit sign test may remain");
++        });
++
+         tc.Run("emits labels and gotos for internal branches", [](TestCase &t) {
+             Function func;
+             func.name = "test_func";

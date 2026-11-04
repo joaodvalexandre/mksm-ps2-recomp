@@ -37,12 +37,24 @@ function Hash-Text([string]$text) {
     try { return [System.BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($text))) -replace '-', '' }
     finally { $sha.Dispose() }
 }
+# The generated code lives in the submodule's tree: the runner directory (where upstream also tracks a placeholder
+# register_functions.cpp) and the two generated headers. It is left out of the state and survives a reset.
+$GeneratedPathspec = @(':(exclude)ps2xRuntime/src/runner', ':(exclude)ps2xRuntime/include/ps2_recompiled_functions.h',
+                       ':(exclude)ps2xRuntime/include/ps2_recompiled_stubs.h')
 function Tree-State($repo) {
     # The diff of the tracked files plus the untracked files outside the generated code and the builds (a patch may add
     # a file): identical for "pinned commit + patches", different as soon as anything else is touched.
     $untracked = git -C $repo ls-files --others --exclude-standard |
         Where-Object { $_ -notlike 'ps2xRuntime/src/runner/*' -and $_ -notlike 'out/*' -and $_ -notlike 'ps2xRuntime/include/ps2_recompiled_*' }
-    return Hash-Text ((git -C $repo diff --no-color | Out-String) + "`n" + (($untracked | Sort-Object) -join "`n"))
+    $diff = git -C $repo diff --no-color -- . @GeneratedPathspec | Out-String
+    return Hash-Text ($diff + "`n" + (($untracked | Sort-Object) -join "`n"))
+}
+# The files a reset rewrites: the patched tracked files and the files the patches add.
+function Patched-Files($repo) {
+    $tracked = @(git -C $repo diff --name-only -- . @GeneratedPathspec)
+    $added = @(git -C $repo ls-files --others --exclude-standard |
+        Where-Object { $_ -notlike 'ps2xRuntime/src/runner/*' -and $_ -notlike 'out/*' -and $_ -notlike 'ps2xRuntime/include/ps2_recompiled_*' })
+    return @($tracked + $added | Where-Object { $_ } | Sort-Object -Unique)
 }
 # File comparison and copying in C#: 13,000 generated files are too many for a PowerShell loop.
 Add-Type @"
@@ -104,6 +116,9 @@ $profile = if ($Release) { 'release' } else { 'quick' }
 $bld = Join-Path $rec ("out\build-" + $profile)
 $gen = Join-Path $rec 'out\generated'
 $stamp = Join-Path $gen '.generated-from'
+# Written after a complete copy of the generated code into the runtime; removed when the submodule is reset, because
+# the checkout restores upstream's placeholder register_functions.cpp in the runner directory.
+$syncStamp = Join-Path $gen '.synced'
 $elf = Get-GameElf
 $config = Join-Path $RepoRoot 'config\recomp.toml'
 
@@ -119,6 +134,16 @@ $recorded = if (Test-Path -LiteralPath $stateFile) { (Get-Content -LiteralPath $
 if (-not $Reset -and $head.StartsWith($PS2RecompCommit) -and $recorded -eq ($wanted + ' ' + (Tree-State $rec))) {
     Write-Host '  the tree is already the pinned commit with the patches applied'
 } else {
+    # A reset rewrites every patched file. The files whose content comes back unchanged get their previous time
+    # stamps again, so that a new or edited patch rebuilds what it changes and not everything that includes, say,
+    # the runtime macros header of the precompiled header.
+    $before = @{}
+    foreach ($relative in (Patched-Files $rec)) {
+        $path = Join-Path $rec $relative
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            $before[$relative] = @((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash, (Get-Item -LiteralPath $path).LastWriteTimeUtc)
+        }
+    }
     Run 'git' @('-C', $rec, 'checkout', '-q', '-f', $PS2RecompCommit)
     # The patched sources are not part of the pinned tree; out\ keeps the builds and the generated code stays in
     # place (the sync below removes what a regeneration no longer produces).
@@ -128,6 +153,17 @@ if (-not $Reset -and $head.StartsWith($PS2RecompCommit) -and $recorded -eq ($wan
         Write-Host ("  applying {0}" -f $patch.Name)
         Run 'git' @('-C', $rec, 'apply', '--ignore-whitespace', $patch.FullName)
     }
+    $kept = 0
+    foreach ($relative in $before.Keys) {
+        $path = Join-Path $rec $relative
+        if ((Test-Path -LiteralPath $path -PathType Leaf) -and
+            (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -eq $before[$relative][0]) {
+            (Get-Item -LiteralPath $path).LastWriteTimeUtc = $before[$relative][1]
+            $kept++
+        }
+    }
+    Write-Host ("  {0} patched file(s) unchanged by the reset kept their time stamps" -f $kept)
+    if (Test-Path -LiteralPath $syncStamp) { Remove-Item -LiteralPath $syncStamp -Force }
     Set-Content -LiteralPath $stateFile -Value ($wanted + ' ' + (Tree-State $rec)) -Encoding ASCII
 }
 
@@ -194,7 +230,6 @@ $overrides = @(Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'src') -File -Rec
     Where-Object { $_.Extension -in '.cpp', '.h' } | ForEach-Object { $_.FullName })
 # Comparing the 13,000 generated files takes a minute, so it is done after a generation (the stamp written at the
 # end of a complete sync disappears with the regenerated folder); otherwise only the override module is synced.
-$syncStamp = Join-Path $gen '.synced'
 if ($needGenerate -or -not (Test-Path -LiteralPath $syncStamp)) {
     $generated = @(Get-ChildItem -LiteralPath $gen -Filter '*.cpp' -File | ForEach-Object { $_.FullName })
     $changed = @([MksmBuild]::Sync([string[]]($generated + $overrides), $runner, [string[]]@('main.cpp'), $true))

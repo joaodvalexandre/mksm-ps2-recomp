@@ -17,6 +17,7 @@ scripts and the research log ([`docs/MKSM.md`](docs/MKSM.md)). No game files and
 | `game/` | the extracted PAL disc (git-ignored): `SLES_535.24`, `SYSTEM.CNF`, `IOP\`, the data files |
 | `docs/MKSM.md` | research log: what was tried, with what result, and the next steps |
 | `tools/ee_disasm.py` | disassembler for the game ELF (capstone), with the names of the generated code and of the configuration |
+| `tools/missing_targets.py` | lists the direct calls and tail jumps whose target has no generated function (run after a build) |
 
 ## Rules
 
@@ -53,3 +54,5 @@ scripts and the research log ([`docs/MKSM.md`](docs/MKSM.md)). No game files and
    `scripts\screenshot.ps1` saves a PNG of the game window.
    The window title shows the displayed frames and their rate (`patches/0003`); `F1` hides and shows upstream's
    runtime debug panel (registers, threads, IOP, RPC history, GS, logs), which opens over the game by default.
+   The game's movies do not play yet and are skipped by default (`MKSM_SKIP_MOVIES=0` plays them). Diagnostics
+   of the override module (`MKSM_TRACE_*`, `MKSM_PROFILE`) are described in `docs/MKSM.md`.

@@ -74,7 +74,7 @@ index e5f63a9..873c8e3 100644
  
      RpcResult IopEmulator::handleRpc(const RpcRequest &request)
 diff --git a/ps2xIOP/tests/iop_emulator_tests.cpp b/ps2xIOP/tests/iop_emulator_tests.cpp
-index 44c2494..4b7a1c2 100644
+index 44c2494..1d5b1ad 100644
 --- a/ps2xIOP/tests/iop_emulator_tests.cpp
 +++ b/ps2xIOP/tests/iop_emulator_tests.cpp
 @@ -561,6 +561,64 @@ namespace
@@ -153,13 +153,13 @@ index 44c2494..4b7a1c2 100644
 +    if (!expect(spinningModule.handled && spinningModule.startResult == 0,
 +                "Synthetic spinning-thread IRX did not start")) return 1;
 +    {
-+        const uint64_t cyclesBefore = iop.cycles();
++        const uint64_t cyclesBefore = iop.debugSnapshot().emulatorCycles;
 +        const auto start = std::chrono::steady_clock::now();
 +        iop.runEeCycles(8ull * 36864ull * 500ull); // half a second of IOP time requested at once
 +        const auto elapsed = std::chrono::steady_clock::now() - start;
 +        if (!expect(elapsed < std::chrono::milliseconds(250),
 +                    "a spinning IOP thread stalled the caller for the whole requested time")) return 1;
-+        if (!expect(iop.cycles() - cyclesBefore < 36864ull * 500ull,
++        if (!expect(iop.debugSnapshot().emulatorCycles - cyclesBefore < 36864ull * 500ull,
 +                    "the IOP budget should leave part of a large request unrun")) return 1;
 +    }
 +

@@ -1,0 +1,277 @@
+diff --git a/ps2xRecomp/src/lib/mmi_translation_helpers.cpp b/ps2xRecomp/src/lib/mmi_translation_helpers.cpp
+index a2bcb77..e05252a 100644
+--- a/ps2xRecomp/src/lib/mmi_translation_helpers.cpp
++++ b/ps2xRecomp/src/lib/mmi_translation_helpers.cpp
+@@ -80,16 +80,16 @@ namespace ps2recomp
+         uint8_t rd = inst.rd;
+         switch (subfunc)
+         {
+-        case MMI1_PABSW:
+-            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PABSW(GPR_VEC(ctx, {})));", rd, rs);
++        case MMI1_PABSW: // MKSM: the operand is rt (rs is 0 in the encoding)
++            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PABSW(GPR_VEC(ctx, {})));", rd, rt);
+         case MMI1_PCEQW:
+             return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PCEQW(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
+         case MMI1_PMINW:
+             return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PMINW(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
+         case MMI1_PADSBH:
+             return translatePADSBH(inst);
+-        case MMI1_PABSH:
+-            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PABSH(GPR_VEC(ctx, {})));", rd, rs);
++        case MMI1_PABSH: // MKSM: the operand is rt (rs is 0 in the encoding)
++            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PABSH(GPR_VEC(ctx, {})));", rd, rt);
+         case MMI1_PCEQH:
+             return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PCEQH(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
+         case MMI1_PMINH:
+@@ -400,21 +400,10 @@ namespace ps2recomp
+ 
+     std::string CodeGenerator::translatePHMADH(const Instruction &inst)
+     {
+-        // Parallel Horizontal Multiply Add Halfword -> results to HI/LO and rd
+-        return fmt::format("{{ __m128i evens = _mm_shuffle_epi32(GPR_VEC(ctx, {}), _MM_SHUFFLE(2,0,2,0)); \n" // Select even halfwords
+-                           "   __m128i odds  = _mm_shuffle_epi32(GPR_VEC(ctx, {}), _MM_SHUFFLE(3,1,3,1)); \n" // Select odd halfwords
+-                           "   __m128i prod_ev = _mm_mullo_epi16(evens, _mm_shuffle_epi32(GPR_VEC(ctx, {}), _MM_SHUFFLE(2,0,2,0))); \n"
+-                           "   __m128i prod_od = _mm_mullo_epi16(odds,  _mm_shuffle_epi32(GPR_VEC(ctx, {}), _MM_SHUFFLE(3,1,3,1))); \n"
+-                           "   __m128i sum_pairs = _mm_add_epi16(prod_ev, prod_od); \n"                            // Add rs[0]*rt[0] + rs[1]*rt[1], etc.
+-                           "   int32_t h0 = _mm_extract_epi16(sum_pairs, 0) + _mm_extract_epi16(sum_pairs, 1); \n" // Horizontal add within low 32b
+-                           "   int32_t h1 = _mm_extract_epi16(sum_pairs, 2) + _mm_extract_epi16(sum_pairs, 3); \n" // Horizontal add within next 32b
+-                           "   int32_t h2 = _mm_extract_epi16(sum_pairs, 4) + _mm_extract_epi16(sum_pairs, 5); \n"
+-                           "   int32_t h3 = _mm_extract_epi16(sum_pairs, 6) + _mm_extract_epi16(sum_pairs, 7); \n"
+-                           "   int64_t acc = Ps2HiLoToU64(ctx->hi, ctx->lo); \n"
+-                           "   acc += (int64_t)h0 + (int64_t)h1 + (int64_t)h2 + (int64_t)h3; \n"
+-                           "   ctx->lo = (uint32_t)acc; ctx->hi = (uint32_t)(acc >> 32); \n"
+-                           "   SET_GPR_U64(ctx, {}, acc); }}",
+-                           inst.rs, inst.rt, inst.rs, inst.rt, inst.rd);
++        // MKSM: four 32-bit sums of halfword pair products into rd, LO and HI (ps2_phmadh); the previous translation
++        // squared rs and rt, kept 16-bit products and accumulated into one 64-bit value.
++        return fmt::format("SET_GPR_VEC(ctx, {}, ps2_phmadh(GPR_VEC(ctx, {}), GPR_VEC(ctx, {}), ctx->lo, ctx->hi, ctx->lo1, ctx->hi1));",
++                           inst.rd, inst.rs, inst.rt);
+     }
+ 
+ 
+@@ -454,9 +443,8 @@ namespace ps2recomp
+ 
+     std::string CodeGenerator::translatePEXEH(const Instruction &inst)
+     {
+-        // Swaps halfwords 1<->3 and 5<->7 within the 128-bit register
+-        return fmt::format("SET_GPR_VEC(ctx, {}, _mm_shufflelo_epi16(_mm_shufflehi_epi16(GPR_VEC(ctx, {}), _MM_SHUFFLE(2,3,0,1)), _MM_SHUFFLE(2,3,0,1)));",
+-                           inst.rd, inst.rt);
++        // MKSM: exchanges halfwords 0 <-> 2 and 4 <-> 6 (PS2_PEXEH)
++        return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PEXEH(GPR_VEC(ctx, {})));", inst.rd, inst.rt);
+     }
+ 
+ 
+@@ -520,9 +508,8 @@ namespace ps2recomp
+ 
+     std::string CodeGenerator::translatePROT3W(const Instruction &inst)
+     {
+-        // Rotates words left by 3: [d,c,b,a] -> [a,d,c,b]
+-        return fmt::format("SET_GPR_VEC(ctx, {}, _mm_shuffle_epi32(GPR_VEC(ctx, {}), _MM_SHUFFLE(0,3,2,1)));",
+-                           inst.rd, inst.rt);
++        // MKSM: rotates the low three words and keeps word 3 (PS2_PROT3W)
++        return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PROT3W(GPR_VEC(ctx, {})));", inst.rd, inst.rt);
+     }
+ 
+ 
+diff --git a/ps2xRecomp/src/lib/special_translator.cpp b/ps2xRecomp/src/lib/special_translator.cpp
+index b01a937..d186f8e 100644
+--- a/ps2xRecomp/src/lib/special_translator.cpp
++++ b/ps2xRecomp/src/lib/special_translator.cpp
+@@ -120,10 +120,11 @@ namespace ps2recomp
+             return fmt::format("SET_GPR_U64(ctx, {}, ((int64_t)GPR_S64(ctx, {}) < (int64_t)GPR_S64(ctx, {})) ? 1 : 0);", inst.rd, inst.rs, inst.rt);
+         case SPECIAL_SLTU:
+             return fmt::format("SET_GPR_U64(ctx, {}, ((uint64_t)GPR_U64(ctx, {}) < (uint64_t)GPR_U64(ctx, {})) ? 1 : 0);", inst.rd, inst.rs, inst.rt);
++        // MKSM: MOVZ/MOVN are 64-bit moves; the upper 64 bits of rd are left alone (they used to receive rs's).
+         case SPECIAL_MOVZ:
+-            return fmt::format("if (GPR_U64(ctx, {}) == 0) SET_GPR_VEC(ctx, {}, GPR_VEC(ctx, {}));", inst.rt, inst.rd, inst.rs);
++            return fmt::format("if (GPR_U64(ctx, {}) == 0) SET_GPR_U64(ctx, {}, GPR_U64(ctx, {}));", inst.rt, inst.rd, inst.rs);
+         case SPECIAL_MOVN:
+-            return fmt::format("if (GPR_U64(ctx, {}) != 0) SET_GPR_VEC(ctx, {}, GPR_VEC(ctx, {}));", inst.rt, inst.rd, inst.rs);
++            return fmt::format("if (GPR_U64(ctx, {}) != 0) SET_GPR_U64(ctx, {}, GPR_U64(ctx, {}));", inst.rt, inst.rd, inst.rs);
+         case SPECIAL_MFSA:
+             return fmt::format("SET_GPR_U32(ctx, {}, ctx->sa);", inst.rd);
+         case SPECIAL_MTSA:
+diff --git a/ps2xRuntime/include/ps2_runtime_macros.h b/ps2xRuntime/include/ps2_runtime_macros.h
+index 0485d50..68f3f1c 100644
+--- a/ps2xRuntime/include/ps2_runtime_macros.h
++++ b/ps2xRuntime/include/ps2_runtime_macros.h
+@@ -715,8 +715,9 @@ inline __m128i ps2_psubsw(__m128i a, __m128i b)
+ #define PS2_PCEQB(a, b) _mm_cmpeq_epi8((__m128i)(a), (__m128i)(b))
+ 
+ // Packed Absolute (PABS)
+-#define PS2_PABSW(a) _mm_abs_epi32((__m128i)(a))
+-#define PS2_PABSH(a) _mm_abs_epi16((__m128i)(a))
++// MKSM: the EE saturates the absolute value of the most negative number (0x80000000 -> 0x7FFFFFFF).
++#define PS2_PABSW(a) _mm_min_epu32(_mm_abs_epi32((__m128i)(a)), _mm_set1_epi32(0x7FFFFFFF))
++#define PS2_PABSH(a) _mm_min_epu16(_mm_abs_epi16((__m128i)(a)), _mm_set1_epi16(0x7FFF))
+ #define PS2_PABSB(a) _mm_abs_epi8((__m128i)(a))
+ 
+ // Packed Pack (PPAC) - Packs larger elements into smaller ones
+@@ -853,7 +854,18 @@ inline __m128i ps2_u64_to_epi64_pair(uint64_t value)
+ #define FPU_FLOOR_W_S(a) ((int32_t)floorf((float)(a)))
+ #define FPU_CVT_S_W(a) ((float)(int32_t)(a))
+ #define FPU_CVT_S_L(a) ((float)(int64_t)(a))
+-#define FPU_CVT_W_S(a) ((int32_t)nearbyintf((float)(a)))
++// MKSM: CVT.W.S on the EE always truncates toward zero (the EE FPU has no other rounding mode) and saturates
++// values whose magnitude is 2^31 or more (exponent field above 0x9D, which includes Inf/NaN bit patterns) to
++// INT32_MAX or INT32_MIN by sign, as PCSX2 does. nearbyintf rounded to nearest: x.5 and above came out one higher.
++static inline int32_t ps2_cvt_w_s(float value)
++{
++    uint32_t bits;
++    std::memcpy(&bits, &value, sizeof(bits));
++    if ((bits & 0x7F800000u) <= 0x4E800000u)
++        return static_cast<int32_t>(value);
++    return (bits & 0x80000000u) ? static_cast<int32_t>(0x80000000u) : 0x7FFFFFFF;
++}
++#define FPU_CVT_W_S(a) ps2_cvt_w_s((float)(a))
+ #define FPU_CVT_L_S(a) ((int64_t)(float)(a))
+ #define FPU_C_F_S(a, b) (0)
+ #define FPU_C_UN_S(a, b) (isnan((float)(a)) || isnan((float)(b)))
+@@ -955,9 +967,36 @@ inline __m128i ps2_qfsrv(__m128i rs, __m128i rt, uint32_t sa)
+ }
+ #define PS2_QFSRV(rs, rt, sa) ps2_qfsrv((__m128i)(rs), (__m128i)(rt), (uint32_t)(sa))
+ #define PS2_PCPYLD(rs, rt) _mm_unpacklo_epi64(rt, rs)
+-#define PS2_PEXEH(rs) _mm_shufflelo_epi16(_mm_shufflehi_epi16(rs, _MM_SHUFFLE(2, 3, 0, 1)), _MM_SHUFFLE(2, 3, 0, 1))
+-#define PS2_PEXEW(rs) _mm_shuffle_epi32(rs, _MM_SHUFFLE(2, 3, 0, 1))
+-#define PS2_PROT3W(rs) _mm_shuffle_epi32(rs, _MM_SHUFFLE(0, 3, 2, 1))
++// MKSM: PEXEH exchanges halfwords 0 and 2 of each doubleword, PEXEW words 0 and 2, PROT3W rotates the low three
++// words (w0 <- w1, w1 <- w2, w2 <- w0) and keeps w3. The shuffles used to swap adjacent pairs and rotate all four.
++#define PS2_PEXEH(rs) _mm_shufflelo_epi16(_mm_shufflehi_epi16(rs, _MM_SHUFFLE(3, 0, 1, 2)), _MM_SHUFFLE(3, 0, 1, 2))
++#define PS2_PEXEW(rs) _mm_shuffle_epi32(rs, _MM_SHUFFLE(3, 0, 1, 2))
++#define PS2_PROT3W(rs) _mm_shuffle_epi32(rs, _MM_SHUFFLE(3, 0, 2, 1))
++
++// MKSM: PHMADH: rd word i = rs.h(2i+1) * rt.h(2i+1) + rs.h(2i) * rt.h(2i) (32-bit, wrapping). LO receives the
++// sums of words 0 and 2 in its words 0 and 2, HI those of words 1 and 3; the odd words of LO/HI hold the
++// product of the odd halfwords, as in PCSX2.
++static inline __m128i ps2_phmadh(__m128i rs, __m128i rt, uint64_t &lo, uint64_t &hi, uint64_t &lo1, uint64_t &hi1)
++{
++    alignas(16) int16_t a[8];
++    alignas(16) int16_t b[8];
++    _mm_store_si128(reinterpret_cast<__m128i *>(a), rs);
++    _mm_store_si128(reinterpret_cast<__m128i *>(b), rt);
++    uint32_t sums[4];
++    uint32_t odd[4];
++    for (int i = 0; i < 4; ++i)
++    {
++        odd[i] = static_cast<uint32_t>(static_cast<int32_t>(a[2 * i + 1]) * static_cast<int32_t>(b[2 * i + 1]));
++        const uint32_t even = static_cast<uint32_t>(static_cast<int32_t>(a[2 * i]) * static_cast<int32_t>(b[2 * i]));
++        sums[i] = odd[i] + even;
++    }
++    lo = static_cast<uint64_t>(sums[0]) | (static_cast<uint64_t>(odd[0]) << 32);
++    hi = static_cast<uint64_t>(sums[1]) | (static_cast<uint64_t>(odd[1]) << 32);
++    lo1 = static_cast<uint64_t>(sums[2]) | (static_cast<uint64_t>(odd[2]) << 32);
++    hi1 = static_cast<uint64_t>(sums[3]) | (static_cast<uint64_t>(odd[3]) << 32);
++    return _mm_setr_epi32(static_cast<int32_t>(sums[0]), static_cast<int32_t>(sums[1]),
++                          static_cast<int32_t>(sums[2]), static_cast<int32_t>(sums[3]));
++}
+ 
+ // Additional VU0 operations
+ #define PS2_VSQRT(x) sqrtf(x)
+diff --git a/ps2xTest/src/code_generator_tests.cpp b/ps2xTest/src/code_generator_tests.cpp
+index 8bbfa34..1843792 100644
+--- a/ps2xTest/src/code_generator_tests.cpp
++++ b/ps2xTest/src/code_generator_tests.cpp
+@@ -1286,6 +1286,38 @@ void register_code_generator_tests()
+                      "PCPYLD should use PS2_PCPYLD helper");
+         });
+ 
++        // MKSM: MOVZ/MOVN move 64 bits and PHMADH goes through ps2_phmadh, which also sets HI/LO.
++        tc.Run("MOVZ and MOVN move 64 bits, PHMADH uses the halfword pair helper", [](TestCase &t) {
++            CodeGenerator gen({}, {});
++            Instruction movz{};
++            movz.opcode = OPCODE_SPECIAL;
++            movz.function = SPECIAL_MOVZ;
++            movz.rd = 3;
++            movz.rs = 4;
++            movz.rt = 5;
++            const std::string movzOut = gen.translateInstruction(movz);
++            t.IsTrue(movzOut.find("SET_GPR_U64(ctx, 3, GPR_U64(ctx, 4))") != std::string::npos,
++                     "MOVZ should move the low 64 bits of rs");
++            t.IsTrue(movzOut.find("GPR_VEC") == std::string::npos, "MOVZ must not move 128 bits");
++            Instruction movn = movz;
++            movn.function = SPECIAL_MOVN;
++            const std::string movnOut = gen.translateInstruction(movn);
++            t.IsTrue(movnOut.find("SET_GPR_U64(ctx, 3, GPR_U64(ctx, 4))") != std::string::npos,
++                     "MOVN should move the low 64 bits of rs");
++
++            Instruction phmadh{};
++            phmadh.isMMI = true;
++            phmadh.opcode = OPCODE_MMI;
++            phmadh.function = MMI_MMI2;
++            phmadh.sa = MMI2_PHMADH;
++            phmadh.rd = 3;
++            phmadh.rs = 4;
++            phmadh.rt = 5;
++            const std::string phmadhOut = gen.translateInstruction(phmadh);
++            t.IsTrue(phmadhOut.find("ps2_phmadh(GPR_VEC(ctx, 4), GPR_VEC(ctx, 5), ctx->lo, ctx->hi, ctx->lo1, ctx->hi1)") != std::string::npos,
++                     "PHMADH should use ps2_phmadh with rs, rt and HI/LO");
++        });
++
+         tc.Run("Unary MMI permutations read their source from rt", [](TestCase &t) {
+             CodeGenerator gen({}, {});
+ 
+@@ -1304,6 +1336,8 @@ void register_code_generator_tests()
+                 {"PEXCH", MMI_MMI3, MMI3_PEXCH},
+                 {"PCPYH", MMI_MMI3, MMI3_PCPYH},
+                 {"PEXCW", MMI_MMI3, MMI3_PEXCW},
++                {"PABSW", MMI_MMI1, MMI1_PABSW}, // MKSM: rs is always 0 in these encodings
++                {"PABSH", MMI_MMI1, MMI1_PABSH},
+             };
+ 
+             for (const UnaryMmiCase &item : cases)
+diff --git a/ps2xTest/src/ps2_float_semantics_tests.cpp b/ps2xTest/src/ps2_float_semantics_tests.cpp
+index 2866d2b..08cdeee 100644
+--- a/ps2xTest/src/ps2_float_semantics_tests.cpp
++++ b/ps2xTest/src/ps2_float_semantics_tests.cpp
+@@ -120,6 +120,51 @@ void register_ps2_float_semantics_tests()
+             }
+         });
+ 
++        // MKSM: CVT.W.S truncates toward zero and saturates beyond 2^31, as on the EE.
++        tc.Run("CVT.W.S truncates toward zero and saturates", [](TestCase &t)
++        {
++            t.Equals(FPU_CVT_W_S(2.7f), 2, "2.7 truncates to 2");
++            t.Equals(FPU_CVT_W_S(-2.7f), -2, "-2.7 truncates to -2");
++            t.Equals(FPU_CVT_W_S(2.5f), 2, "2.5 truncates to 2 (no rounding to nearest)");
++            t.Equals(FPU_CVT_W_S(-0.5f), 0, "-0.5 truncates to 0");
++            t.Equals(FPU_CVT_W_S(2147483520.0f), 2147483520, "the largest float below 2^31 converts exactly");
++            t.Equals(FPU_CVT_W_S(1.0e10f), 0x7FFFFFFF, "positive overflow saturates");
++            t.Equals(FPU_CVT_W_S(-1.0e10f), static_cast<int32_t>(0x80000000u), "negative overflow saturates");
++        });
++
++        // MKSM: lane semantics of the MMI exchanges, rotation, absolute values and PHMADH.
++        tc.Run("MMI exchange, rotate, absolute value and PHMADH lanes match the EE", [](TestCase &t)
++        {
++            alignas(16) int32_t w[4];
++            _mm_store_si128(reinterpret_cast<__m128i *>(w), PS2_PEXEW(_mm_setr_epi32(10, 11, 12, 13)));
++            t.IsTrue(w[0] == 12 && w[1] == 11 && w[2] == 10 && w[3] == 13, "PEXEW exchanges words 0 and 2");
++            _mm_store_si128(reinterpret_cast<__m128i *>(w), PS2_PROT3W(_mm_setr_epi32(10, 11, 12, 13)));
++            t.IsTrue(w[0] == 11 && w[1] == 12 && w[2] == 10 && w[3] == 13, "PROT3W rotates the low three words");
++
++            alignas(16) int16_t h[8];
++            _mm_store_si128(reinterpret_cast<__m128i *>(h), PS2_PEXEH(_mm_setr_epi16(0, 1, 2, 3, 4, 5, 6, 7)));
++            t.IsTrue(h[0] == 2 && h[1] == 1 && h[2] == 0 && h[3] == 3 && h[4] == 6 && h[5] == 5 && h[6] == 4 && h[7] == 7,
++                     "PEXEH exchanges halfwords 0 and 2 of each doubleword");
++
++            _mm_store_si128(reinterpret_cast<__m128i *>(w),
++                            PS2_PABSW(_mm_setr_epi32(-5, static_cast<int32_t>(0x80000000u), 7, 0)));
++            t.IsTrue(w[0] == 5 && w[1] == 0x7FFFFFFF && w[2] == 7 && w[3] == 0, "PABSW saturates 0x80000000");
++            _mm_store_si128(reinterpret_cast<__m128i *>(h),
++                            PS2_PABSH(_mm_setr_epi16(-5, static_cast<int16_t>(0x8000), 7, 0, -1, 1, 0, -32767)));
++            t.IsTrue(h[0] == 5 && h[1] == 0x7FFF && h[2] == 7 && h[4] == 1 && h[7] == 32767, "PABSH saturates 0x8000");
++
++            uint64_t lo = 0, hi = 0, lo1 = 0, hi1 = 0;
++            _mm_store_si128(reinterpret_cast<__m128i *>(w),
++                            ps2_phmadh(_mm_setr_epi16(1, 2, 3, 4, 5, 6, 7, 8),
++                                       _mm_setr_epi16(10, 20, 30, 40, -1, -1, 32767, 2), lo, hi, lo1, hi1));
++            t.IsTrue(w[0] == 50 && w[1] == 250 && w[2] == -11 && w[3] == 229385, "PHMADH sums the halfword pair products");
++            t.Equals(lo, 50ull | (40ull << 32), "LO word 0 = sum 0, word 1 = odd product 0");
++            t.Equals(hi, 250ull | (160ull << 32), "HI word 0 = sum 1, word 1 = odd product 1");
++            t.Equals(lo1, static_cast<uint64_t>(static_cast<uint32_t>(-11)) | (static_cast<uint64_t>(static_cast<uint32_t>(-6)) << 32),
++                     "LO word 2 = sum 2, word 3 = odd product 2");
++            t.Equals(hi1, 229385ull | (16ull << 32), "HI word 2 = sum 3, word 3 = odd product 3");
++        });
++
+         tc.Run("exponent 255 is an ordinary exponent, not Inf or NaN", [](TestCase &t)
+         {
+             const float twoPow128 = floatOf(kTwoPow128);

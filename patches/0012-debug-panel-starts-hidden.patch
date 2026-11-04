@@ -1,0 +1,14 @@
+diff --git a/ps2xRuntime/include/ps2_debug_panel.h b/ps2xRuntime/include/ps2_debug_panel.h
+index 0b3e007..ec5d340 100644
+--- a/ps2xRuntime/include/ps2_debug_panel.h
++++ b/ps2xRuntime/include/ps2_debug_panel.h
+@@ -16,7 +16,8 @@ public:
+ 
+ private:
+     bool m_initialized = false;
+-    bool m_visible = true;
++    // MKSM: hidden at start so that the window shows the game; F1 shows and hides it.
++    bool m_visible = false;
+     bool m_showRegisters = true;
+     unsigned int m_memoryAddress = 0x00100000u;
+     unsigned int m_memoryBytes = 0x100u;

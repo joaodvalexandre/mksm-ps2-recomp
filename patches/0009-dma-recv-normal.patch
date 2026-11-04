@@ -1,0 +1,112 @@
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/DMA.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/DMA.cpp
+index b32e44a..fdc86c2 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/DMA.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/DMA.cpp
+@@ -167,7 +167,7 @@ namespace ps2_stubs
+ 
+     void sceDmaRecvN(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+-        TODO_NAMED("sceDmaRecvN", rdram, ctx, runtime);
++        setReturnS32(ctx, submitDmaRecv(rdram, ctx, runtime)); // MKSM: normal-mode receive
+     }
+ 
+     void sceDmaReset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+index b1bb6d8..061cfa9 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+@@ -1437,6 +1437,48 @@ namespace
+         return 0;
+     }
+ 
++    // MKSM: sceDmaRecvN(chan, addr, qwc), the normal-mode receive of libdma: MADR = addr, QWC = qwc,
++    // CHCR = STR with MODE = normal and DIR = to memory, as the game's own libdma code does. The source is set up
++    // by the caller beforehand (fromSPR reads from the scratchpad at SADR, written directly to the channel).
++    int32_t submitDmaRecv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        if (!runtime)
++        {
++            return -1;
++        }
++
++        const uint32_t chanArg = getRegU32(ctx, 4);
++        const uint32_t addrArg = getRegU32(ctx, 5);
++        const uint32_t countArg = getRegU32(ctx, 6);
++        const uint32_t channelBase = resolveDmaChannelBase(rdram, chanArg);
++        if (channelBase == 0)
++        {
++            return -1;
++        }
++
++        PS2Memory &mem = runtime->memory();
++        const uint32_t madr = toDmaPhys(addrArg);
++        const uint32_t qwc = normalizeQwcFromArg(countArg);
++        const uint32_t configuredChcr = mem.readIORegister(channelBase + 0x00u);
++        const uint32_t chcr = (configuredChcr & ~0x0000000Du) | 0x00000100u; // MODE = normal, DIR = 0, STR = 1.
++
++        mem.writeIORegister(channelBase + 0x20u, qwc & 0xFFFFu);
++        mem.writeIORegister(channelBase + 0x10u, madr);
++        mem.writeIORegister(channelBase + 0x00u, chcr);
++        mem.processPendingTransfers();
++
++        const std::vector<uint32_t> completedCauses = mem.consumeCompletedDmacCauses();
++        {
++            std::lock_guard<std::mutex> lock(g_dmaStubMutex);
++            g_dmaPendingPolls[channelBase] = 1;
++        }
++        for (const uint32_t completedCause : completedCauses)
++        {
++            ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, completedCause);
++        }
++        return 0;
++    }
++
+     int32_t submitDmaSync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+         if (!runtime)
+diff --git a/ps2xTest/src/ps2_memory_tests.cpp b/ps2xTest/src/ps2_memory_tests.cpp
+index 0fa29bc..f8dea39 100644
+--- a/ps2xTest/src/ps2_memory_tests.cpp
++++ b/ps2xTest/src/ps2_memory_tests.cpp
+@@ -2045,6 +2045,41 @@ void register_ps2_memory_tests()
+             t.Equals(mem.readIORegister(kDstadr), 0u, "sceDmaReset should clear D_STADR");
+         });
+ 
++        // MKSM: a game saves its scratchpad with sceDmaGetChan(fromSPR), a direct write of SADR and
++        // sceDmaRecvN(chan, buffer, qwc); the receive used to be an unimplemented stub that ended the game thread.
++        tc.Run("sceDmaRecvN copies the scratchpad into RDRAM through fromSPR", [](TestCase &t)
++        {
++            PS2Runtime runtime;
++            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
++            PS2Memory &mem = runtime.memory();
++            uint8_t *rdram = mem.getRDRAM();
++            uint8_t *scratch = mem.getScratchpad();
++
++            constexpr uint32_t kFromSpr = 0x1000D000u;
++            constexpr uint32_t kDestination = 0x0075F400u;
++            for (uint32_t i = 0; i < 0x40u; ++i)
++            {
++                scratch[0x100u + i] = static_cast<uint8_t>(0x30u + i);
++            }
++            t.IsTrue(mem.writeIORegister(kFromSpr + 0x80u, 0x100u), "the guest writes SADR directly");
++
++            R5900Context ctx{};
++            setRegU32(ctx, 4, kFromSpr);
++            setRegU32(ctx, 5, kDestination);
++            setRegU32(ctx, 6, 0x40u >> 4u); // four quadwords
++            ps2_stubs::sceDmaRecvN(rdram, &ctx, &runtime);
++
++            t.Equals(static_cast<int32_t>(::getRegU32(&ctx, 2)), 0, "sceDmaRecvN should accept the transfer");
++            bool copied = true;
++            for (uint32_t i = 0; i < 0x40u; ++i)
++            {
++                copied = copied && rdram[kDestination + i] == static_cast<uint8_t>(0x30u + i);
++            }
++            t.IsTrue(copied, "the scratchpad bytes at SADR should land at the destination");
++            t.Equals(mem.readIORegister(kFromSpr + 0x00u) & 0x100u, 0u, "the channel should be idle afterwards");
++            t.Equals(mem.readIORegister(kFromSpr + 0x20u), 0u, "QWC should be consumed");
++        });
++
+         tc.Run("sceDmaSend preserves guest-configured VIF1 TTE", [](TestCase &t)
+         {
+             PS2Runtime runtime;
