@@ -103,15 +103,19 @@ foreach ($header in @('ps2_recompiled_functions.h', 'ps2_recompiled_stubs.h')) {
     $source = Join-Path $gen $header
     if (Test-Path -LiteralPath $source) { Copy-Item -LiteralPath $source -Destination (Join-Path $include $header) -Force }
 }
-$overrides = Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'src') -Include '*.cpp', '*.h' -File -Recurse
+$overrides = Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'src') -File -Recurse |
+    Where-Object { $_.Extension -in '.cpp', '.h' }
 $overrides | Copy-Item -Destination $runner
-Run 'cmake' @('-S', $rec, '-B', $bld)
-# The unity sources include the runner .cpp files; with a localized MSVC ninja does not record those dependencies,
-# so the unity files that include a changed file are touched. After a regeneration every object is rebuilt.
-$unity = Join-Path $bld 'ps2xRuntime\CMakeFiles\ps2EntryRunner.dir\Unity'
+# The unity sources include the runner .cpp files; with a localized MSVC ninja does not record those dependencies.
+# After a regeneration every runner object (and the precompiled header) is removed so that everything is rebuilt;
+# otherwise only the unity files that include a changed override file are touched. This runs before the CMake
+# re-run below, which regenerates the unity sources and the precompiled header source it may have removed.
+$runnerDir = Join-Path $bld 'ps2xRuntime\CMakeFiles\ps2EntryRunner.dir'
+$unity = Join-Path $runnerDir 'Unity'
 if (Test-Path -LiteralPath $unity) {
     if ($needGenerate) {
-        Get-ChildItem -LiteralPath (Split-Path -Parent $unity) -Recurse -Include '*.obj', '*.pch' -File | Remove-Item -Force
+        Get-ChildItem -LiteralPath $runnerDir -Recurse -File |
+            Where-Object { $_.Extension -in '.obj', '.pch', '.pdb' } | Remove-Item -Force
     } else {
         foreach ($file in $overrides) {
             foreach ($unityFile in (Get-ChildItem -LiteralPath $unity -Filter '*.cxx' -File)) {
@@ -122,6 +126,7 @@ if (Test-Path -LiteralPath $unity) {
         }
     }
 }
+Run 'cmake' @('-S', $rec, '-B', $bld)
 
 Step "Building ps2EntryRunner ($Jobs jobs)"
 Run 'cmake' @('--build', $bld, '-j', $Jobs, '--target', 'ps2EntryRunner')
