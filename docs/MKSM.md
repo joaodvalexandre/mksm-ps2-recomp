@@ -275,7 +275,7 @@ independent of that runtime:
 - **`sceGsSetDefDispEnv` left PMODE at 0.** The only code that writes the display registers is
   `sceGsPutDispEnv` (a runtime handler) from a structure filled by `sceGsSetDefDispEnv` (also a handler). The
   game's own libgraph version (`0x3831F0`) stores `pmode = 0x66` (read circuit 2) and SMODE2 from the video mode
-  (2 non-interlaced, 3 interlaced field, 1 interlaced frame); upstream's handler only wrote DISPFB and DISPLAY,
+  (2 non-interlaced, 3 interlaced in frame mode, 1 interlaced in field mode); upstream's handler only wrote DISPFB and DISPLAY,
   leaving zeros in a fresh structure. `patches/0011-gs-def-disp-env-pmode.patch` fills both (test in the GS
   tests). DISPLAY's DX/DY still ignore the video mode's base offsets (the host presentation does not use them).
 - **Stub bindings need a function start.** `sceIpuSync@0x0046F700`, `sceVu0RotMatrixX@0x00385898`,
@@ -311,3 +311,59 @@ independent of that runtime:
   `NormalLightMatrix` using w, `rand` returning 15-bit host values instead of the game's LCG, the IOP heap
   library half stubbed (free and query do nothing), and the MPEG HLE having no data path for Sofdec (movies).
   Refuted as unreachable today: `sceSdTransToIOP` (TODO), `sceSifSendCmd`, and the unbound stub entries.
+
+## 2026-11-05 — libgraph packets, libpkt and scratchpad DMA
+
+- **The old port's path from this screen.** The archived NTSC port got from this same screen to the main menu with
+  five fixes: the drawing environment's packet, the image upload's block address, libpkt's tag counts, scratchpad
+  DMA addresses and the pad's DMA buffer (`docs/MKSM.md` of `archive/ntsc-waffle-runtime`). Each was checked again
+  against upstream's current code and the PAL ELF, whose libgraph, libdma and libpkt sit at the same addresses as
+  the NTSC ones (`0x383918`, `0x384480`, `0x384F10`; the text sender at `0x37E820`).
+- **libgraph's drawing environment** (`patches/0013-gs-draw-env-packets.patch`, three tests). `sceGsPutDrawEnv`
+  takes the GIF tag in front of a drawing environment and, like the game's own version, sends it with its NLOOP
+  quadwords through the GIF channel; upstream read eight register pairs from the tag itself, so the tag became a
+  register and TEST_1, context 2 and the clear were lost. `sceGsSwapDBuff` sends the environment the same way, the
+  clear sprite included. `sceGsSetDefDBuff` takes ztest, zpsm and clear from `$t0`-`$t2` (the EE passes eight
+  arguments in registers; upstream read the caller's stack), counts the clear in NLOOP (8 or 14), fills both clears
+  and puts the second buffer after the first, as libgraph does. `sceGsSetDefClear` writes libgraph's six pairs
+  (upstream wrote nothing). `sceGszbufaddr` takes `(psm, w, h)` from `$a0`-`$a2` and the video mode from the
+  runtime: upstream read its width and height one register too far, and the video mode back from scratchpad offset
+  0x100, where the game builds packets, with libgraph's layout instead of the runtime's.
+- **Image uploads** (`patches/0014-gs-load-image-packet.patch`, one new test, upstream's round trip adapted).
+  `sceGsSetDefLoadImage` writes libgraph's 6-quadword packet (DBP as given) and `sceGsExecLoadImage` sends it with
+  the image as one GIF packet: upstream's GS parses each transfer as a whole packet, so libgraph's two transfers
+  cannot be reproduced as they are. Upstream kept a private 12-byte record there and scaled its DBP by 8; the
+  game's texture loader (`0x269F1C`-`0x269FC4`) also builds these packets inside its own objects and sends them in
+  its own chains. The store side keeps its record, with SBP no longer scaled.
+- **libpkt and `rand`** (`config/recomp.toml`). The five libpkt helpers the analyzer bound to runtime handlers are
+  the game's code again. The handlers rewrite the open DMA tag's QWC each time they move the packet pointer, and the
+  game's own terminate (`0x384C58`, `0x385028`) adds the count when it closes the tag, so every chain they touched
+  counted its quadwords twice and the DMAC read data as tags. `rand` is the game's code too: a 31-bit LCG on its
+  own seed, where the handler returned 15-bit host values and ignored `srand`.
+- **Scratchpad DMA addresses** (`patches/0015-dma-scratchpad-address.patch`, test in the memory tests). Bit 31 of
+  a DMA address selects the scratchpad, which is what libdma's `CheckAddress` (`0x384480`) makes of `0x7xxxxxxx`;
+  the game builds its text packets in the scratchpad and sends them with `sceDmaSend(gif, (pkt & 0x3FF0) |
+  0x80000000)` (`0x37E820`, also `0x242D20` and `0x27D7C8`). Upstream read main memory at the offset, turned
+  `0x7xxxxxxx` into `0x1xxxxxxx`, and dropped bit 63 of a tag's address. `ps2DmaAddress` (in a header of its own,
+  since `ps2_memory.h` is in the runner's precompiled header) now applies to D_MADR, D_TADR, the tags and the
+  recompiler's direct GIF kicks.
+- **Patch 0011's wording.** Its comment and test called SMODE2 3 "interlaced field mode"; libgraph's FFMODE 1 is
+  frame mode (SMODE2 FFMD set, every line read), so they now say frame mode. The values were right.
+- **Full rebuild after a stub change.** Removing stubs changes the generated headers, which are in the runner's
+  precompiled header, so all 425 unity batches were rebuilt (about 20 minutes). Patch changes alone rebuild only what
+  they touch.
+- **Result: text on screen (2026-11-05, 00:44).** Build and tests passed (461 tests, IOP tests included). A
+  100-second run shows the autosave notice in the panel, the same screen the old port reached with these fixes:
+  "MKSM uses an Autosave feature. Insertion of a memory card (PS2) beyond this point may cause data to be
+  overwritten. Press ✕ to continue", at a steady 12 frames per second (`frame 1050 | 12.0 fps` at 90 s). The faint
+  emblem the panel showed before is gone. The error log only has two failed searches for `BLITZ.SFD` and
+  `GAUNTLET.SFD`, which the PAL disc does not have.
+- **Review pending.** An adversarial review of patches 0013-0015 and the configuration change (one reviewer per
+  patch, then a verifier) was stopped before it reported, at the end of the session; it is to be run again.
+- **Next.** The notice waits for ✕. The old port's next fix was the pad's DMA buffer: the IOP's pad driver keeps
+  the buffer given to `scePadPortOpen` up to date, and the game read its buttons from it. In PAL the pad layer
+  (`0x273008`) opens the port with its own 64-byte-aligned object as that buffer (`0x273170`) and reads
+  `scePadRead`'s copy (`0x273684`), which upstream fills; whether another reader takes the buttons from the object
+  itself, as NTSC `0x212808` did, is the first thing to check. Then the libvu0 handlers flagged by the audit
+  (`sceVu0RotTransPers`, `sceVu0InnerProduct`, `sceVu0Normalize`, `sceVu0NormalLightMatrix`), the IOP heap library,
+  movies and sound.

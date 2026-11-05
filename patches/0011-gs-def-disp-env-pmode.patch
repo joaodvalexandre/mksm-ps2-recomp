@@ -9,8 +9,8 @@ index 51268f0..fab4f5d 100644
 -
 -        writeGsDispEnv(rdram, envAddr, display, dispfb);
 +        // MKSM: libgraph also fills PMODE and SMODE2: PMODE = 0x66 (read circuit 2; the value the game's own
-+        // sceGsSetDefDispEnv stores) and SMODE2 from the video mode (non-interlaced 2, interlaced field 3,
-+        // interlaced frame 1). Leaving them as found (zero in a fresh structure) made sceGsPutDispEnv switch the
++        // sceGsSetDefDispEnv stores) and SMODE2 from the video mode (non-interlaced 2, interlaced frame mode 3,
++        // interlaced field mode 1). Leaving them as found (zero in a fresh structure) made sceGsPutDispEnv switch the
 +        // display off: the game rendered but nothing was presented.
 +        GsDispEnvMem env{};
 +        if (readGsDispEnv(rdram, envAddr, env))
@@ -47,7 +47,7 @@ index 15cad94..b79fd73 100644
 +            setRegU32(resetCtx, 4, 0u); // reset
 +            setRegU32(resetCtx, 5, 1u); // interlaced
 +            setRegU32(resetCtx, 6, 3u); // PAL
-+            setRegU32(resetCtx, 7, 1u); // field mode
++            setRegU32(resetCtx, 7, 1u); // frame mode
 +            ps2_stubs::sceGsResetGraph(rdram.data(), &resetCtx, &runtime);
 +
 +            constexpr uint32_t kEnv = 0x00012000u;
@@ -62,7 +62,7 @@ index 15cad94..b79fd73 100644
 +            uint64_t env[5] = {};
 +            std::memcpy(env, rdram.data() + kEnv, sizeof(env));
 +            t.Equals(env[0], 0x66ull, "PMODE should enable read circuit 2 as libgraph does");
-+            t.Equals(env[1], 3ull, "SMODE2 should be interlaced field mode");
++            t.Equals(env[1], 3ull, "SMODE2 should be interlaced frame mode");
 +            t.IsTrue(env[2] != 0u && env[3] != 0u, "DISPFB and DISPLAY should still be filled");
 +        });
 +

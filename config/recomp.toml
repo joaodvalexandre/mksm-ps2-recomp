@@ -78,11 +78,10 @@ stubs = [
   "sceDmaSync@0x00384930",
   "sceDmaPause@0x00384970",
   "sceDevVif0Reset@0x00384BC8",
-  "sceGifPkCloseGifTag@0x00384F10",
-  "sceGifPkAddGsAD@0x00384FE0",
-  "sceVif1PkOpenDirectCode@0x00385388",
-  "sceVif1PkCloseGifTag@0x00385428",
-  "sceVif1PkAddGsAD@0x00385610",
+  # Hand edit: libpkt stays the game's code. The analyzer bound five of its helpers (sceGifPkCloseGifTag@0x00384F10,
+  # sceGifPkAddGsAD@0x00384FE0, sceVif1PkOpenDirectCode@0x00385388, sceVif1PkCloseGifTag@0x00385428,
+  # sceVif1PkAddGsAD@0x00385610); their handlers also rewrite the open DMA tag's QWC, which the game's own
+  # terminate then adds again, so every chain they touched counted its quadwords twice.
   "sceVu0Normalize@0x00385660",
   "sceVu0TransposeMatrix@0x003856A0",
   "sceVu0TransMatrix@0x00385720",
@@ -136,7 +135,8 @@ stubs = [
   "sceIpuSync@0x0046F700",
   "sceIpuInit@0x0046F7E0",
   "memcmp@0x00474888",
-  "rand@0x00477AA0",
+  # Hand edit: rand@0x00477AA0 stays the game's code (a 31-bit LCG on its own seed); the handler returned 15-bit
+  # host values and ignored srand.
   "strrchr@0x00478CD0",
   "write@0x004806E8",
   "read@0x00480768",
