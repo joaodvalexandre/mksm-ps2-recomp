@@ -530,10 +530,18 @@ independent of that runtime:
   notice, the memory card prompt, the brightness screen, the character select and the main menu; the static screens
   identical capture to capture. The user confirms: no shaking, good frame rate. No crash in 240 s with sampler
   feedback off (the two runs before crashed at 66 s and 135 s).
-- **Still wrong.** The PAL disc's splash and loading screens are drawn at PAL size in the game's NTSC mode, so they
-  come out stretched and cut at the bottom. After the difficulty select the stage loads and the game stops
-  presenting (the stall of 2026-11-05); the GPU backend scans out the buffer the skipped stage movie set up (640x512),
-  which shows VRAM garbage where the CPU backend showed black.
+- **Tall frames** (patch 0026). The splash at boot (512x448 PSMCT32, PMODE 0x8007: both read circuits blended) and the
+  loading screens (512x448 PSMCT16) are whole frames shown in interlaced frame mode with DISPLAY DH 895: the game's
+  own libgraph (`sceGsSetDefDispEnv`, `0x3831F0`, still in the ELF) computes DH as `2h - 1` in interlaced frame mode
+  (the stub matches it), so a 448-line frame asks for a 448-line field, which no NTSC field holds; paraLLEl-GS, a CRTC
+  model, showed its top half stretched and cut at the bottom (the CPU backend shows the whole frame). The backend scans
+  such a frame (field taller than 240 lines in NTSC, 288 in PAL) out as the progressive frame it is: field mode, half
+  of DH. Verified with captures: the memory card prompt kept on screen while the title loads and the stage loading
+  screen ("LOADING" and its bar) fill the 4:3 picture; no vertical jump in the bursts. `MKSM_TRACE_DISPLAY=1`
+  (override module, diagnostic) prints the display registers whenever they change (`[mksm-display]`, decoded).
+- **Still wrong.** After the difficulty select the stage loads (the loading screen and its bar now show right) and
+  the game then stops presenting (the stall of 2026-11-05): the display stays on the 16-bit loading frame at FBP 0,
+  which the stage's textures overwrite, so the GPU backend shows VRAM garbage where the CPU backend showed black.
 - **PAL's 50 Hz** (`patches/0027-pal-vblank-rate.patch`, test "the vertical blank comes at the video mode's rate"). The
   EE scheduler gave every game NTSC's 60 Hz vertical blank; this PAL game's vblank-paced logic would have run a fifth
   too fast at full speed. The period now follows SMODE1: 20 ms for PAL.

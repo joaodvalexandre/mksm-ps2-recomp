@@ -534,10 +534,10 @@ index bbbfd08..4dc9711 100644
 +
 diff --git a/ps2xRuntime/src/lib/gs/gs_parallel_backend.cpp b/ps2xRuntime/src/lib/gs/gs_parallel_backend.cpp
 new file mode 100644
-index 0000000..790da8f
+index 0000000..5d44b64
 --- /dev/null
 +++ b/ps2xRuntime/src/lib/gs/gs_parallel_backend.cpp
-@@ -0,0 +1,791 @@
+@@ -0,0 +1,812 @@
 +#include "runtime/gs/gs_parallel_backend.h"
 +#include "runtime/gs/gs_frontend.h"
 +#include "runtime/gs/ps2_gs_memory.h"
@@ -1058,15 +1058,36 @@ index 0000000..790da8f
 +        {
 +            Lock lock(mutex);
 +            gs.flush();
++            // MKSM: a whole frame shown in interlaced frame mode (FFMD) whose field would be taller than the video
++            // mode's (the PAL disc's 512x448 splash and loading screens in the game's NTSC mode: DISPLAY DH 895, libgraph's
++            // 2h - 1 for h = 448) is scanned out as the full frame it is, progressive: field mode, half the raster
++            // lines. The CRTC showed its top half, stretched and cut at the bottom.
++            uint64_t smode2 = request.smode2;
++            uint64_t display1 = request.display1;
++            uint64_t display2 = request.display2;
++            const uint32_t modeFieldLines = ((request.smode1 >> 13) & 3u) == 3u ? 288u : 240u;
++            const uint64_t shown = (request.pmode & 2u) != 0u ? request.display2 : request.display1;
++            const bool tallFrame = (smode2 & 3u) == 3u && (((shown >> 44) & 0x7FFu) + 1u) / 2u > modeFieldLines;
++            if (tallFrame)
++            {
++                const auto halve = [](uint64_t display)
++                {
++                    const uint64_t dh = (display >> 44) & 0x7FFu;
++                    return (display & ~(0x7FFull << 44)) | ((((dh + 1u) / 2u) - 1u) << 44);
++                };
++                smode2 &= ~2ull;
++                display1 = halve(display1);
++                display2 = halve(display2);
++            }
 +            auto &p = gs.get_priv_register_state();
 +            p.qwords_lo[0] = request.pmode;
 +            p.qwords_lo[2] = request.smode1;
-+            p.qwords_lo[4] = request.smode2;
++            p.qwords_lo[4] = smode2;
 +            p.qwords_lo[12] = request.syncv;
 +            p.qwords_lo[14] = request.dispfb1;
-+            p.qwords_lo[16] = request.display1;
++            p.qwords_lo[16] = display1;
 +            p.qwords_lo[18] = request.dispfb2;
-+            p.qwords_lo[20] = request.display2;
++            p.qwords_lo[20] = display2;
 +            p.qwords_lo[28] = request.bgcolor;
 +            ParallelGS::VSyncInfo info{};
 +            info.phase = request.field ^ (settings.flipPhase ? 1u : 0u);
@@ -1079,12 +1100,12 @@ index 0000000..790da8f
 +            info.crtc_offsets = false;
 +            // MKSM: the progressive, super-sampled picture (PictureSettings); otherwise the raw fields of interlaced
 +            // frame mode for the frontend's weave, and paraLLEl-GS's own deinterlacer for the other interlaced modes.
-+            const bool fieldRendered = (request.smode2 & 3u) == 3u;
-+            const bool progressive = settings.progressive && request.deinterlace;
-+            info.force_progressive = progressive;
++            const bool fieldRendered = !tallFrame && (request.smode2 & 3u) == 3u;
++            const bool progressive = settings.progressive && request.deinterlace && !tallFrame;
++            info.force_progressive = progressive || tallFrame;
 +            info.high_resolution_scanout = progressive;
 +            info.anti_blur = progressive;
-+            info.skip_deinterlace = !progressive && (fieldRendered || !request.deinterlace);
++            info.skip_deinterlace = !progressive && !tallFrame && (fieldRendered || !request.deinterlace);
 +            const auto scanout = gs.vsync(info);
 +            if (!scanout.image)
 +            {

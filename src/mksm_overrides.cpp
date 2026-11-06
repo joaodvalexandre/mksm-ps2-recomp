@@ -939,6 +939,59 @@ namespace
         std::fprintf(stderr, "[mksm] the game's NTSC mode (60 Hz; MKSM_VIDEO=pal for the disc's 50 Hz)\n");
     }
 
+    // MKSM_TRACE_DISPLAY=1: the display registers (PMODE, SMODE1, SMODE2, DISPFB1/2, DISPLAY1/2) every time they
+    // change, decoded, with the time since the start ([mksm-display]); a host thread polls them every 2 ms.
+    void displayTraceLoop(PS2Runtime *runtime)
+    {
+        const auto start = std::chrono::steady_clock::now();
+        std::array<uint64_t, 7> last{};
+        bool first = true;
+        while (true)
+        {
+            const GSRegisters &gs = runtime->memory().gs();
+            const std::array<uint64_t, 7> now{gs.pmode, gs.smode1, gs.smode2, gs.dispfb1, gs.display1, gs.dispfb2,
+                                              gs.display2};
+            if (first || now != last)
+            {
+                first = false;
+                last = now;
+                const double seconds =
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+                const auto fb = [](uint64_t v, uint32_t &fbp, uint32_t &fbw, uint32_t &psm)
+                { fbp = static_cast<uint32_t>(v & 0x1FFu); fbw = static_cast<uint32_t>((v >> 9) & 0x3Fu);
+                  psm = static_cast<uint32_t>((v >> 15) & 0x1Fu); };
+                uint32_t fbp1, fbw1, psm1, fbp2, fbw2, psm2;
+                fb(now[3], fbp1, fbw1, psm1);
+                fb(now[5], fbp2, fbw2, psm2);
+                const auto disp = [](uint64_t v, char *out, size_t size)
+                {
+                    std::snprintf(out, size, "dx=%u dy=%u magh=%u magv=%u dw=%u dh=%u", static_cast<uint32_t>(v & 0xFFFu),
+                                  static_cast<uint32_t>((v >> 12) & 0x7FFu), static_cast<uint32_t>((v >> 23) & 0xFu),
+                                  static_cast<uint32_t>((v >> 27) & 0x3u), static_cast<uint32_t>((v >> 32) & 0xFFFu),
+                                  static_cast<uint32_t>((v >> 44) & 0x7FFu));
+                };
+                char d1[96], d2[96];
+                disp(now[4], d1, sizeof(d1));
+                disp(now[6], d2, sizeof(d2));
+                std::fprintf(stderr,
+                             "[mksm-display] %7.2f s pmode=0x%llX cmod=%u smode2=%u | fb1 fbp=0x%X fbw=%u psm=0x%X %s | "
+                             "fb2 fbp=0x%X fbw=%u psm=0x%X %s\n",
+                             seconds, static_cast<unsigned long long>(now[0]), static_cast<uint32_t>((now[1] >> 13) & 3u),
+                             static_cast<uint32_t>(now[2] & 3u), fbp1, fbw1, psm1, d1, fbp2, fbw2, psm2, d2);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    }
+
+    void startDisplayTrace(PS2Runtime &runtime)
+    {
+        const char *flag = std::getenv("MKSM_TRACE_DISPLAY");
+        if (!flag || std::atoi(flag) == 0)
+            return;
+        std::thread(displayTraceLoop, &runtime).detach();
+        std::fprintf(stderr, "[mksm-display] tracing the display registers\n");
+    }
+
     void applyMksmOverrides(PS2Runtime &runtime)
     {
         // The runtime logs through stdout, which is block-buffered when redirected to a file; without this the end
@@ -960,6 +1013,7 @@ namespace
         installCallTrace(runtime);
         startProfiler(runtime);
         startPadScript();
+        startDisplayTrace(runtime);
         std::fprintf(stderr, "[mksm] overrides applied: Mortal Kombat: Shaolin Monks (SLES-53524)\n");
     }
 }
