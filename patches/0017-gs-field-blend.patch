@@ -1,0 +1,190 @@
+diff --git a/ps2xRuntime/include/runtime/gs/gs_field_blend.h b/ps2xRuntime/include/runtime/gs/gs_field_blend.h
+new file mode 100644
+index 0000000..fe69596
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/gs/gs_field_blend.h
+@@ -0,0 +1,81 @@
++#pragma once
++
++#include <algorithm>
++#include <cstdint>
++#include <cstring>
++#include <vector>
++
++// MKSM: field rendering (SMODE2 INT and FFMD: interlaced, every line of the buffer read in each field). A game that
++// draws every other field half a line lower in its own vertices counts on the TV to interleave the fields; shown one
++// after the other, the picture moves a line every frame and thin lines come and go. GsFieldBlend shows the mean of
++// the displayed field and the one shown before it, as the TV's persistence does (PCSX2's "blend" deinterlacing). A
++// field is a displayed buffer: the host refresh is not locked to the game's fields, so a buffer shown again must not
++// become its own previous field.
++struct GsFieldBlend
++{
++    std::vector<uint8_t> current;
++    std::vector<uint8_t> previous;
++    uint32_t width = 0;
++    uint32_t height = 0;
++    uint32_t fbp = 0;
++    uint32_t fields = 0; // how many of current and previous hold a field (0 to 2)
++
++    static bool applies(uint64_t smode2)
++    {
++        return (smode2 & 3u) == 3u;
++    }
++
++    void reset()
++    {
++        fields = 0;
++    }
++
++    // pixels: the frame about to be shown (any byte layout, the same for every frame of this size), from the buffer
++    // at displayFbp. Once two fields are known it is replaced by their per-byte mean, rounded up.
++    void apply(std::vector<uint8_t> &pixels, uint32_t frameWidth, uint32_t frameHeight, uint32_t displayFbp)
++    {
++        if (pixels.empty())
++        {
++            fields = 0;
++            return;
++        }
++        if (frameWidth != width || frameHeight != height || current.size() != pixels.size())
++        {
++            width = frameWidth;
++            height = frameHeight;
++            fields = 0;
++        }
++        if (fields == 0u || displayFbp != fbp)
++        {
++            current.swap(previous); // a new field: the one shown so far becomes the previous one
++            fields = std::min<uint32_t>(fields + 1u, 2u);
++            fbp = displayFbp;
++        }
++        current = pixels;
++        if (fields < 2u || previous.size() != pixels.size())
++        {
++            return;
++        }
++
++        // (a | b) - ((a ^ b) >> 1) is the mean of two bytes rounded up; eight lanes at a time, the mask keeping each
++        // lane's shift to itself.
++        constexpr uint64_t kLaneMask = 0x7F7F7F7F7F7F7F7Full;
++        const size_t size = pixels.size();
++        size_t i = 0;
++        for (; i + 8u <= size; i += 8u)
++        {
++            uint64_t a = 0u;
++            uint64_t b = 0u;
++            std::memcpy(&a, current.data() + i, sizeof(a));
++            std::memcpy(&b, previous.data() + i, sizeof(b));
++            const uint64_t mean = (a | b) - (((a ^ b) >> 1u) & kLaneMask);
++            std::memcpy(pixels.data() + i, &mean, sizeof(mean));
++        }
++        for (; i < size; ++i)
++        {
++            const uint32_t a = current[i];
++            const uint32_t b = previous[i];
++            pixels[i] = static_cast<uint8_t>((a + b + 1u) >> 1u);
++        }
++    }
++};
+diff --git a/ps2xRuntime/include/runtime/gs/gs_frontend.h b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+index 4c3f641..cadeed6 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_frontend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+@@ -2,6 +2,7 @@
+ #define PS2_GS_FRONTEND_H
+ 
+ #include <array>
++#include <atomic>
+ #include <cstddef>
+ #include <cstdint>
+ #include <memory>
+@@ -9,6 +10,7 @@
+ #include <vector>
+ 
+ #include "runtime/gs/gs_backend.h"
++#include "runtime/gs/gs_field_blend.h"
+ 
+ struct GSDebugSnapshot
+ {
+@@ -130,6 +132,8 @@ public:
+     void setDebugHistoryPaused(bool paused);
+     bool getPreferredDisplaySource(GSFrameReg &outSource, uint32_t &outDestFbp) const;
+     void latchHostPresentationFrame();
++    // MKSM: field rendering is shown as the blend of the last two fields (runtime/gs/gs_field_blend.h); on by default.
++    void setFieldBlending(bool enabled) { m_fieldBlending.store(enabled, std::memory_order_relaxed); }
+     bool copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
+                                           uint32_t &outWidth,
+                                           uint32_t &outHeight,
+@@ -229,6 +233,8 @@ private:
+     uint32_t m_hostPresentationSourceFbp = 0;
+     bool m_hostPresentationUsedPreferred = false;
+     bool m_hasHostPresentationFrame = false;
++    GsFieldBlend m_fieldBlend;                 // MKSM: only latchHostPresentationFrame (the host thread) uses it
++    std::atomic<bool> m_fieldBlending{true};
+     uint64_t m_nativeImageUploadCount = 0;
+     uint64_t m_nativePackedGIFPacketCount = 0;
+ 
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index 9281d5f..b0f8c49 100644
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -551,6 +551,16 @@ void GS::latchHostPresentationFrame()
+         }
+     }
+ 
++    // MKSM: field rendering is shown as the blend of the last two fields (runtime/gs/gs_field_blend.h).
++    if (frame && m_fieldBlending.load(std::memory_order_relaxed) && GsFieldBlend::applies(request.smode2))
++    {
++        m_fieldBlend.apply(frame.pixels, frame.width, frame.height, frame.displayFbp);
++    }
++    else
++    {
++        m_fieldBlend.reset();
++    }
++
+     const bool hasFrame = static_cast<bool>(frame);
+     const uint32_t displayFbp = frame.displayFbp;
+     const uint32_t sourceFbp = frame.sourceFbp;
+diff --git a/ps2xTest/src/ps2_gs_tests.cpp b/ps2xTest/src/ps2_gs_tests.cpp
+index 6121e63..ae638b6 100644
+--- a/ps2xTest/src/ps2_gs_tests.cpp
++++ b/ps2xTest/src/ps2_gs_tests.cpp
+@@ -4321,6 +4321,39 @@ void register_ps2_gs_tests()
+             t.Equals(snap.ctx[0].test, (2ull << 17) | 0x10000ull, "the clear should restore draw0's TEST_1");
+         });
+ 
++        // MKSM: field rendering is shown as the mean of the displayed field and the one before it. Shaolin Monks draws
++        // every other field half a line lower in its own vertices; shown one after the other, the picture moved a line
++        // every frame.
++        tc.Run("field rendering is presented as the blend of the last two fields", [](TestCase &t)
++        {
++            t.IsTrue(GsFieldBlend::applies(3u), "interlaced frame mode (SMODE2 INT and FFMD) should blend the fields");
++            t.IsTrue(!GsFieldBlend::applies(1u), "interlaced field mode shows each frame as it is");
++            t.IsTrue(!GsFieldBlend::applies(0u), "progressive output shows each frame as it is");
++
++            GsFieldBlend blend;
++            std::vector<uint8_t> first(12u, 0x10u);
++            blend.apply(first, 1u, 3u, 0u);
++            t.Equals(static_cast<uint32_t>(first[0]), 0x10u, "the first field should be shown as it is");
++
++            std::vector<uint8_t> again(12u, 0x30u);
++            blend.apply(again, 1u, 3u, 0u);
++            t.Equals(static_cast<uint32_t>(again[0]), 0x30u, "the same buffer shown again is not its own previous field");
++
++            std::vector<uint8_t> second(12u, 0x51u);
++            second[11] = 0xFFu;
++            blend.apply(second, 1u, 3u, 80u);
++            t.Equals(static_cast<uint32_t>(second[0]), 0x41u, "a new buffer should be blended with the last field (rounded up)");
++            t.Equals(static_cast<uint32_t>(second[11]), 0x98u, "every byte should be blended on its own");
++
++            std::vector<uint8_t> third(12u, 0x20u);
++            blend.apply(third, 1u, 3u, 0u);
++            t.Equals(static_cast<uint32_t>(third[0]), 0x39u, "the next buffer should be blended with the one before it");
++
++            std::vector<uint8_t> resized(16u, 0x70u);
++            blend.apply(resized, 2u, 2u, 80u);
++            t.Equals(static_cast<uint32_t>(resized[0]), 0x70u, "a new frame size should start over");
++        });
++
+         // MKSM: sceGsSetDefDispEnv fills PMODE and SMODE2 like libgraph, so that sceGsPutDispEnv of a fresh
+         // structure enables a display circuit.
+         tc.Run("sceGsSetDefDispEnv enables read circuit 2 and sets SMODE2 from the video mode", [](TestCase &t)

@@ -1,0 +1,86 @@
+diff --git a/ps2xRuntime/include/ps2_host_aspect.h b/ps2xRuntime/include/ps2_host_aspect.h
+index 2b9cbaf..ac6137d 100644
+--- a/ps2xRuntime/include/ps2_host_aspect.h
++++ b/ps2xRuntime/include/ps2_host_aspect.h
+@@ -47,3 +47,13 @@ inline void ps2SetHostSmoothScaling(bool smooth)
+ {
+     ps2HostSmoothScalingSetting().store(smooth, std::memory_order_relaxed);
+ }
++
++// MKSM: what the window shows while the GS has no frame to present (no read circuit enabled, an empty display, a display
++// being set up between two screens): the last picture for up to kPs2HoldMissingFrames presentations in a row, then
++// black, as a TV would. Upstream filled the window with magenta, which flashed through the game's screen changes.
++constexpr unsigned kPs2HoldMissingFrames = 50; // a second at 50 fields a second
++
++inline bool ps2HostKeepsLastPicture(bool hasPicture, unsigned missedFrames)
++{
++    return hasPicture && missedFrames <= kPs2HoldMissingFrames;
++}
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 6e1f907..f278844 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -395,6 +395,8 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
+     static uint32_t s_lastWidth = 0u;
+     static uint32_t s_lastHeight = 0u;
+     static bool s_hasUploadedFrame = false;
++    static bool s_hasPicture = false;      // MKSM: the texture holds a picture of the game (not black)
++    static unsigned s_missedFrames = 0u;   // MKSM: latches in a row without a frame
+     static std::vector<uint8_t> s_scratch;
+     static std::vector<uint8_t> s_uploadBuffer(DEFAULT_FB_SIZE, 0u);
+ 
+@@ -426,7 +428,15 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
+                                                    &sourceFbp,
+                                                    &usedPreferredDisplaySource))
+     {
+-        Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, MAGENTA);
++        // MKSM: no frame to show: the last picture for a moment, then black (ps2_host_aspect.h), never magenta.
++        ++s_missedFrames;
++        if (ps2HostKeepsLastPicture(s_hasPicture, s_missedFrames))
++        {
++            outWidth = (s_lastWidth != 0u) ? s_lastWidth : FB_WIDTH;
++            outHeight = (s_lastHeight != 0u) ? s_lastHeight : DEFAULT_DISPLAY_HEIGHT;
++            return;
++        }
++        Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLACK);
+         UpdateTexture(tex, blank.data);
+         UnloadImage(blank);
+         outWidth = FB_WIDTH;
+@@ -434,6 +444,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
+         s_lastWidth = outWidth;
+         s_lastHeight = outHeight;
+         s_hasUploadedFrame = true;
++        s_hasPicture = false;
+         return;
+     }
+ 
+@@ -487,6 +498,8 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
+     outWidth = width;
+     outHeight = height;
+     s_hasUploadedFrame = true;
++    s_hasPicture = true;
++    s_missedFrames = 0u;
+ }
+ 
+ PS2Runtime::PS2Runtime()
+diff --git a/ps2xTest/src/ps2_gs_tests.cpp b/ps2xTest/src/ps2_gs_tests.cpp
+index 577dad2..f2ebdb2 100644
+--- a/ps2xTest/src/ps2_gs_tests.cpp
++++ b/ps2xTest/src/ps2_gs_tests.cpp
+@@ -4463,6 +4463,16 @@ void register_ps2_gs_tests()
+                      "aspect 0 fills the window");
+         });
+ 
++        // MKSM: with no frame to present the window keeps the last picture for a moment, then shows black; upstream filled
++        // it with magenta, which flashed through the game's screen changes.
++        tc.Run("the host keeps the last picture for a moment when there is no frame, then shows black", [](TestCase &t)
++        {
++            t.IsTrue(ps2HostKeepsLastPicture(true, 1u), "a missing frame right after a picture keeps the picture");
++            t.IsTrue(ps2HostKeepsLastPicture(true, kPs2HoldMissingFrames), "up to the hold limit");
++            t.IsTrue(!ps2HostKeepsLastPicture(true, kPs2HoldMissingFrames + 1u), "then black");
++            t.IsTrue(!ps2HostKeepsLastPicture(false, 1u), "with no picture yet, black");
++        });
++
+         // MKSM: sceGsSetDefDispEnv fills PMODE and SMODE2 like libgraph, so that sceGsPutDispEnv of a fresh
+         // structure enables a display circuit.
+         tc.Run("sceGsSetDefDispEnv enables read circuit 2 and sets SMODE2 from the video mode", [](TestCase &t)

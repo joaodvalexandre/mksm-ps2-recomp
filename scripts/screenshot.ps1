@@ -1,4 +1,4 @@
-# Saves a PNG of the game window (the runner's window title starts with "PS2-Recomp") so a run can be checked
+# Saves a PNG of the game window (the window of the ps2EntryRunner process) so a run can be checked
 # without watching it: scripts\screenshot.ps1 [-Out logs\shot.png]
 # The window is rendered with PrintWindow, so it is captured even when another window covers it; nothing else
 # on the screen ends up in the image.
@@ -17,8 +17,9 @@ public static class MksmWin {
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdc, uint flags);
 }
 "@
-$process = Get-Process | Where-Object { $_.MainWindowTitle -like 'PS2-Recomp*' } | Select-Object -First 1
-if (-not $process) { throw 'No window with a title starting with "PS2-Recomp" is open.' }
+$process = Get-Process -Name ps2EntryRunner -ErrorAction SilentlyContinue |
+    Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+if (-not $process) { throw 'The game window (ps2EntryRunner) is not open.' }
 $handle = $process.MainWindowHandle
 $rect = New-Object MksmWin+RECT
 [MksmWin]::GetClientRect($handle, [ref]$rect) | Out-Null

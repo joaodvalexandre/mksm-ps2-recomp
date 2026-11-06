@@ -1,0 +1,54 @@
+diff --git a/ps2xRuntime/include/ps2_frame_counter.h b/ps2xRuntime/include/ps2_frame_counter.h
+index d0c858f..1f16d49 100644
+--- a/ps2xRuntime/include/ps2_frame_counter.h
++++ b/ps2xRuntime/include/ps2_frame_counter.h
+@@ -52,6 +52,14 @@ namespace ps2_frame_counter
+         return state().frames.load(std::memory_order_relaxed);
+     }
+ 
++    // MKSM: the name the window title starts with. A game override sets the game's name, before the host loop starts;
++    // left empty, the title starts with the runner's ("PS2-Recomp | <ELF>").
++    inline std::string &titleName()
++    {
++        static std::string name;
++        return name;
++    }
++
+     // "<base> | frame 1234 | 50.0 fps"
+     inline std::string windowTitle(const std::string &base, uint64_t frames, double fps)
+     {
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index f278844..4f85e13 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -2494,7 +2494,9 @@ void PS2Runtime::run()
+             const uint64_t frames = ps2_frame_counter::displayedFrames();
+             if (frameRate.refresh(frames, GetTime()))
+             {
+-                SetWindowTitle(ps2_frame_counter::windowTitle(g_windowTitle, frames, frameRate.fps()).c_str());
++                const std::string &name = ps2_frame_counter::titleName(); // MKSM: the game's name, when set
++                SetWindowTitle(
++                    ps2_frame_counter::windowTitle(name.empty() ? g_windowTitle : name, frames, frameRate.fps()).c_str());
+             }
+         }
+ #endif
+diff --git a/ps2xTest/src/ps2_memory_tests.cpp b/ps2xTest/src/ps2_memory_tests.cpp
+index 93ca5d5..2c86f5d 100644
+--- a/ps2xTest/src/ps2_memory_tests.cpp
++++ b/ps2xTest/src/ps2_memory_tests.cpp
+@@ -180,6 +180,15 @@ void register_ps2_memory_tests()
+             t.Equals(mem.read32(0x00103000u), 0x2468ACE0u, "writes through 0x3010 alias should land in base RDRAM");
+         });
+ 
++        // MKSM: the window title starts with the game's name once an override has set it.
++        tc.Run("the window title starts with the game's name when one is set", [](TestCase &t)
++        {
++            t.IsTrue(ps2_frame_counter::titleName().empty(), "no name is set by default");
++            t.Equals(ps2_frame_counter::windowTitle("Mortal Kombat: Shaolin Monks", 1234u, 20.0),
++                     std::string("Mortal Kombat: Shaolin Monks | frame 1234 | 20.0 fps"),
++                     "the title should show the name, the displayed frames and the frame rate");
++        });
++
+         // MKSM: the window title frame counter counts the vertical blanks at which a display buffer register
+         // changed, whichever path wrote it (privileged register store, sceGsSwapDBuff handler, GIF packet).
+         tc.Run("display buffer flips between vblanks count the displayed frames", [](TestCase &t)

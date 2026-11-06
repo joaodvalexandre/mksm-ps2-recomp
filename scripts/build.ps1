@@ -2,7 +2,8 @@
 # recompiler tools, generates the C++ from the game ELF when needed, copies it into the runtime and builds
 # ps2EntryRunner. Called by scripts\build.cmd, which loads the Visual Studio environment first.
 #
-#   (default)     quick profile: RelWithDebInfo, /O1, debug info, no whole-program optimization, 8 parallel jobs.
+#   (default)     quick profile: RelWithDebInfo, debug info, no whole-program optimization, 8 parallel jobs; the
+#                 generated game code at /O1, everything else (the runtime) at /O2 (scripts\quick-profile.cmake).
 #                 Compiles in a fraction of the time of the release profile and links in seconds; the game runs
 #                 somewhat slower. Build folder PS2Recomp\out\build-quick.
 #   -Release      release profile: Release, /O2 /arch:AVX2, no LTO (PS2X_ENABLE_LTO=OFF, patches\0002).
@@ -176,9 +177,13 @@ $common = @('-S', $rec, '-B', $bld, '-G', 'Ninja', '-DPS2X_BUILD_STUDIO=OFF', '-
 if ($Release) {
     Run 'cmake' ($common + @('-DCMAKE_BUILD_TYPE=Release'))
 } else {
+    # The optimization level is set by target (scripts\quick-profile.cmake): /O1 for the generated game code, /O2 for
+    # the runtime, where the host time goes.
+    $quickProfile = (Join-Path $PSScriptRoot 'quick-profile.cmake').Replace('\', '/')
     Run 'cmake' ($common + @('-DCMAKE_BUILD_TYPE=RelWithDebInfo',
-                             '-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=/O1 /Ob1 /Zi /DNDEBUG',
-                             '-DCMAKE_C_FLAGS_RELWITHDEBINFO=/O1 /Ob1 /Zi /DNDEBUG'))
+                             '-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=/Zi /DNDEBUG',
+                             '-DCMAKE_C_FLAGS_RELWITHDEBINFO=/Zi /DNDEBUG',
+                             "-DCMAKE_PROJECT_INCLUDE=$quickProfile"))
 }
 
 Step 'Building the recompiler tools'

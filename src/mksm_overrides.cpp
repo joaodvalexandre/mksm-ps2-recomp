@@ -16,6 +16,8 @@
 #include "runtime/ee_scheduler.h"
 #include "ps2x/iop/iop_types.h"
 #include "runtime/gs/gs_types.h"
+#include "ps2_host_aspect.h"
+#include "ps2_frame_counter.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -30,6 +32,13 @@
 #include <utility>
 #include <vector>
 #include <filesystem>
+
+namespace ps2_stubs
+{
+    // The runtime's pad override (Kernel/Stubs/Pad.cpp), used by MKSM_PAD_SCRIPT.
+    void setPadOverrideState(uint16_t buttons, uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry);
+    void clearPadOverrideState();
+}
 
 namespace
 {
@@ -49,7 +58,8 @@ namespace
     // looks for its largest allocatable block by calling malloc with a size that starts at 0x1FF0000 minus the
     // heap start and goes down 4 bytes at a time until a call succeeds. The runtime ends the heap at 0x1F00000
     // (its own guest pools sit above), so the search makes about a quarter of a million failing calls: 18 s of
-    // boot through the syscall path. Served natively, with the same break pointer, errno and limit, it is instant.
+    // boot through the syscall path. Served natively, with the same break pointer, errno and limit (the game's heap
+    // end, EndOfHeap's), it is instant.
     constexpr uint32_t kSbrkAddress = 0x004807F0u;
     constexpr uint32_t kSbrkFirstWord = 0x27BDFFC0u;  // addiu sp, sp, -0x40
     constexpr uint32_t kSbrkStatusWord = 0x40116000u; // mfc0 s1, Status (at +0x14)
@@ -63,7 +73,7 @@ namespace
         const uint32_t increment = getRegU32(ctx, 4);
         const uint32_t current = readU32(rdram, kHeapBreakAddress);
         const uint32_t next = current + increment; // 32-bit wrap, as the original
-        if (runtime->guestHeapLimit() < next)
+        if (runtime->gameHeapLimit() < next)
         {
             const uint32_t reent = readU32(rdram, kImpurePtrAddress);
             if (reent != 0u)
@@ -675,6 +685,202 @@ namespace
         std::fprintf(stderr, "[mksm-prof] sampling the running guest thread every millisecond\n");
     }
 
+    // MKSM_PAD_SCRIPT=<seconds>:<buttons>[:<hold>],... presses pad buttons at the given times after start: a host
+    // thread sets the runtime's pad override for the hold time (0.25 s by default), and the keyboard and gamepad work
+    // as usual in between. Buttons are joined with '+': cross, circle, square, triangle, start, select, up, down, left,
+    // right, l1, l2, r1, r2, l3, r3. Example: MKSM_PAD_SCRIPT=40:cross,50:start:0.5
+    struct PadPress
+    {
+        double at = 0.0;
+        double hold = 0.25;
+        uint16_t mask = 0u;
+    };
+
+    uint16_t padButtonMask(const std::string &name)
+    {
+        static const std::pair<const char *, uint16_t> kButtons[] = {
+            {"select", 1u << 0},  {"l3", 1u << 1},        {"r3", 1u << 2},      {"start", 1u << 3},
+            {"up", 1u << 4},      {"right", 1u << 5},     {"down", 1u << 6},    {"left", 1u << 7},
+            {"l2", 1u << 8},      {"r2", 1u << 9},        {"l1", 1u << 10},     {"r1", 1u << 11},
+            {"triangle", 1u << 12}, {"circle", 1u << 13}, {"cross", 1u << 14}, {"square", 1u << 15},
+        };
+        for (const auto &button : kButtons)
+        {
+            if (name == button.first)
+                return button.second;
+        }
+        return 0u;
+    }
+
+    std::vector<std::string> splitList(const std::string &text, char separator)
+    {
+        std::vector<std::string> parts;
+        size_t start = 0;
+        while (start <= text.size())
+        {
+            const size_t end = text.find(separator, start);
+            parts.push_back(text.substr(start, end == std::string::npos ? std::string::npos : end - start));
+            if (end == std::string::npos)
+                break;
+            start = end + 1;
+        }
+        return parts;
+    }
+
+    void padScriptLoop(std::vector<PadPress> script)
+    {
+        const auto start = std::chrono::steady_clock::now();
+        const auto elapsed = [&start]
+        { return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(); };
+        double releasedAt = -1.0;
+        for (const PadPress &press : script)
+        {
+            // a tenth of a second released between presses at least, so that each one is a new press
+            const double start = std::max(press.at, releasedAt + 0.1);
+            while (elapsed() < start)
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            const double pressedAt = elapsed();
+            ps2_stubs::setPadOverrideState(static_cast<uint16_t>(0xFFFFu & ~press.mask), 0x80, 0x80, 0x80, 0x80);
+            std::fprintf(stderr, "[mksm-pad] t=%.1f s: buttons 0x%04X held for %.2f s%s\n", pressedAt, press.mask, press.hold,
+                         start > press.at + 0.05 ? " (late: the press before was still held)" : "");
+            while (elapsed() < pressedAt + press.hold)
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            ps2_stubs::clearPadOverrideState();
+            releasedAt = elapsed();
+        }
+    }
+
+    void startPadScript()
+    {
+        const char *list = std::getenv("MKSM_PAD_SCRIPT");
+        if (!list || !*list)
+            return;
+        std::vector<PadPress> script;
+        for (const std::string &item : splitList(list, ','))
+        {
+            const std::vector<std::string> fields = splitList(item, ':');
+            if (fields.size() < 2 || fields.size() > 3)
+            {
+                if (!item.empty())
+                    std::fprintf(stderr, "[mksm-pad] ignored '%s'\n", item.c_str());
+                continue;
+            }
+            PadPress press;
+            press.at = std::atof(fields[0].c_str());
+            if (fields.size() == 3)
+                press.hold = std::atof(fields[2].c_str());
+            for (const std::string &name : splitList(fields[1], '+'))
+            {
+                const uint16_t mask = padButtonMask(name);
+                if (mask == 0u)
+                    std::fprintf(stderr, "[mksm-pad] unknown button '%s'\n", name.c_str());
+                press.mask = static_cast<uint16_t>(press.mask | mask);
+            }
+            if (press.mask != 0u)
+                script.push_back(press);
+        }
+        std::sort(script.begin(), script.end(), [](const PadPress &a, const PadPress &b) { return a.at < b.at; });
+        if (script.empty())
+            return;
+        std::thread(padScriptLoop, script).detach();
+        std::fprintf(stderr, "[mksm-pad] %u scripted press(es)\n", static_cast<unsigned>(script.size()));
+    }
+
+    // MKSM_DEINTERLACE=0 shows the fields of the game's field rendering one by one instead of weaving them into the
+    // full-height picture (patches/0017, 0019). MKSM_FILTER=nearest scales the picture to the window with nearest
+    // sampling instead of bilinear filtering (patches/0019). MKSM_ASPECT=<w>:<h> or "window" sets the aspect the window
+    // shows the picture at: 4:3, the TV's, by default (patches/0018); "window" follows the window's shape as it is
+    // resized. Other than 4:3, the game's 3D view follows: 0x4F4E08 holds the horizontal scale of its projection,
+    // (4/3) / aspect, read where the projection is set up (0x236D70, 0x24A178); 1.0 in the ELF, and the game's own
+    // setter (0x2268B0) has no caller. A host thread keeps it in step with the aspect in use. The game's test for its
+    // 16:9 camera tuning (0x36FB20: the scale, through the getter 0x2268A0, is 0.75 within 0.0005) is replaced so that
+    // any picture wider than about 3:2 gets that tuning. The 2D screens are stretched to the aspect.
+    constexpr uint32_t kAspectScaleAddress = 0x004F4E08u;
+
+    float parseAspect(const char *setting)
+    {
+        float w = 0.0f;
+        float h = 0.0f;
+        char colon = 0;
+        if (setting && std::sscanf(setting, "%f%c%f", &w, &colon, &h) == 3 && colon == ':' && w > 0.0f && h > 0.0f)
+            return w / h;
+        return -1.0f;
+    }
+
+    constexpr uint32_t kWidescreenTestAddress = 0x0036FB20u;
+    constexpr uint32_t kWidescreenTestFirstWord = 0x27BDFFE0u; // addiu sp, sp, -0x20
+
+    void widescreenTest(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)runtime;
+        ctx->pc = getRegU32(ctx, 31);
+        float scale = 1.0f;
+        std::memcpy(&scale, rdram + kAspectScaleAddress, sizeof(scale));
+        setReturnU32(ctx, scale <= 0.9f ? 1u : 0u); // 0.9: an aspect of (4/3) / 0.9, about 1.48
+    }
+
+    void aspectLoop(PS2Runtime *runtime)
+    {
+        uint8_t *rdram = runtime->memory().getRDRAM();
+        float reported = 0.0f;
+        for (;;)
+        {
+            const float aspect = std::max(runtime->shownDisplayAspect(), 0.1f);
+            const float scale = (4.0f / 3.0f) / aspect;
+            float current = 0.0f;
+            std::memcpy(&current, rdram + kAspectScaleAddress, sizeof(current));
+            if (current != scale)
+            {
+                std::memcpy(rdram + kAspectScaleAddress, &scale, sizeof(scale));
+                const float change = aspect > reported ? aspect - reported : reported - aspect;
+                if (change > 0.001f)
+                {
+                    std::fprintf(stderr, "[mksm-aspect] picture %.3f:1, 3D view scaled by %.4f\n", aspect, scale);
+                    reported = aspect;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+
+    void configureDisplay(PS2Runtime &runtime)
+    {
+        const char *filter = std::getenv("MKSM_FILTER");
+        if (filter && std::strcmp(filter, "nearest") == 0)
+        {
+            ps2SetHostSmoothScaling(false);
+            std::fprintf(stderr, "[mksm] nearest scaling (MKSM_FILTER=nearest)\n");
+        }
+        const char *deinterlace = std::getenv("MKSM_DEINTERLACE");
+        if (deinterlace && deinterlace[0] == '0')
+        {
+            runtime.gs().setFieldBlending(false);
+            std::fprintf(stderr, "[mksm] field blending off (MKSM_DEINTERLACE=0)\n");
+        }
+        const char *setting = std::getenv("MKSM_ASPECT");
+        if (!setting || !*setting)
+            return;
+        float aspect = 0.0f; // "window": the picture fills the window
+        if (std::strcmp(setting, "window") != 0)
+        {
+            aspect = parseAspect(setting);
+            if (aspect <= 0.0f)
+            {
+                std::fprintf(stderr, "[mksm] MKSM_ASPECT=%s is not <w>:<h> or window; the picture stays 4:3\n", setting);
+                return;
+            }
+        }
+        runtime.setDisplayAspect(aspect);
+        std::fprintf(stderr, "[mksm] display aspect %s\n", setting);
+        const float fourThirds = 4.0f / 3.0f;
+        if (aspect != 0.0f && aspect < fourThirds + 0.001f && aspect > fourThirds - 0.001f)
+            return; // 4:3: the game's own 3D view
+        if (readU32(runtime.memory().getRDRAM(), kWidescreenTestAddress) == kWidescreenTestFirstWord &&
+            runtime.replaceFunction(kWidescreenTestAddress, widescreenTest))
+            std::fprintf(stderr, "[mksm-aspect] the 16:9 camera tuning applies to pictures wider than about 3:2\n");
+        std::thread(aspectLoop, &runtime).detach();
+    }
+
     // MKSM_ISO=<path>: the disc image for the sector reads the game does outside the files extracted into game\
     // (the runtime serves sceCdRead from the registered files first, then from this image).
     void configureDiscImage()
@@ -693,7 +899,13 @@ namespace
         // The runtime logs through stdout, which is block-buffered when redirected to a file; without this the end
         // of logs/run.log is lost when scripts/run.cmd stops the game.
         std::setvbuf(stdout, nullptr, _IONBF, 0);
+        // The window title: the game's name, the displayed frames and the frame rate (patches/0003, 0023).
+        ps2_frame_counter::titleName() = "Mortal Kombat: Shaolin Monks";
+        // The runtime's own guest allocations (SIF command packets, GS upload packets...) go below the ELF, which
+        // loads at 0x100000: the heap SetupHeap names is the one the game's own malloc manages (patches/0020).
+        runtime.setPrivateGuestHeap(0x000A0000u, 0x00100000u);
         configureDiscImage();
+        configureDisplay(runtime);
         replaceSbrk(runtime);
         installMovieSkip(runtime);
         installSyncVTrace(runtime);
@@ -701,6 +913,7 @@ namespace
         parseWatches();
         installCallTrace(runtime);
         startProfiler(runtime);
+        startPadScript();
         std::fprintf(stderr, "[mksm] overrides applied: Mortal Kombat: Shaolin Monks (SLES-53524)\n");
     }
 }

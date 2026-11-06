@@ -1,0 +1,131 @@
+diff --git a/ps2xRuntime/include/ps2_runtime.h b/ps2xRuntime/include/ps2_runtime.h
+index ca4e77f..3789614 100644
+--- a/ps2xRuntime/include/ps2_runtime.h
++++ b/ps2xRuntime/include/ps2_runtime.h
+@@ -376,6 +376,14 @@ public:
+     void handleTLBP(uint8_t *rdram, R5900Context *ctx);
+     void clearLLBit(R5900Context *ctx);
+     void configureGuestHeap(uint32_t guestBase, uint32_t guestLimit = PS2_RAM_SIZE);
++    // MKSM: setPrivateGuestHeap puts the runtime's own guest allocations (guestMalloc: SIF command packets, GS
++    // upload packets...) in [guestBase, guestLimit) for good; SetupHeap then only records the game's heap, whose end
++    // EndOfHeap reports (gameHeapLimit). Sharing the heap SetupHeap names overwrote the data of a game whose own malloc
++    // manages it.
++    void setPrivateGuestHeap(uint32_t guestBase, uint32_t guestLimit);
++    bool hasPrivateGuestHeap() const;
++    void recordGameHeap(uint32_t base, uint32_t limit);
++    uint32_t gameHeapLimit() const;
+     uint32_t guestMalloc(uint32_t size, uint32_t alignment = 16u);
+     uint32_t guestCalloc(uint32_t count, uint32_t size, uint32_t alignment = 16u);
+     uint32_t guestRealloc(uint32_t guestAddr, uint32_t newSize, uint32_t alignment = 16u);
+@@ -517,6 +525,8 @@ private:
+     uint32_t m_guestHeapLimit = PS2_RAM_SIZE;
+     uint32_t m_guestHeapSuggestedBase = 0x00100000u;
+     bool m_guestHeapConfigured = false;
++    bool m_guestHeapPrivate = false;       // MKSM: see setPrivateGuestHeap
++    uint32_t m_gameHeapLimit = 0x01F00000u; // MKSM: the game's heap end while the runtime's heap is private
+     uint32_t m_asyncCallbackStackFloor = 0x01F00000u;
+     uint32_t m_asyncCallbackStackTop = PS2_RAM_SIZE;
+ 
+diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp b/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp
+index 9614016..ada374a 100644
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp
+@@ -559,6 +559,14 @@ namespace ps2_syscalls
+ 
+         if (runtime)
+         {
++            // MKSM: with a private guest heap the runtime's allocator stays where it is: the game's heap is recorded
++            // (EndOfHeap reports its end) and its base given back.
++            if (runtime->hasPrivateGuestHeap())
++            {
++                runtime->recordGameHeap(heapBase, heapLimit);
++                setReturnU32(ctx, heapBase);
++                return;
++            }
+             runtime->configureGuestHeap(heapBase, heapLimit);
+ 
+             PS2_IF_AGRESSIVE_LOGS({
+@@ -586,7 +594,7 @@ namespace ps2_syscalls
+         static constexpr uint32_t kDefaultGuestHeapEnd = 0x01F00000u;
+ 
+         const uint32_t ret = runtime
+-                                 ? runtime->guestHeapLimit()
++                                 ? runtime->gameHeapLimit() // MKSM: the game's heap, also with a private guest heap
+                                  : kDefaultGuestHeapEnd;
+ 
+         setReturnU32(ctx, ret);
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 8448f01..6e1f907 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1831,6 +1831,38 @@ void PS2Runtime::configureGuestHeap(uint32_t guestBase, uint32_t guestLimit)
+     resetGuestHeapLocked(normalizedBase, guestLimit);
+ }
+ 
++void PS2Runtime::setPrivateGuestHeap(uint32_t guestBase, uint32_t guestLimit)
++{
++    configureGuestHeap(guestBase, guestLimit);
++    std::lock_guard<std::mutex> lock(m_guestHeapMutex);
++    m_guestHeapPrivate = true;
++}
++
++bool PS2Runtime::hasPrivateGuestHeap() const
++{
++    std::lock_guard<std::mutex> lock(m_guestHeapMutex);
++    return m_guestHeapPrivate;
++}
++
++void PS2Runtime::recordGameHeap(uint32_t base, uint32_t limit)
++{
++    (void)base;
++    std::lock_guard<std::mutex> lock(m_guestHeapMutex);
++    m_gameHeapLimit = limit;
++}
++
++uint32_t PS2Runtime::gameHeapLimit() const
++{
++    {
++        std::lock_guard<std::mutex> lock(m_guestHeapMutex);
++        if (m_guestHeapPrivate)
++        {
++            return m_gameHeapLimit;
++        }
++    }
++    return guestHeapLimit();
++}
++
+ uint32_t PS2Runtime::guestMalloc(uint32_t size, uint32_t alignment)
+ {
+     std::lock_guard<std::mutex> lock(m_guestHeapMutex);
+diff --git a/ps2xTest/src/ps2_runtime_kernel_tests.cpp b/ps2xTest/src/ps2_runtime_kernel_tests.cpp
+index e36a29f..3f277f9 100644
+--- a/ps2xTest/src/ps2_runtime_kernel_tests.cpp
++++ b/ps2xTest/src/ps2_runtime_kernel_tests.cpp
+@@ -941,6 +941,27 @@ void register_ps2_runtime_kernel_tests()
+             t.Equals(ee.semaphore(gSchedulerSemaphoreId)->count, 0, "direct handoff must not increment count");
+         });
+ 
++        // MKSM: a private guest heap keeps the runtime's own allocations out of the heap SetupHeap names, which the game's
++        // own malloc may manage (Shaolin Monks: SIF command and GS upload packets landed on its data).
++        tc.Run("a private guest heap is left alone by SetupHeap", [](TestCase &t)
++        {
++            TestEnv env;
++            env.runtime.setPrivateGuestHeap(0x000A0000u, 0x00100000u);
++            t.IsTrue(env.runtime.hasPrivateGuestHeap(), "the guest heap should be private");
++
++            setRegU32(env.ctx, 4, 0x00780B98u);
++            setRegU32(env.ctx, 5, 0xFFFFFFFFu);
++            t.IsTrue(callSyscall(0x3Du, env.rdram.data(), &env.ctx, &env.runtime), "SetupHeap syscall should dispatch");
++            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)), 0x00780BA0u, "SetupHeap should give the game its heap's base");
++            t.IsTrue(callSyscall(0x3Eu, env.rdram.data(), &env.ctx, &env.runtime), "EndOfHeap syscall should dispatch");
++            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)), 0x01F00000u, "EndOfHeap should report the game's heap end");
++
++            const uint32_t block = env.runtime.guestMalloc(0x400u, 16u);
++            t.IsTrue(block >= 0x000A0000u && block + 0x400u <= 0x00100000u,
++                     "the runtime's allocations should stay in its private heap");
++            env.runtime.guestFree(block);
++        });
++
+         tc.Run("setup heap and allocator primitives track end-of-heap", [](TestCase &t)
+         {
+             TestEnv env;

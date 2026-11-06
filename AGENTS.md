@@ -41,9 +41,10 @@ scripts and the research log ([`docs/MKSM.md`](docs/MKSM.md)). No game files and
 
 1. Visual Studio 2022 or later with the C++ tools, CMake and Ninja (the Visual Studio installer provides them).
 2. Extract the PAL disc into `game\` (7-Zip: `7z x "<image>.iso" -ogame`).
-3. `scripts\build.cmd`: the **quick profile** (default; RelWithDebInfo, `/O1`, debug info, no whole-program
-   optimization, 8 jobs) builds the tools, generates the C++ from the ELF when the configuration or the ELF
-   changed, and builds the runner into `PS2Recomp\out\build-quick`. `scripts\build.cmd -Release` builds the
+3. `scripts\build.cmd`: the **quick profile** (default; RelWithDebInfo, debug info, the generated game code at `/O1`
+   and the runtime at `/O2` (`scripts/quick-profile.cmake`), no whole-program optimization, 8 jobs) builds the
+   tools, generates the C++ from the ELF when the configuration or the ELF changed, and builds the runner into
+   `PS2Recomp\out\build-quick`. `scripts\build.cmd -Release` builds the
    optimized profile into `out\build-release` (still without LTO: `patches/0002-lto-option.patch`). Other
    switches: `-Jobs n`, `-ToolsOnly`, `-Regenerate`, `-Reset` (check out and patch the submodule again), `-Tests`.
    Only what changed is rebuilt: the submodule is left alone while it is the pinned commit plus the patches, and
@@ -53,6 +54,12 @@ scripts and the research log ([`docs/MKSM.md`](docs/MKSM.md)). No game files and
    for the sector reads the game does outside the extracted files; the image is never part of the build.
    `scripts\screenshot.ps1` saves a PNG of the game window.
    The window title shows the displayed frames and their rate (`patches/0003`); `F1` hides and shows upstream's
-   runtime debug panel (registers, threads, IOP, RPC history, GS, logs), which opens over the game by default.
+   runtime debug panel (registers, threads, IOP, RPC history, GS, logs), which starts hidden (`patches/0012`).
    The game's movies do not play yet and are skipped by default (`MKSM_SKIP_MOVIES=0` plays them). Diagnostics
-   of the override module (`MKSM_TRACE_*`, `MKSM_PROFILE`) are described in `docs/MKSM.md`.
+   of the override module (`MKSM_TRACE_*`, `MKSM_PROFILE`, `MKSM_PAD_SCRIPT`) are described in `docs/MKSM.md`.
+   The picture is 4:3 in a resizable window, the fields woven into full height and scaled with bilinear filtering;
+   `MKSM_ASPECT=16:9` (any `<w>:<h>`) or `MKSM_ASPECT=window` widens it and the game's 3D view, `MKSM_FILTER=nearest`
+   scales with nearest sampling, `MKSM_DEINTERLACE=0` shows the fields one by one.
+   Keyboard (upstream's mapping): X or Space is cross, C circle, Z square, V triangle, Enter start, Tab select,
+   the arrows or WASD the directional pad, Q and E L1 and R1, the Shift keys L2 and R2; Esc closes the window. A
+   gamepad works too.

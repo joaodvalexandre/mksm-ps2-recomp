@@ -317,8 +317,9 @@ independent of that runtime:
 - **The old port's path from this screen.** The archived NTSC port got from this same screen to the main menu with
   five fixes: the drawing environment's packet, the image upload's block address, libpkt's tag counts, scratchpad
   DMA addresses and the pad's DMA buffer (`docs/MKSM.md` of `archive/ntsc-waffle-runtime`). Each was checked again
-  against upstream's current code and the PAL ELF, whose libgraph, libdma and libpkt sit at the same addresses as
-  the NTSC ones (`0x383918`, `0x384480`, `0x384F10`; the text sender at `0x37E820`).
+  against upstream's current code and the PAL ELF. The PAL code is not at the NTSC addresses in most places
+  (`sceGifPkCloseGifTag` at `0x384F10` instead of `0x384C60`, the movie player at `0x270038` instead of `0x26FD80`), so every address here
+  was found again in the PAL code.
 - **libgraph's drawing environment** (`patches/0013-gs-draw-env-packets.patch`, three tests). `sceGsPutDrawEnv`
   takes the GIF tag in front of a drawing environment and, like the game's own version, sends it with its NLOOP
   quadwords through the GIF channel; upstream read eight register pairs from the tag itself, so the tag became a
@@ -332,9 +333,10 @@ independent of that runtime:
 - **Image uploads** (`patches/0014-gs-load-image-packet.patch`, one new test, upstream's round trip adapted).
   `sceGsSetDefLoadImage` writes libgraph's 6-quadword packet (DBP as given) and `sceGsExecLoadImage` sends it with
   the image as one GIF packet: upstream's GS parses each transfer as a whole packet, so libgraph's two transfers
-  cannot be reproduced as they are. Upstream kept a private 12-byte record there and scaled its DBP by 8; the
-  game's texture loader (`0x269F1C`-`0x269FC4`) also builds these packets inside its own objects and sends them in
-  its own chains. The store side keeps its record, with SBP no longer scaled.
+  cannot be reproduced as they are. Upstream kept a private 12-byte record there and scaled its DBP by 8, which put
+  the CLUTs the game uploads with `sceGsExecLoadImage` outside GS memory. (The game's texture loader, `0x269F1C`-
+  `0x269FC4`, also builds such packets in its objects but never sends them: it uploads with a libpkt chain of its
+  own, `0x268900`.) The store side keeps its record, with SBP no longer scaled.
 - **libpkt and `rand`** (`config/recomp.toml`). The five libpkt helpers the analyzer bound to runtime handlers are
   the game's code again. The handlers rewrite the open DMA tag's QWC each time they move the packet pointer, and the
   game's own terminate (`0x384C58`, `0x385028`) adds the count when it closes the tag, so every chain they touched
@@ -364,6 +366,104 @@ independent of that runtime:
   the buffer given to `scePadPortOpen` up to date, and the game read its buttons from it. In PAL the pad layer
   (`0x273008`) opens the port with its own 64-byte-aligned object as that buffer (`0x273170`) and reads
   `scePadRead`'s copy (`0x273684`), which upstream fills; whether another reader takes the buttons from the object
-  itself, as NTSC `0x212808` did, is the first thing to check. Then the libvu0 handlers flagged by the audit
+  itself (in PAL `0x212808` does) is the first thing to check. Then the libvu0 handlers flagged by the audit
   (`sceVu0RotTransPers`, `sceVu0InnerProduct`, `sceVu0Normalize`, `sceVu0NormalLightMatrix`), the IOP heap library,
   movies and sound.
+
+## 2026-11-05 (evening) — the pad, the front end, the picture, sound findings
+
+- **Two reviews.** Read-only workflows (one reviewer per area, then a skeptical verifier) checked patches 0013-0015 and
+  today's work. Confirmed and fixed below: `sceGsExecLoadImage` and other runtime handlers allocated in the heap the
+  game's own malloc manages (patch 0020); `sendGifNormal` and `toDmaPhys` mapped kseg0 and uncached addresses wrongly,
+  and four libgraph handlers read arguments from the stack in edge cases (patch 0021); a buffer held on screen stayed
+  blended with the one before (patch 0019); the pad buffer read as every button held until the first `scePadRead`
+  (patch 0016); the pad script lost overlapping presses; Esc, upstream's key for circle, also closes the window; and
+  the pointer scan missed function starts after padding or tail calls. Refuted: a minimized window does not change the
+  aspect (raylib pauses the loop). The claim of patch 0014 that the game sends its `sceGsLoadImage` packets itself was
+  wrong: its texture loader builds them but uploads with its own libpkt chain (`0x268900`).
+- **The pad's DMA buffer** (`patches/0016-pad-dma-buffer.patch`, test in the pad tests). `0x212808` reads the buttons
+  and sticks straight from the pad object at `0x652200 + port * 0x700` (bytes 2-7), the buffer the game's pad layer
+  (`0x273008`) gives `scePadPortOpen` (`0x273170`); its own read path takes `scePadRead`'s copy (`0x273684`). Upstream
+  zeroed the buffer at open and never wrote it again, so every button looked held and no press registered.
+  `scePadPortOpen` now writes a pad at rest (buttons released, sticks centred) into both 128-byte halves, and
+  `scePadRead` copies its 32 bytes there, as the IOP's pad driver keeps them on the console.
+- **Scripted pad** (`MKSM_PAD_SCRIPT`, override module): `<seconds>:<buttons>[:<hold>],...`, buttons joined with `+`
+  (cross, circle, square, triangle, start, select, up, down, left, right, l1, l2, r1, r2, l3, r3), held 0.25 s by
+  default, tagged `[mksm-pad]`. A host thread sets the runtime's pad override for each press, which every port reads;
+  a press waits until 0.1 s after the one before is released (logged as late), and the keyboard and gamepad work in
+  between. Keyboard (upstream's mapping): X or Space cross, C circle, Z square, V triangle, Enter start, Tab select,
+  the arrows or WASD, Q and E L1 and R1, the Shift keys L2 and R2; Esc closes the window.
+- **The front end.** With `MKSM_PAD_SCRIPT=45:cross,60:cross,75:start,90:cross,105:cross,120:cross,135:cross` the game
+  goes from the autosave notice to "No MKSM save data present on memory card (PS2) in MEMORY CARD slot 1. Do you wish
+  to create save data and save this file now? No / Yes" (No), the title screen ("Press START button"), the brightness
+  screen, the main menu (Single Player, Ko-op, Versus Mode, Load Game, Options, Kontent), the character select (Liu
+  Kang and Kung Lao drawn in 3D) and "Select difficulty" (Normal, Hard).
+- **Function pointers to merged code** (`tools/missing_targets.py --data-pointers`). The old port froze after the
+  character select on a vtable call to `0x38C730`, a function the analyzer had merged into the one before it; PAL
+  has it at the same address (pointed to from `0x567034`). The tool scans `.data` and `.rodata` (the ELF has one
+  segment for code and data; a first version took instruction words for pointers) for words pointing into `.text` at
+  no registered address that look like a function start: a stack frame, or just after a return or another
+  unconditional jump (padding allowed); jump tables (a neighbour in the same function at no such start) are left out.
+  1185 such targets are entry points in `config/recomp.toml`: most are `.eh_frame` pc_begin values, the rest vtable
+  and callback entries, landing pads and a few switch cases (inside a decoded function an entry point only adds a
+  resume label). The difficulty select now follows the character select.
+- **The picture.** The game renders 640x256 fields (SMODE2 INT and FFMD) and puts every other field half a line lower
+  in its own vertices, which a TV interleaves; shown one after the other, the picture moved a line every frame
+  (`patches/0017-gs-field-blend.patch`, then `patches/0019-gs-field-weave-bilinear.patch`). The presented frame is now
+  the TV picture: the displayed field and the one before it woven at twice the height, each on its own rows in the
+  order that combs least, every row blended with its neighbours (PCSX2's "blend"); a buffer held on screen longer than
+  a quarter of a second is shown on its own. The window scales it with bilinear filtering (nearest sampling stretched
+  640x256 unevenly). `MKSM_DEINTERLACE=0` shows the fields one by one, `MKSM_FILTER=nearest` scales with nearest
+  sampling.
+- **Aspect** (`patches/0018-host-display-aspect.patch`). Upstream scaled the frame with square pixels (640x448 came out
+  1.43:1 instead of a TV's 4:3) in a 640x448 window. The picture is now shown at a display aspect, as large as the
+  resizable window allows and centred; the window opens at 960x720; 4:3 by default. `MKSM_ASPECT=<w>:<h>` (16:9...) or
+  `MKSM_ASPECT=window` (follow the window) sets another, and the override keeps the game's 3D view in step: `0x4F4E08`
+  holds the horizontal scale of its projection, `(4/3) / aspect`, read where the projection is set up (`0x236D70`,
+  `0x24A178`; 1.0 in the ELF, the game's own setter `0x2268B0` has no caller). The game's test for its 16:9 camera
+  tuning (`0x36FB20`, scale 0.75 within 0.0005; it switches a camera constant from 2.6 to 4.5) is replaced to accept
+  any picture wider than about 3:2. The 2D screens are stretched.
+- **No more magenta** (`patches/0022-host-no-magenta.patch`). Upstream filled the window with magenta whenever the GS
+  had no frame to present (no read circuit, an empty display, a display being set up between two screens); the
+  window now keeps the last picture for up to a second, then shows black.
+- **Private guest heap** (`patches/0020-private-guest-heap.patch`). The runtime's own guest allocations (SIF command
+  packets, GS upload packets, MPEG callback data) came from the heap `SetupHeap` names, which this game's own malloc
+  manages, so they overwrote its data. `PS2Runtime::setPrivateGuestHeap` moves them for good (the override puts them at
+  `0xA0000`-`0x100000`, below the ELF); `SetupHeap` then gives the game its own base and `EndOfHeap` its own end.
+- **Quick profile by target** (`scripts/quick-profile.cmake`). The generated code stays at `/O1 /Ob1` (build time),
+  everything else is `/O2 /Ob2`. Frame rates (window title): 20 fps on the 2D screens (12 before), 7 to 11 in the
+  main menu and the character select (4 to 6 before). The host profile is still 80 to 90 per cent software GS
+  (triangles, sprites, pixel writes, texture and CLUT lookups), run synchronously from the game's DMA writes, plus up
+  to a third in the VU1 interpreter in 3D scenes.
+- **Sound: no SPU2 at all.** An investigation workflow found that upstream PS2Recomp has no SPU2: the IOP emulator keeps
+  the SPU2 registers as a plain store, fakes SPU2 DMA completion without moving data, and has no sound RAM, voices,
+  ADPCM decoding, mixing or output. The only host audio path plays VAG files read through fio. The game's libsdr calls
+  (`0x382C70`, `0x382D20`, `0x382DB0`) are stubbed to bookkeeping handlers (`sceSdTransToIOP` would end the game
+  thread), so the game's sample uploads never reach SDRDRV.IRX; CRI ADX music streams through LIBSD's block transfers
+  on the IOP. Sound needs an SPU2 in ps2xIOP (sound RAM, DMA, 48 ADPCM voices with envelopes and pitch, mixing,
+  48 kHz host stream), like the archived port's native sound engine, plus un-stubbing libsdr: left for later.
+- **Window title** (`patches/0023-window-title-game-name.patch`). The override names the window "Mortal Kombat: Shaolin
+  Monks | frame <n> | <fps> fps" (displayed frames and their rate, `patches/0003`).
+- **BC2F/BC2T** (`patches/0024-bc2-tests-vu1-busy.patch`, test in the code generator tests; needs `-Regenerate`). The
+  recompiler tested the Z flag of the VU0 STATUS register for the COP2 branch condition; on the console (and in PCSX2)
+  it is VU1 busy (VPU-STAT bit 8). The game's wait-for-VU1 loop at `0x24EA10` (`sub_0024E910`) spun forever once a
+  VU0 macro result had been zero, right after the movie before a stage.
+- **After the difficulty select.** The game sets up a 640x512 display (PSMCT16, then PSMCT32), plays a movie (skipped
+  by the override) and re-initialises its double buffer, then presents nothing more (black since patch 0022). With
+  0024 the VU1 loop is gone, but every EE thread is then idle and the IOP runs about 0.1 M instructions a second.
+  `MKSM_TRACE_CALLS=0x26F2A0,0x483980,0x463B30` shows `sceSifCallRpc` (`0x483980`) on the client at `0x53E0B0`
+  (functions 0x2, 0x403, 0x40C, 0x422, 0x400) and the SFSV end function `0x463B30` called over and over with
+  `a0=0x771740 a1=0x8000 a2=1 a3=0x770D00`: the game most likely waits for a sound request (SNDF/SFSV) to complete.
+  Not solved yet.
+- **Frame rate: where the time goes and what others did.** Read-only analyses (logs/profile_menu.txt): one textured,
+  bilinear, palette pixel costs 31-35 out-of-line calls (about 1,500 instructions) in the CPU GS backend; the GS is
+  79-82 per cent of the game thread in the menus. Exact fixes to that path (rounding, palette cache, span loops,
+  sprite fast paths, a GS thread) are estimated at 13-32 fps, 22-50 with a GS thread, still bounded by the EE side
+  (16-31 ms a frame). Every PS2 port found that reaches full speed replaced the software GS with a GPU path (PCSX2's
+  GS, paraLLEl-GS or its own renderer) and compiled VU1 microprograms or threaded VIF1/VU1. Upstream's own draft
+  (PR #285, branch `feature/performance-patch-1`) adds a paraLLEl-GS (Vulkan compute) backend behind
+  `GSRasterBackend`. PAL SLES-53524 is 50 Hz only (no 60 Hz mode, no progressive scan): full speed is 50 pictures a
+  second, one per field.
+- **Sound** (same investigation, more detail): besides the missing SPU2, the IOP emulator starts modules with (byte
+  count, buffer) instead of (argc, argv), so CRI_ADXI ignores its `sdinit=0 spucore=2` options; and the libsdr
+  handlers fake their results without contacting SDRDRV.IRX, which is loaded and serves `0x80000701`.

@@ -1,0 +1,421 @@
+diff --git a/ps2xRuntime/include/ps2_host_aspect.h b/ps2xRuntime/include/ps2_host_aspect.h
+index b14b302..2b9cbaf 100644
+--- a/ps2xRuntime/include/ps2_host_aspect.h
++++ b/ps2xRuntime/include/ps2_host_aspect.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <algorithm>
++#include <atomic>
+ 
+ // MKSM: where the host window shows the PS2 picture. PS2 frames do not have square pixels (a 640x448 frame is a 4:3
+ // picture on a TV), so the frame is shown at a display aspect, as large as the window allows and centred in it
+@@ -28,3 +29,21 @@ inline Ps2HostPictureRect ps2HostPictureRect(float windowWidth, float windowHeig
+     rect.y = (windowHeight - rect.height) * 0.5f;
+     return rect;
+ }
++
++// MKSM: the picture is scaled to the window with bilinear filtering (the default) or nearest sampling. Nearest sampling
++// of a 640x256 field in a 960x720 window doubled some rows and tripled others.
++inline std::atomic<bool> &ps2HostSmoothScalingSetting()
++{
++    static std::atomic<bool> smooth{true};
++    return smooth;
++}
++
++inline bool ps2HostSmoothScaling()
++{
++    return ps2HostSmoothScalingSetting().load(std::memory_order_relaxed);
++}
++
++inline void ps2SetHostSmoothScaling(bool smooth)
++{
++    ps2HostSmoothScalingSetting().store(smooth, std::memory_order_relaxed);
++}
+diff --git a/ps2xRuntime/include/runtime/gs/gs_field_blend.h b/ps2xRuntime/include/runtime/gs/gs_field_blend.h
+index fe69596..83b6741 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_field_blend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_field_blend.h
+@@ -1,24 +1,30 @@
+ #pragma once
+ 
+-#include <algorithm>
+ #include <cstdint>
+-#include <cstring>
+ #include <vector>
+ 
+-// MKSM: field rendering (SMODE2 INT and FFMD: interlaced, every line of the buffer read in each field). A game that
+-// draws every other field half a line lower in its own vertices counts on the TV to interleave the fields; shown one
+-// after the other, the picture moves a line every frame and thin lines come and go. GsFieldBlend shows the mean of
+-// the displayed field and the one shown before it, as the TV's persistence does (PCSX2's "blend" deinterlacing). A
+-// field is a displayed buffer: the host refresh is not locked to the game's fields, so a buffer shown again must not
+-// become its own previous field.
++// MKSM: field rendering (SMODE2 INT and FFMD: interlaced, every line of the buffer read in each field). The game draws
++// each field for its own set of TV lines: every other field half a line lower in its own vertices, which the TV puts
++// between the lines of the field before. Shown one after the other at field height, the picture moved a line every
++// frame. GsFieldBlend rebuilds the TV picture: the displayed field and the one shown before it are woven at twice the
++// height, each on its own rows, and every row is blended with the rows around it ((above + 2 * row + below) / 4),
++// which hides the combing of moving parts (PCSX2's "blend" deinterlacing). The field that goes on the top rows is the
++// one of the order that combs least. A field is a displayed buffer (DISPFB: base, width, format and read origin): the
++// host refresh is not locked to the game's fields, so a buffer shown again must not become its own previous field. A
++// buffer held on screen longer than kHeldLatches presentations (a loading screen, a pause) is shown on its own, each
++// row twice, instead of with the picture before it. The code is in gs_frontend.cpp.
+ struct GsFieldBlend
+ {
+-    std::vector<uint8_t> current;
+-    std::vector<uint8_t> previous;
++    std::vector<uint8_t> current;  // the displayed field: rows of width RGBA pixels
++    std::vector<uint8_t> previous; // the field shown before it
+     uint32_t width = 0;
+-    uint32_t height = 0;
+-    uint32_t fbp = 0;
+-    uint32_t fields = 0; // how many of current and previous hold a field (0 to 2)
++    uint32_t height = 0;           // rows of a field
++    uint64_t buffer = 0;           // the DISPFB register of the displayed field
++    uint32_t fields = 0;           // how many of current and previous hold a field (0 to 2)
++    uint32_t heldLatches = 0;      // presentations of the current field so far
++    bool currentOnTop = true;      // current goes on the even (top) rows of the woven picture
++
++    static constexpr uint32_t kHeldLatches = 12; // a quarter of a second at 50 fields a second
+ 
+     static bool applies(uint64_t smode2)
+     {
+@@ -30,52 +36,9 @@ struct GsFieldBlend
+         fields = 0;
+     }
+ 
+-    // pixels: the frame about to be shown (any byte layout, the same for every frame of this size), from the buffer
+-    // at displayFbp. Once two fields are known it is replaced by their per-byte mean, rounded up.
+-    void apply(std::vector<uint8_t> &pixels, uint32_t frameWidth, uint32_t frameHeight, uint32_t displayFbp)
+-    {
+-        if (pixels.empty())
+-        {
+-            fields = 0;
+-            return;
+-        }
+-        if (frameWidth != width || frameHeight != height || current.size() != pixels.size())
+-        {
+-            width = frameWidth;
+-            height = frameHeight;
+-            fields = 0;
+-        }
+-        if (fields == 0u || displayFbp != fbp)
+-        {
+-            current.swap(previous); // a new field: the one shown so far becomes the previous one
+-            fields = std::min<uint32_t>(fields + 1u, 2u);
+-            fbp = displayFbp;
+-        }
+-        current = pixels;
+-        if (fields < 2u || previous.size() != pixels.size())
+-        {
+-            return;
+-        }
+-
+-        // (a | b) - ((a ^ b) >> 1) is the mean of two bytes rounded up; eight lanes at a time, the mask keeping each
+-        // lane's shift to itself.
+-        constexpr uint64_t kLaneMask = 0x7F7F7F7F7F7F7F7Full;
+-        const size_t size = pixels.size();
+-        size_t i = 0;
+-        for (; i + 8u <= size; i += 8u)
+-        {
+-            uint64_t a = 0u;
+-            uint64_t b = 0u;
+-            std::memcpy(&a, current.data() + i, sizeof(a));
+-            std::memcpy(&b, previous.data() + i, sizeof(b));
+-            const uint64_t mean = (a | b) - (((a ^ b) >> 1u) & kLaneMask);
+-            std::memcpy(pixels.data() + i, &mean, sizeof(mean));
+-        }
+-        for (; i < size; ++i)
+-        {
+-            const uint32_t a = current[i];
+-            const uint32_t b = previous[i];
+-            pixels[i] = static_cast<uint8_t>((a + b + 1u) >> 1u);
+-        }
+-    }
++    // pixels: the frame about to be shown, frameHeight rows of frameWidth RGBA pixels, from the buffer whose DISPFB is
++    // displayBuffer. It becomes the rebuilt picture, twice as tall, when that fits in maxHeight rows (otherwise the
++    // per-byte mean of the two fields at field height), and frameHeight is updated.
++    void apply(std::vector<uint8_t> &pixels, uint32_t frameWidth, uint32_t &frameHeight, uint64_t displayBuffer,
++               uint32_t maxHeight);
+ };
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index b0f8c49..bbbfd08 100644
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -524,6 +524,125 @@ GSPresentationRequest GS::buildPresentationRequestUnlocked() const
+     return request;
+ }
+ 
++// MKSM: GsFieldBlend (runtime/gs/gs_field_blend.h).
++namespace
++{
++    // The per-byte mean of two groups of 8 bytes, rounded up: (a | b) - ((a ^ b) >> 1), each lane's shift kept to it.
++    inline uint64_t meanBytes(uint64_t a, uint64_t b)
++    {
++        return (a | b) - (((a ^ b) >> 1u) & 0x7F7F7F7F7F7F7F7Full);
++    }
++
++    inline uint64_t loadBytes(const uint8_t *p)
++    {
++        uint64_t value = 0u;
++        std::memcpy(&value, p, sizeof(value));
++        return value;
++    }
++
++    // How much a field placed between the rows of another combs: |row - (above + below) / 2| over the green byte of
++    // every fourth pixel.
++    uint64_t fieldCombing(const std::vector<uint8_t> &outer, const std::vector<uint8_t> &inner, size_t rowBytes,
++                          uint32_t rows)
++    {
++        uint64_t sum = 0u;
++        for (uint32_t row = 0u; row + 1u < rows; ++row)
++        {
++            const uint8_t *above = outer.data() + static_cast<size_t>(row) * rowBytes;
++            const uint8_t *below = above + rowBytes;
++            const uint8_t *between = inner.data() + static_cast<size_t>(row) * rowBytes;
++            for (size_t x = 1u; x < rowBytes; x += 16u)
++            {
++                const int expected = (static_cast<int>(above[x]) + static_cast<int>(below[x])) / 2;
++                const int difference = static_cast<int>(between[x]) - expected;
++                sum += static_cast<uint64_t>(difference < 0 ? -difference : difference);
++            }
++        }
++        return sum;
++    }
++}
++
++void GsFieldBlend::apply(std::vector<uint8_t> &pixels, uint32_t frameWidth, uint32_t &frameHeight, uint64_t displayBuffer,
++                         uint32_t maxHeight)
++{
++    const size_t rowBytes = static_cast<size_t>(frameWidth) * 4u;
++    const size_t fieldBytes = rowBytes * frameHeight;
++    if (fieldBytes == 0u || pixels.size() < fieldBytes)
++    {
++        fields = 0u;
++        return;
++    }
++    if (frameWidth != width || frameHeight != height)
++    {
++        width = frameWidth;
++        height = frameHeight;
++        fields = 0u;
++    }
++    const bool newField = fields == 0u || displayBuffer != buffer;
++    if (newField)
++    {
++        current.swap(previous); // the field shown so far becomes the previous one
++        fields = std::min<uint32_t>(fields + 1u, 2u);
++        buffer = displayBuffer;
++        heldLatches = 0u;
++    }
++    else if (heldLatches < kHeldLatches)
++    {
++        ++heldLatches;
++    }
++    current.assign(pixels.begin(), pixels.begin() + static_cast<std::ptrdiff_t>(fieldBytes));
++    if (fields == 2u && newField)
++    {
++        currentOnTop = fieldCombing(current, previous, rowBytes, height) <=
++                       fieldCombing(previous, current, rowBytes, height);
++    }
++    // one field, or one held on screen: each row twice
++    const std::vector<uint8_t> &other = fields == 2u && heldLatches < kHeldLatches ? previous : current;
++
++    const uint32_t rows = height * 2u;
++    if (rows > maxHeight)
++    {
++        // too tall to rebuild here: the per-byte mean of the two fields at field height
++        for (size_t i = 0u; i + 8u <= fieldBytes; i += 8u)
++        {
++            const uint64_t mean = meanBytes(loadBytes(current.data() + i), loadBytes(other.data() + i));
++            std::memcpy(pixels.data() + i, &mean, sizeof(mean));
++        }
++        for (size_t i = fieldBytes & ~static_cast<size_t>(7u); i < fieldBytes; ++i)
++        {
++            pixels[i] = static_cast<uint8_t>((current[i] + other[i] + 1u) >> 1u);
++        }
++        return;
++    }
++
++    const uint32_t topParity = currentOnTop ? 0u : 1u;
++    const auto wovenRow = [&](uint32_t row) -> const uint8_t *
++    {
++        const std::vector<uint8_t> &field = (row & 1u) == topParity ? current : other;
++        return field.data() + static_cast<size_t>(row >> 1u) * rowBytes;
++    };
++    pixels.resize(rowBytes * rows);
++    for (uint32_t row = 0u; row < rows; ++row)
++    {
++        const uint8_t *middle = wovenRow(row);
++        const uint8_t *above = wovenRow(row == 0u ? 0u : row - 1u);
++        const uint8_t *below = wovenRow(row + 1u < rows ? row + 1u : row);
++        uint8_t *out = pixels.data() + static_cast<size_t>(row) * rowBytes;
++        size_t x = 0u;
++        for (; x + 8u <= rowBytes; x += 8u)
++        {
++            const uint64_t value = meanBytes(meanBytes(loadBytes(above + x), loadBytes(below + x)), loadBytes(middle + x));
++            std::memcpy(out + x, &value, sizeof(value));
++        }
++        for (; x < rowBytes; ++x)
++        {
++            const uint32_t outer = (static_cast<uint32_t>(above[x]) + below[x] + 1u) >> 1u;
++            out[x] = static_cast<uint8_t>((outer + middle[x] + 1u) >> 1u);
++        }
++    }
++    frameHeight = rows;
++}
++
+ void GS::latchHostPresentationFrame()
+ {
+     GSPresentationRequest request{};
+@@ -554,7 +673,10 @@ void GS::latchHostPresentationFrame()
+     // MKSM: field rendering is shown as the blend of the last two fields (runtime/gs/gs_field_blend.h).
+     if (frame && m_fieldBlending.load(std::memory_order_relaxed) && GsFieldBlend::applies(request.smode2))
+     {
+-        m_fieldBlend.apply(frame.pixels, frame.width, frame.height, frame.displayFbp);
++        constexpr uint32_t kMaxPresentationRows = 512u; // the host's frame texture (ps2_runtime.cpp, FB_HEIGHT)
++        // the displayed circuit's buffer (read circuit 2 when PMODE enables it), read origin included
++        const uint64_t displayBuffer = (request.pmode & 2u) != 0u ? request.dispfb2 : request.dispfb1;
++        m_fieldBlend.apply(frame.pixels, frame.width, frame.height, displayBuffer, kMaxPresentationRows);
+     }
+     else
+     {
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index c4d611a..8448f01 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -2378,6 +2378,9 @@ void PS2Runtime::run()
+     Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
+     Texture2D frameTex = LoadTextureFromImage(blank);
+     UnloadImage(blank);
++    // MKSM: bilinear or nearest scaling of the picture (ps2_host_aspect.h), applied again if the setting changes.
++    bool smoothScaling = ps2HostSmoothScaling();
++    SetTextureFilter(frameTex, smoothScaling ? TEXTURE_FILTER_BILINEAR : TEXTURE_FILTER_POINT);
+ 
+     std::atomic<bool> gameThreadFinished{false};
+     ps2_frame_counter::reset(); // MKSM: the EE scheduler counts the displayed frames from here on
+@@ -2453,6 +2456,11 @@ void PS2Runtime::run()
+         uint32_t presentWidth = FB_WIDTH;
+         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
+         UploadFrame(frameTex, this, presentWidth, presentHeight);
++        if (ps2HostSmoothScaling() != smoothScaling)
++        {
++            smoothScaling = !smoothScaling;
++            SetTextureFilter(frameTex, smoothScaling ? TEXTURE_FILTER_BILINEAR : TEXTURE_FILTER_POINT);
++        }
+ 
+         BeginDrawing();
+         ClearBackground(BLACK);
+@@ -2464,8 +2472,10 @@ void PS2Runtime::run()
+         // setDisplayAspect chose another; 0 fills the window), letterboxed or pillarboxed in the window.
+         const Ps2HostPictureRect picture =
+             ps2HostPictureRect(screenWidth, screenHeight, m_displayAspect.load(std::memory_order_relaxed));
+-        m_shownDisplayAspect.store(picture.height > 0.0f ? picture.width / picture.height : 4.0f / 3.0f,
+-                                   std::memory_order_relaxed);
++        if (picture.width > 0.0f && picture.height > 0.0f) // not while the window is minimized
++        {
++            m_shownDisplayAspect.store(picture.width / picture.height, std::memory_order_relaxed);
++        }
+         const Rectangle srcRect{0.0f, 0.0f, srcWidth, srcHeight};
+         const Rectangle dstRect{picture.x, picture.y, picture.width, picture.height};
+         DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+diff --git a/ps2xTest/src/ps2_gs_tests.cpp b/ps2xTest/src/ps2_gs_tests.cpp
+index 20e57f2..934238a 100644
+--- a/ps2xTest/src/ps2_gs_tests.cpp
++++ b/ps2xTest/src/ps2_gs_tests.cpp
+@@ -4322,37 +4322,69 @@ void register_ps2_gs_tests()
+             t.Equals(snap.ctx[0].test, (2ull << 17) | 0x10000ull, "the clear should restore draw0's TEST_1");
+         });
+ 
+-        // MKSM: field rendering is shown as the mean of the displayed field and the one before it. Shaolin Monks draws
+-        // every other field half a line lower in its own vertices; shown one after the other, the picture moved a line
+-        // every frame.
+-        tc.Run("field rendering is presented as the blend of the last two fields", [](TestCase &t)
++        // MKSM: field rendering is shown as the TV picture: the displayed field and the one before it woven at twice the
++        // height, in the order that combs least, each row blended with its neighbours. Shaolin Monks draws every other
++        // field half a line lower in its own vertices; shown one after the other, the picture moved a line every frame.
++        tc.Run("field rendering is woven into the full-height picture", [](TestCase &t)
+         {
+-            t.IsTrue(GsFieldBlend::applies(3u), "interlaced frame mode (SMODE2 INT and FFMD) should blend the fields");
++            t.IsTrue(GsFieldBlend::applies(3u), "interlaced frame mode (SMODE2 INT and FFMD) should rebuild the picture");
+             t.IsTrue(!GsFieldBlend::applies(1u), "interlaced field mode shows each frame as it is");
+             t.IsTrue(!GsFieldBlend::applies(0u), "progressive output shows each frame as it is");
+ 
++            const auto field = [](std::initializer_list<uint8_t> rows)
++            {
++                std::vector<uint8_t> pixels;
++                for (const uint8_t value : rows)
++                    pixels.insert(pixels.end(), 4u, value); // one RGBA pixel per row
++                return pixels;
++            };
++            const auto rowValue = [](const std::vector<uint8_t> &pixels, uint32_t row)
++            { return static_cast<uint32_t>(pixels[row * 4u]); };
++
+             GsFieldBlend blend;
+-            std::vector<uint8_t> first(12u, 0x10u);
+-            blend.apply(first, 1u, 3u, 0u);
+-            t.Equals(static_cast<uint32_t>(first[0]), 0x10u, "the first field should be shown as it is");
+-
+-            std::vector<uint8_t> again(12u, 0x30u);
+-            blend.apply(again, 1u, 3u, 0u);
+-            t.Equals(static_cast<uint32_t>(again[0]), 0x30u, "the same buffer shown again is not its own previous field");
+-
+-            std::vector<uint8_t> second(12u, 0x51u);
+-            second[11] = 0xFFu;
+-            blend.apply(second, 1u, 3u, 80u);
+-            t.Equals(static_cast<uint32_t>(second[0]), 0x41u, "a new buffer should be blended with the last field (rounded up)");
+-            t.Equals(static_cast<uint32_t>(second[11]), 0x98u, "every byte should be blended on its own");
+-
+-            std::vector<uint8_t> third(12u, 0x20u);
+-            blend.apply(third, 1u, 3u, 0u);
+-            t.Equals(static_cast<uint32_t>(third[0]), 0x39u, "the next buffer should be blended with the one before it");
+-
+-            std::vector<uint8_t> resized(16u, 0x70u);
+-            blend.apply(resized, 2u, 2u, 80u);
+-            t.Equals(static_cast<uint32_t>(resized[0]), 0x70u, "a new frame size should start over");
++            std::vector<uint8_t> first = field({0x10u, 0x10u, 0x10u});
++            uint32_t height = 3u;
++            blend.apply(first, 1u, height, 0u, 512u);
++            t.Equals(height, 6u, "the picture should be twice the field's height");
++            t.Equals(rowValue(first, 3u), 0x10u, "a lone field should be shown with each row twice");
++
++            // The game's fields: the second one's rows fall between the first one's (a ramp 0x10, 0x20, ... 0x60).
++            std::vector<uint8_t> top = field({0x10u, 0x30u, 0x50u});
++            std::vector<uint8_t> again = top;
++            std::vector<uint8_t> bottom = field({0x20u, 0x40u, 0x60u});
++            GsFieldBlend ramp;
++            height = 3u;
++            ramp.apply(top, 1u, height, 0u, 512u);
++            height = 3u;
++            ramp.apply(again, 1u, height, 0u, 512u);
++            t.Equals(rowValue(again, 0u), 0x10u, "the same buffer shown again should not be woven with itself");
++            height = 3u;
++            ramp.apply(bottom, 1u, height, 80u, 512u);
++            t.IsTrue(!ramp.currentOnTop, "the field whose rows fall between the other's should go on the odd rows");
++            t.Equals(rowValue(bottom, 1u), 0x20u, "row 1 should be the second field's first row");
++            t.Equals(rowValue(bottom, 2u), 0x30u, "row 2 should be the first field's second row");
++            t.Equals(rowValue(bottom, 3u), 0x40u, "row 3 should be the second field's second row");
++            t.Equals(rowValue(bottom, 4u), 0x50u, "row 4 should be the first field's third row");
++
++            // A buffer held on screen stops being woven with the picture before it.
++            for (uint32_t latch = 0u; latch <= GsFieldBlend::kHeldLatches; ++latch)
++            {
++                std::vector<uint8_t> held = field({0x20u, 0x40u, 0x60u});
++                height = 3u;
++                ramp.apply(held, 1u, height, 80u, 512u);
++                if (latch == GsFieldBlend::kHeldLatches)
++                    t.Equals(rowValue(held, 0u), 0x20u, "a held field should be shown on its own, each row twice");
++            }
++
++            GsFieldBlend tall;
++            std::vector<uint8_t> a = field({0x10u, 0x10u});
++            std::vector<uint8_t> b = field({0x31u, 0x31u});
++            height = 2u;
++            tall.apply(a, 1u, height, 0u, 3u);
++            height = 2u;
++            tall.apply(b, 1u, height, 80u, 3u);
++            t.Equals(height, 2u, "a picture taller than the host texture should stay at field height");
++            t.Equals(rowValue(b, 0u), 0x21u, "and be the mean of the two fields, rounded up");
+         });
+ 
+         // MKSM: the window shows a PS2 frame at its display aspect, as large as it fits and centred; 0 fills the window.

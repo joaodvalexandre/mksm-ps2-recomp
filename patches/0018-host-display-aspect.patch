@@ -1,0 +1,142 @@
+diff --git a/ps2xRuntime/include/ps2_host_aspect.h b/ps2xRuntime/include/ps2_host_aspect.h
+new file mode 100644
+index 0000000..b14b302
+--- /dev/null
++++ b/ps2xRuntime/include/ps2_host_aspect.h
+@@ -0,0 +1,30 @@
++#pragma once
++
++#include <algorithm>
++
++// MKSM: where the host window shows the PS2 picture. PS2 frames do not have square pixels (a 640x448 frame is a 4:3
++// picture on a TV), so the frame is shown at a display aspect, as large as the window allows and centred in it
++// (letterboxed or pillarboxed). An aspect of 0 or less fills the window, whatever its shape.
++struct Ps2HostPictureRect
++{
++    float x = 0.0f;
++    float y = 0.0f;
++    float width = 0.0f;
++    float height = 0.0f;
++};
++
++inline Ps2HostPictureRect ps2HostPictureRect(float windowWidth, float windowHeight, float aspect)
++{
++    Ps2HostPictureRect rect;
++    rect.width = std::max(windowWidth, 0.0f);
++    rect.height = std::max(windowHeight, 0.0f);
++    if (aspect <= 0.0f || rect.width <= 0.0f || rect.height <= 0.0f)
++    {
++        return rect;
++    }
++    rect.width = std::min(rect.width, rect.height * aspect);
++    rect.height = rect.width / aspect;
++    rect.x = (windowWidth - rect.width) * 0.5f;
++    rect.y = (windowHeight - rect.height) * 0.5f;
++    return rect;
++}
+diff --git a/ps2xRuntime/include/ps2_runtime.h b/ps2xRuntime/include/ps2_runtime.h
+index 4b9242c..ca4e77f 100644
+--- a/ps2xRuntime/include/ps2_runtime.h
++++ b/ps2xRuntime/include/ps2_runtime.h
+@@ -440,6 +440,10 @@ public:
+ 
+     inline GS &gs() { return m_gs; }
+     inline const GS &gs() const { return m_gs; }
++    // MKSM: the aspect the host window shows the PS2 picture at (ps2_host_aspect.h): 4:3, a TV's, by default; 0
++    // fills the window. shownDisplayAspect is the one in use, the window's own while the picture fills it.
++    void setDisplayAspect(float aspect) { m_displayAspect.store(aspect, std::memory_order_relaxed); }
++    float shownDisplayAspect() const { return m_shownDisplayAspect.load(std::memory_order_relaxed); }
+     inline GifArbiter &gifArbiter() { return m_gifArbiter; }
+     inline const GifArbiter &gifArbiter() const { return m_gifArbiter; }
+     inline VU1Interpreter &vu0() { return m_vu0; }
+@@ -519,6 +523,8 @@ private:
+     std::atomic<uint32_t> m_missingFunctionPolicy{static_cast<uint32_t>(MissingFunctionPolicy::ContinueToTarget)};
+     std::atomic<bool> m_missingFunctionReported{false};
+     std::atomic<bool> m_stopRequested{false};
++    std::atomic<float> m_displayAspect{4.0f / 3.0f};      // MKSM: see setDisplayAspect
++    std::atomic<float> m_shownDisplayAspect{4.0f / 3.0f}; // MKSM
+     DebugUiCallback m_debugUiInitCallback = nullptr;
+     DebugUiCallback m_debugUiDrawCallback = nullptr;
+     DebugUiCallback m_debugUiShutdownCallback = nullptr;
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 3716613..c4d611a 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -13,6 +13,7 @@
+ #include "Kernel/Stubs/MPEG.h"
+ #include "ps2_host_backend.h"
+ #include "ps2_frame_counter.h"
++#include "ps2_host_aspect.h"
+ #include "ps2_iop_host.h"
+ #include "ps2x/iop/iop_subsystem.h"
+ 
+@@ -48,8 +49,9 @@ static constexpr uint32_t DEFAULT_FB_ADDR = (PS2_RAM_SIZE - DEFAULT_FB_SIZE - 0x
+ static constexpr int HOST_WINDOW_WIDTH = 960;
+ static constexpr int HOST_WINDOW_HEIGHT = 544;
+ #else
+-static constexpr int HOST_WINDOW_WIDTH = FB_WIDTH;
+-static constexpr int HOST_WINDOW_HEIGHT = DEFAULT_DISPLAY_HEIGHT;
++// MKSM: a 4:3 window, the TV picture at 1.5 times 640x480 (it was 640x448, square pixels); it can be resized.
++static constexpr int HOST_WINDOW_WIDTH = 960;
++static constexpr int HOST_WINDOW_HEIGHT = 720;
+ #endif
+ struct ElfHeader
+ {
+@@ -2458,15 +2460,14 @@ void PS2Runtime::run()
+         const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));
+         const float screenWidth = static_cast<float>(GetScreenWidth());
+         const float screenHeight = static_cast<float>(GetScreenHeight());
+-        const float scale = std::min(screenWidth / srcWidth, screenHeight / srcHeight);
+-        const float dstWidth = srcWidth * scale;
+-        const float dstHeight = srcHeight * scale;
++        // MKSM: PS2 frames do not have square pixels: the picture is shown at the display aspect (4:3 unless
++        // setDisplayAspect chose another; 0 fills the window), letterboxed or pillarboxed in the window.
++        const Ps2HostPictureRect picture =
++            ps2HostPictureRect(screenWidth, screenHeight, m_displayAspect.load(std::memory_order_relaxed));
++        m_shownDisplayAspect.store(picture.height > 0.0f ? picture.width / picture.height : 4.0f / 3.0f,
++                                   std::memory_order_relaxed);
+         const Rectangle srcRect{0.0f, 0.0f, srcWidth, srcHeight};
+-        const Rectangle dstRect{
+-            (screenWidth - dstWidth) * 0.5f,
+-            (screenHeight - dstHeight) * 0.5f,
+-            dstWidth,
+-            dstHeight};
++        const Rectangle dstRect{picture.x, picture.y, picture.width, picture.height};
+         DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+         if (m_debugUiInitialized && m_debugUiDrawCallback)
+         {
+diff --git a/ps2xTest/src/ps2_gs_tests.cpp b/ps2xTest/src/ps2_gs_tests.cpp
+index ae638b6..20e57f2 100644
+--- a/ps2xTest/src/ps2_gs_tests.cpp
++++ b/ps2xTest/src/ps2_gs_tests.cpp
+@@ -11,6 +11,7 @@
+ #include "runtime/gs/ps2_gs_psmt8.h"
+ #include "Stubs/Helpers/Support.h"
+ #include "Stubs/GS.h"
++#include "ps2_host_aspect.h"
+ 
+ #include <atomic>
+ #include <chrono>
+@@ -4354,6 +4355,22 @@ void register_ps2_gs_tests()
+             t.Equals(static_cast<uint32_t>(resized[0]), 0x70u, "a new frame size should start over");
+         });
+ 
++        // MKSM: the window shows a PS2 frame at its display aspect, as large as it fits and centred; 0 fills the window.
++        // The picture was scaled with square pixels, so a 640x448 frame came out 1.43:1 instead of a TV's 4:3.
++        tc.Run("the host picture keeps its display aspect in any window", [](TestCase &t)
++        {
++            const auto approx = [](float a, float b) { return a - b < 0.01f && b - a < 0.01f; };
++            const Ps2HostPictureRect wide = ps2HostPictureRect(1920.0f, 1080.0f, 4.0f / 3.0f);
++            t.IsTrue(approx(wide.width, 1440.0f) && approx(wide.height, 1080.0f), "a 4:3 picture in a 16:9 window is pillarboxed");
++            t.IsTrue(approx(wide.x, 240.0f) && approx(wide.y, 0.0f), "the pillarboxed picture is centred");
++            const Ps2HostPictureRect tall = ps2HostPictureRect(640.0f, 960.0f, 16.0f / 9.0f);
++            t.IsTrue(approx(tall.width, 640.0f) && approx(tall.height, 360.0f), "a 16:9 picture in a tall window is letterboxed");
++            t.IsTrue(approx(tall.x, 0.0f) && approx(tall.y, 300.0f), "the letterboxed picture is centred");
++            const Ps2HostPictureRect fill = ps2HostPictureRect(1000.0f, 500.0f, 0.0f);
++            t.IsTrue(approx(fill.width, 1000.0f) && approx(fill.height, 500.0f) && approx(fill.x, 0.0f) && approx(fill.y, 0.0f),
++                     "aspect 0 fills the window");
++        });
++
+         // MKSM: sceGsSetDefDispEnv fills PMODE and SMODE2 like libgraph, so that sceGsPutDispEnv of a fresh
+         // structure enables a display circuit.
+         tc.Run("sceGsSetDefDispEnv enables read circuit 2 and sets SMODE2 from the video mode", [](TestCase &t)

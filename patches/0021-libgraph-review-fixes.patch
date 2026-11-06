@@ -1,0 +1,253 @@
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
+index 95ef188..97dd0e4 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
+@@ -123,12 +123,14 @@ namespace ps2_stubs
+         }
+ 
+         // MKSM: a normal-mode GIF transfer of qwc quadwords from addr (D2_MADR, D2_QWC, then D2_CHCR = 0x101), as
+-        // libgraph's sceGsPutDrawEnv starts it.
++        // libgraph's sceGsPutDrawEnv starts it, with libgraph's address mapping: a scratchpad address (0x7xxxxxxx)
++        // becomes 0x80000000 | offset, any other loses its segment bits (kseg0, uncached), so the DMAC reads RAM.
+         void sendGifNormal(PS2Runtime *runtime, uint32_t addr, uint32_t qwc)
+         {
+             constexpr uint32_t GIF_CHANNEL = 0x1000A000u;
+             auto &mem = runtime->memory();
+-            mem.writeIORegister(GIF_CHANNEL + 0x10u, toDmaPhys(addr));
++            const uint32_t madr = (addr >> 28u) == 7u ? ((addr & 0x0FFFFFFFu) | 0x80000000u) : (addr & 0x0FFFFFFFu);
++            mem.writeIORegister(GIF_CHANNEL + 0x10u, madr);
+             mem.writeIORegister(GIF_CHANNEL + 0x20u, qwc & 0xFFFFu);
+             mem.writeIORegister(GIF_CHANNEL + 0x00u, 0x101u);
+             mem.processPendingTransfers();
+@@ -1045,9 +1047,9 @@ namespace ps2_stubs
+         uint32_t psm = getRegU32(ctx, 5);
+         uint32_t w = getRegU32(ctx, 6);
+         uint32_t h = getRegU32(ctx, 7);
+-        const GsTrailingArgs2 trailing = decodeGsTrailingArgs2(rdram, ctx);
+-        uint32_t dx = trailing.arg0;
+-        uint32_t dy = trailing.arg1;
++        // MKSM: dx and dy are the fifth and sixth arguments, in $t0 and $t1 (EE ABI), not on the stack.
++        uint32_t dx = getRegU32(ctx, 8);
++        uint32_t dy = getRegU32(ctx, 9);
+ 
+         if (w == 0)
+             w = 640;
+@@ -1082,9 +1084,10 @@ namespace ps2_stubs
+         uint32_t param_2 = getRegU32(ctx, 5);
+         int32_t w = static_cast<int32_t>(static_cast<int16_t>(getRegU32(ctx, 6) & 0xFFFF));
+         int32_t h = static_cast<int32_t>(static_cast<int16_t>(getRegU32(ctx, 7) & 0xFFFF));
+-        const GsTrailingArgs2 trailing = decodeGsTrailingArgs2(rdram, ctx);
+-        uint32_t param_5 = trailing.arg0;
+-        uint32_t param_6 = trailing.arg1;
++        // MKSM: ztest and zpsm are the fifth and sixth arguments, in $t0 and $t1 (EE ABI). With both zero the stack was
++        // read instead, and stale words there made the TEST_1 that sceGsPutDrawEnv now sends.
++        uint32_t param_5 = getRegU32(ctx, 8);
++        uint32_t param_6 = getRegU32(ctx, 9);
+ 
+         if (w <= 0)
+             w = 640;
+@@ -1125,9 +1128,10 @@ namespace ps2_stubs
+         uint32_t param_2 = getRegU32(ctx, 5);
+         int32_t w = static_cast<int32_t>(static_cast<int16_t>(getRegU32(ctx, 6) & 0xFFFF));
+         int32_t h = static_cast<int32_t>(static_cast<int16_t>(getRegU32(ctx, 7) & 0xFFFF));
+-        const GsTrailingArgs2 trailing = decodeGsTrailingArgs2(rdram, ctx);
+-        uint32_t param_5 = trailing.arg0;
+-        uint32_t param_6 = trailing.arg1;
++        // MKSM: ztest and zpsm are the fifth and sixth arguments, in $t0 and $t1 (EE ABI). With both zero the stack was
++        // read instead, and stale words there made the TEST_1 that sceGsPutDrawEnv now sends.
++        uint32_t param_5 = getRegU32(ctx, 8);
++        uint32_t param_6 = getRegU32(ctx, 9);
+ 
+         if (w <= 0)
+             w = 640;
+@@ -1166,11 +1170,20 @@ namespace ps2_stubs
+     {
+         // MKSM: libgraph's sceGsLoadImage is the GIF packet itself (6 quadwords): a PACKED A+D tag (NLOOP 4, no EOP) with
+         // BITBLTBUF (DBP as given, in 64-word units), TRXPOS, TRXREG and TRXDIR (host to local), then the IMAGE tag (EOP)
+-        // whose NLOOP is the image size in quadwords; it returns 6. The game also sends these packets in its own DMA
+-        // chains, so a private record in their place (whose DBP sceGsExecLoadImage scaled by 8) made garbage uploads.
++        // whose NLOOP is the image size in quadwords; it returns 6. A game may send such a packet itself. Upstream kept
++        // a private record in its place, whose DBP sceGsExecLoadImage scaled by 8: Shaolin Monks' CLUT uploads landed
++        // outside GS memory. All eight arguments are registers (EE ABI): dbp, dbw, dpsm in $a1-$a3, x, y, w, h in
++        // $t0-$t3 (decodeGsSetDefImageArgs turned to the stack when w and h were both zero).
+         (void)runtime;
+         const uint32_t lpAddr = getRegU32(ctx, 4);
+-        const GsSetDefImageArgs args = decodeGsSetDefImageArgs(rdram, ctx);
++        GsSetDefImageArgs args{};
++        args.vramAddr = getRegU32(ctx, 5);
++        args.vramWidth = getRegU32(ctx, 6);
++        args.psm = getRegU32(ctx, 7);
++        args.x = getRegU32(ctx, 8);
++        args.y = getRegU32(ctx, 9);
++        args.width = getRegU32(ctx, 10);
++        args.height = getRegU32(ctx, 11);
+         uint8_t *lp = getMemPtr(rdram, lpAddr);
+         // The arguments are shorts.
+         const int64_t dbp = static_cast<int16_t>(args.vramAddr);
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+index a9a2f8c..24a025a 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+@@ -1239,21 +1239,13 @@ namespace
+         return std::find(kDmaChannelBases.begin(), kDmaChannelBases.end(), value) != kDmaChannelBases.end();
+     }
+ 
+-    // MKSM: libdma hands the DMAC its address through CheckAddress, which turns a scratchpad address (0x7xxxxxxx) into
+-    // 0x80000000 | offset, and the DMAC reads any address with bit 31 (SPR) set from the scratchpad; games also pass
+-    // (offset | 0x80000000) themselves for packets they build there. Both now come back as 0x70000000 + offset (the
+-    // first came back as 0x1xxxxxxx, the second as main memory at the offset).
++    // MKSM: what libdma's CheckAddress hands the DMAC: a scratchpad address (0x7xxxxxxx) becomes 0x80000000 | offset,
++    // any other stays as it is. The DMA engine decodes the result by channel: bit 31 selects the scratchpad for GIF and
++    // VIF (ps2DmaAddress; games also pass offset | 0x80000000 themselves for packets they build there), and the SPR
++    // channels' MADR is main memory. Before, 0x7xxxxxxx came back as 0x1xxxxxxx and offset | 0x80000000 as RAM.
+     uint32_t toDmaPhys(uint32_t addr)
+     {
+-        if ((addr >> 28u) == 7u)
+-        {
+-            addr = (addr & 0x0FFFFFFFu) | 0x80000000u;
+-        }
+-        if ((addr & 0x80000000u) != 0u)
+-        {
+-            return ps2DmaAddress(addr);
+-        }
+-        return addr & 0x1FFFFFFFu;
++        return (addr >> 28u) == 7u ? ((addr & 0x0FFFFFFFu) | 0x80000000u) : addr;
+     }
+ 
+     uint32_t normalizeQwcFromArg(uint32_t value)
+diff --git a/ps2xTest/src/ps2_gs_tests.cpp b/ps2xTest/src/ps2_gs_tests.cpp
+index 934238a..577dad2 100644
+--- a/ps2xTest/src/ps2_gs_tests.cpp
++++ b/ps2xTest/src/ps2_gs_tests.cpp
+@@ -3947,7 +3947,7 @@ void register_ps2_gs_tests()
+         });
+ 
+         // MKSM: sceGsSetDefLoadImage builds libgraph's GIF packet (DBP as given) and sceGsExecLoadImage sends it with
+-        // the image; the private record's DBP was scaled by 8, and the game also sends these packets itself.
++        // the image; the private record's DBP was scaled by 8.
+         tc.Run("sceGsSetDefLoadImage builds libgraph's packet and sceGsExecLoadImage uploads to its DBP", [](TestCase &t)
+         {
+             PS2Runtime runtime;
+@@ -3997,6 +3997,65 @@ void register_ps2_gs_tests()
+             t.Equals(first, pixels[0], "the image should land at DBP, in 64-word units");
+         });
+ 
++        // MKSM: libgraph's handlers take every argument from registers (EE ABI) and send their GIF packets with
++        // libgraph's address mapping; with $t0 = $t1 = 0 (or w = h = 0) upstream read the stack, and a tag in uncached
++        // or scratchpad memory was sent from the wrong place.
++        tc.Run("libgraph handlers take their arguments from registers and send from the tag's own memory", [](TestCase &t)
++        {
++            PS2Runtime runtime;
++            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
++            uint8_t *rdram = runtime.memory().getRDRAM();
++            constexpr uint32_t kStackAddr = 0xB00u;
++            const uint32_t garbage[4] = {3u, 0x31u, 0x55u, 0x66u};
++            std::memcpy(rdram + kStackAddr + 16u, garbage, sizeof(garbage));
++
++            constexpr uint32_t kEnvAddr = 0x7000u;
++            R5900Context envCtx{};
++            setRegU32(envCtx, 4, kEnvAddr);
++            setRegU32(envCtx, 5, 0u);   // PSMCT32
++            setRegU32(envCtx, 6, 640u);
++            setRegU32(envCtx, 7, 256u);
++            setRegU32(envCtx, 29, kStackAddr); // ztest and zpsm 0 in $t0/$t1
++            ps2_stubs::sceGsSetDefDrawEnv(rdram, &envCtx, &runtime);
++            uint64_t test1 = 0u;
++            uint64_t zbuf1 = 0u;
++            std::memcpy(&test1, rdram + kEnvAddr + 0x70u, sizeof(test1));
++            std::memcpy(&zbuf1, rdram + kEnvAddr + 0x10u, sizeof(zbuf1));
++            t.Equals(test1, 0x30000ull, "ztest 0 in $t0 should give TEST_1 Z always, whatever the stack holds");
++            t.Equals((zbuf1 >> 32u) & 1u, 1ull, "and a masked Z buffer");
++
++            constexpr uint32_t kLpAddr = 0x7400u;
++            R5900Context imageCtx{};
++            setRegU32(imageCtx, 4, kLpAddr);
++            setRegU32(imageCtx, 5, 0x100u); // DBP
++            setRegU32(imageCtx, 6, 1u);     // DBW
++            setRegU32(imageCtx, 7, 0u);     // PSMCT32
++            setRegU32(imageCtx, 29, kStackAddr); // x, y, w, h 0 in $t0-$t3
++            ps2_stubs::sceGsSetDefLoadImage(rdram, &imageCtx, &runtime);
++            uint64_t bitbltbuf = 0u;
++            std::memcpy(&bitbltbuf, rdram + kLpAddr + 0x10u, sizeof(bitbltbuf));
++            t.Equals(bitbltbuf, (0x100ull << 32) | (1ull << 48), "BITBLTBUF should come from $a1-$a3 with w = h = 0");
++
++            // A drawing environment tag in uncached-accelerated memory, then in the scratchpad.
++            const uint64_t packet[] = {
++                1ull | (1ull << 15) | (1ull << 60), 0xEull, // PACKED A+D tag, EOP, NLOOP 1
++                (0x40ull | (10ull << 16)), GS_REG_FRAME_2,  // FBP 0x40
++            };
++            std::memcpy(rdram + 0x7800u, packet, sizeof(packet));
++            R5900Context putCtx{};
++            setRegU32(putCtx, 4, 0x30007800u);
++            ps2_stubs::sceGsPutDrawEnv(rdram, &putCtx, &runtime);
++            t.Equals(runtime.gs().getDebugSnapshot().ctx[1].frame.fbp, 0x40u, "a tag at 0x30007800 should be sent from RAM");
++
++            uint64_t scratchPacket[4];
++            std::memcpy(scratchPacket, packet, sizeof(packet));
++            scratchPacket[2] = 0x48ull | (10ull << 16);
++            std::memcpy(runtime.memory().getScratchpad() + 0x200u, scratchPacket, sizeof(scratchPacket));
++            setRegU32(putCtx, 4, 0x70000200u);
++            ps2_stubs::sceGsPutDrawEnv(rdram, &putCtx, &runtime);
++            t.Equals(runtime.gs().getDebugSnapshot().ctx[1].frame.fbp, 0x48u, "a tag at 0x70000200 should be sent from the scratchpad");
++        });
++
+         tc.Run("sceGsExecLoadImage and sceGsExecStoreImage roundtrip and free guest packets", [](TestCase &t)
+         {
+             PS2Runtime runtime;
+@@ -4006,7 +4065,8 @@ void register_ps2_gs_tests()
+             constexpr uint32_t kSrcAddr = 0x5000u;
+             constexpr uint32_t kDstAddr = 0x6000u;
+ 
+-            const GsImageMem image{0u, 0u, 2u, 2u, 0u, 1u, 0u};
++            // MKSM: block 0x100, so that a scaled SBP (or DBP) misses the image.
++            const GsImageMem image{0u, 0u, 2u, 2u, 0x100u, 1u, 0u};
+             const uint8_t pixels[16] = {
+                 0x10u, 0x20u, 0x30u, 0x40u,
+                 0x50u, 0x60u, 0x70u, 0x80u,
+@@ -4019,7 +4079,7 @@ void register_ps2_gs_tests()
+             writeGsImageTest(rdram, kStoreImageAddr, image);
+             R5900Context defCtx{};
+             setRegU32(defCtx, 4, kImageAddr);
+-            setRegU32(defCtx, 5, 0u);  // DBP
++            setRegU32(defCtx, 5, 0x100u); // DBP
+             setRegU32(defCtx, 6, 1u);  // DBW
+             setRegU32(defCtx, 7, 0u);  // PSMCT32
+             setRegU32(defCtx, 8, 0u);  // x
+diff --git a/ps2xTest/src/ps2_memory_tests.cpp b/ps2xTest/src/ps2_memory_tests.cpp
+index 0c35ff8..93ca5d5 100644
+--- a/ps2xTest/src/ps2_memory_tests.cpp
++++ b/ps2xTest/src/ps2_memory_tests.cpp
+@@ -2130,6 +2130,33 @@ void register_ps2_memory_tests()
+             t.Equals(frame2Fbp(), 0x80u, "a ref tag with the SPR bit should take its data from the scratchpad");
+         });
+ 
++        // MKSM: the main-memory side of the SPR channels ignores bit 31: a kseg0 destination is main memory (patch 0015
++        // first sent it to the scratchpad, as for GIF and VIF).
++        tc.Run("sceDmaRecvN to a kseg0 destination copies into main memory", [](TestCase &t)
++        {
++            PS2Runtime runtime;
++            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
++            PS2Memory &mem = runtime.memory();
++            uint8_t *rdram = mem.getRDRAM();
++            uint8_t *scratch = mem.getScratchpad();
++            for (uint32_t i = 0; i < 0x20u; ++i)
++            {
++                scratch[0x300u + i] = static_cast<uint8_t>(0x60u + i);
++            }
++            t.IsTrue(mem.writeIORegister(0x1000D000u + 0x80u, 0x300u), "the guest writes SADR directly");
++            R5900Context ctx{};
++            setRegU32(ctx, 4, 0x1000D000u);
++            setRegU32(ctx, 5, 0x80075E00u); // kseg0
++            setRegU32(ctx, 6, 2u);
++            ps2_stubs::sceDmaRecvN(rdram, &ctx, &runtime);
++            bool copied = true;
++            for (uint32_t i = 0; i < 0x20u; ++i)
++            {
++                copied = copied && rdram[0x75E00u + i] == static_cast<uint8_t>(0x60u + i);
++            }
++            t.IsTrue(copied, "the scratchpad bytes should land at 0x75E00 in main memory");
++        });
++
+         tc.Run("sceDmaSend preserves guest-configured VIF1 TTE", [](TestCase &t)
+         {
+             PS2Runtime runtime;
