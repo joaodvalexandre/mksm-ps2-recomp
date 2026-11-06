@@ -48,7 +48,9 @@ scripts and the research log ([`docs/MKSM.md`](docs/MKSM.md)). No game files and
    optimized profile into `out\build-release` (still without LTO: `patches/0002-lto-option.patch`). Other
    switches: `-Jobs n`, `-ToolsOnly`, `-Regenerate`, `-Reset` (check out and patch the submodule again), `-Tests`.
    Only what changed is rebuilt: the submodule is left alone while it is the pinned commit plus the patches, and
-   regenerated functions are copied only when their content differs. Logs in `logs\build.log`.
+   regenerated functions are copied only when their content differs. Logs in `logs\build.log`. The GS is drawn on
+   the GPU by upstream's paraLLEl-GS backend (Vulkan, `patches/0026`); the build keeps a paraLLEl-GS checkout in
+   `PS2Recomp\out\parallel-gs` (cloned on the first build, about 216 MB).
 4. `scripts\run.cmd [seconds]` runs the quick build (`-Release` for the other); the game's output goes to
    `logs\run.log` and `logs\run_err.log`. Set `MKSM_ISO` to the disc image path (kept outside the repository)
    for the sector reads the game does outside the extracted files; the image is never part of the build.
@@ -57,9 +59,14 @@ scripts and the research log ([`docs/MKSM.md`](docs/MKSM.md)). No game files and
    runtime debug panel (registers, threads, IOP, RPC history, GS, logs), which starts hidden (`patches/0012`).
    The game's movies do not play yet and are skipped by default (`MKSM_SKIP_MOVIES=0` plays them). Diagnostics
    of the override module (`MKSM_TRACE_*`, `MKSM_PROFILE`, `MKSM_PAD_SCRIPT`) are described in `docs/MKSM.md`.
-   The picture is 4:3 in a resizable window, the fields woven into full height and scaled with bilinear filtering;
-   `MKSM_ASPECT=16:9` (any `<w>:<h>`) or `MKSM_ASPECT=window` widens it and the game's 3D view, `MKSM_FILTER=nearest`
-   scales with nearest sampling, `MKSM_DEINTERLACE=0` shows the fields one by one.
+   The game runs in its own NTSC mode, 60 frames a second (`MKSM_VIDEO=pal` keeps the disc's PAL mode, 50 Hz).
+   The picture is drawn on the GPU (a Vulkan GPU is needed; `PS2X_GS_BACKEND=cpu` draws it on the CPU, much slower),
+   one field per vertical blank, and the fields are woven into full height on the CPU as with the CPU backend.
+   Options of the GPU backend: `PS2X_GS_SSAA=2|4|8|16` super-samples the drawing, and with 4 or more
+   `PS2X_GS_PROGRESSIVE=1` scans out a progressive picture at twice the resolution instead of the weave (depends on
+   the game's field order; `PS2X_GS_FIELD_PHASE=flip` swaps it). The picture is 4:3 in a resizable window, scaled with
+   bilinear filtering; `MKSM_ASPECT=16:9` (any `<w>:<h>`) or `MKSM_ASPECT=window` widens it and the game's 3D view,
+   `MKSM_FILTER=nearest` scales with nearest sampling, `MKSM_DEINTERLACE=0` shows the fields one by one.
    Keyboard (upstream's mapping): X or Space is cross, C circle, Z square, V triangle, Enter start, Tab select,
    the arrows or WASD the directional pad, Q and E L1 and R1, the Shift keys L2 and R2; Esc closes the window. A
    gamepad works too.

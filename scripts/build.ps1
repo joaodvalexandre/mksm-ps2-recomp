@@ -168,12 +168,37 @@ if (-not $Reset -and $head.StartsWith($PS2RecompCommit) -and $recorded -eq ($wan
     Set-Content -LiteralPath $stateFile -Value ($wanted + ' ' + (Tree-State $rec)) -Encoding ASCII
 }
 
+# paraLLEl-GS, the library of upstream's GPU GS backend (patches/0025): one checkout in PS2Recomp\out shared by the
+# build profiles, at the commit cmake\ParallelGS.cmake pins, with only the submodules the library is built from (Granite,
+# its volk and its Vulkan headers). Left to FetchContent, every build tree would clone all nested submodules (1.4 GB).
+$parallelGsArgs = @()
+$parallelGsCmake = Join-Path $rec 'ps2xRuntime\cmake\ParallelGS.cmake'
+if (Test-Path -LiteralPath $parallelGsCmake) {
+    $parallelGsTag = [regex]::Match((Get-Content -LiteralPath $parallelGsCmake -Raw), 'GIT_TAG\s+([0-9a-f]{40})').Groups[1].Value
+    if (-not $parallelGsTag) { throw "No GIT_TAG in $parallelGsCmake" }
+    $parallelGs = Join-Path $rec 'out\parallel-gs'
+    if (-not (Test-Path -LiteralPath (Join-Path $parallelGs '.git'))) {
+        Step "Cloning paraLLEl-GS into $parallelGs"
+        Run 'git' @('clone', '-q', '--no-checkout', 'https://github.com/Arntzen-Software/parallel-gs.git', $parallelGs)
+    }
+    if ((git -C $parallelGs rev-parse HEAD 2>$null | Out-String).Trim() -ne $parallelGsTag) {
+        Step "paraLLEl-GS at $parallelGsTag"
+        git -C $parallelGs cat-file -e "$parallelGsTag^{commit}" 2>$null
+        if ($LASTEXITCODE -ne 0) { Run 'git' @('-C', $parallelGs, 'fetch', '-q', 'origin', $parallelGsTag) }
+        Run 'git' @('-C', $parallelGs, 'checkout', '-q', '-f', $parallelGsTag)
+        Run 'git' @('-C', $parallelGs, 'submodule', 'update', '--init', '-q', 'Granite')
+        Run 'git' @('-C', (Join-Path $parallelGs 'Granite'), 'submodule', 'update', '--init', '-q',
+                    'third_party/volk', 'third_party/khronos/vulkan-headers')
+    }
+    $parallelGsArgs = @("-DFETCHCONTENT_SOURCE_DIR_PARALLEL_GS=$($parallelGs.Replace('\', '/'))")
+}
+
 Step 'Configuring CMake'
 $common = @('-S', $rec, '-B', $bld, '-G', 'Ninja', '-DPS2X_BUILD_STUDIO=OFF', '-DPS2X_ENABLE_SCCACHE=OFF',
             '-DPS2X_ENABLE_RUNNER_UNITY_BUILD=ON', '-DPS2X_ENABLE_RUNNER_PCH=ON', '-DPS2X_ENABLE_LTO=OFF',
             # Upstream's very verbose logs cost more than the game: with them on, writing log files took two thirds
             # of the EE thread's time. The regular runtime logs (PS2X_ENABLE_RUNTIME_LOGS) stay on.
-            '-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF', '-DPS2X_IOP_BUILD_TESTS=ON')
+            '-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF', '-DPS2X_IOP_BUILD_TESTS=ON') + $parallelGsArgs
 if ($Release) {
     Run 'cmake' ($common + @('-DCMAKE_BUILD_TYPE=Release'))
 } else {

@@ -467,3 +467,83 @@ independent of that runtime:
 - **Sound** (same investigation, more detail): besides the missing SPU2, the IOP emulator starts modules with (byte
   count, buffer) instead of (argc, argv), so CRI_ADXI ignores its `sdinit=0 spucore=2` options; and the libsdr
   handlers fake their results without contacting SDRDRV.IRX, which is loaded and serves `0x80000701`.
+
+## 2026-11-06 — the GS on the GPU (upstream's paraLLEl-GS), libgraph's display modes, the game's NTSC mode
+
+- **Why.** The frame rate analyses of 2026-11-05 put 79-82 per cent of the game thread in the CPU GS backend in the
+  menus and estimated exact CPU fixes at 13-32 fps (22-50 with a GS thread). Every PS2 port found at full speed draws
+  the GS on the GPU. Upstream's own draft (PR #285, branch `feature/performance-patch-1`, commits e27a658 and 06ce0c8)
+  adds a paraLLEl-GS backend (Arntzen Software's Vulkan compute GS, LGPLv3) behind `GSRasterBackend`. A design workflow
+  (the integration with patches 0001-0024, the library and its threading, the build and the presentation, then a
+  planner) checked the work while it was done; its corrections are folded in below.
+- **libgraph's display modes** (`patches/0025-gs-libgraph-display-modes.patch`, test "libgraph's PAL display modes:
+  SMODE1, DISPLAY in clocks and lines, a field's height"). paraLLEl-GS models the CRTC: it takes the video mode from
+  SMODE1 (CMOD PAL 3 or NTSC 2, LC 32), which nothing set ("Unknown video format", no picture), and reads DISPLAY in
+  output clocks and raster lines, where the stubs wrote framebuffer pixels (a 640x256 field would have come out
+  160x128, off screen). From upstream's branch: `configureGsCrt` (SMODE2 and SMODE1 for a video mode) in `GsSetCrt` and
+  in the `sceGsResetGraph` handler, which now sets the display registers directly (its GIF packet used
+  privileged-register numbers only the CPU frontend understood; to a raw backend 0x41 and 0x42 are SCISSOR_2 and
+  ALPHA_1); and libgraph's DISPLAY (`makeLibgraphDisplay`, upstream's `makeDefaultGsDispEnv`): for this game in PAL
+  DX 656, DY 72, MAGH 3, DW 2559, DH 511. The CPU backend now shows half of DH's lines per field in interlaced frame
+  mode, so it still presents 640x256.
+- **The GPU backend** (`patches/0026-parallel-gs-backend.patch`, test "a raw-command GS backend gets the GIF packets
+  with their PATH and its pictures are not woven again"). Upstream's `gs_parallel_backend.cpp` and its frontend hooks: a
+  backend that `UsesRawCommands()` gets every GIF packet with its PATH (the GIF arbiter passes it along) and every
+  register write, and the frontend decodes nothing itself. Changes from upstream, marked `// MKSM:`:
+  - no OpenGL interop: upstream shares the frames with the window's OpenGL context (`gs_gl_interop.cpp`); the first
+    run here crashed in AMD's OpenGL driver (Application event 1000, `atio6axx.dll`, 0xc0000005, 17:36:07, about 12 s
+    in). The backend owns its Vulkan device and copies each picture into host memory, and the host shows it as it
+    shows the CPU backend's (aspect, filter, hold-then-black unchanged; the window's texture grows to the picture);
+  - one scanout per field, on the EE thread, at the start of the vertical blank before CSR.FIELD and the game's
+    display buffer change (`GS::vblank`), into a ring of three host-visible buffers: upstream scanned out from the
+    host loop, which skips and repeats fields, and the first port of it scanned out after the field changed, so each
+    picture had the other field's parity;
+  - the picture: the fields come raw and the frontend weaves them as on the CPU backend (patch 0019), each scanned
+    field with the one just before it (the backend hands both over with their numbers, parities and display buffers,
+    so a field the host's refresh skipped is still woven in, and the weave knows each field by the buffer it showed,
+    not by the buffer on screen when the host looks), in the order of the field's parity, learned from the combing
+    and swapped only after 8 decisive contrary pairs in a row (moving pictures swapped it now and then: the picture
+    shook from time to time). paraLLEl-GS's own options stay available: `PS2X_GS_SSAA` super-samples, and with 4
+    samples or more `PS2X_GS_PROGRESSIVE=1` gives its field-aware progressive scanout at twice the resolution
+    (`PS2X_GS_FIELD_PHASE=flip` for the other field order); a first try of it as the default shook (the field
+    parity of this game is not the scheduler's) and, read with the CPU backend's row stride, came out doubled side by
+    side (the frontend now reads a packed picture with its own stride);
+  - the scanout ends in paraLLEl-GS's own READ_ONLY layout, moved to TRANSFER_SRC for the copy (the interlaced and
+    high-resolution paths never reached the TRANSFER_SRC upstream asked for); CRTC offsets off (libgraph's PAL origin
+    against paraLLEl-GS's moved the picture 5 pixels left);
+  - FINISH no longer drains the GPU on the game thread; 8 Granite frame contexts (each flush waited for the GPU with
+    2); a VIF1 DIRECT image continued in the next VIF packet goes on without the IMAGE tag the CPU frontend needs
+    (`PS2Memory::setGifPathsStateful`); VU1's XGKICK fallback passes PATH1; `PS2X_GS_PARALLEL` is a private definition
+    (switching backends does not rebuild the generated runner). `PS2X_GS_BACKEND=cpu` keeps the CPU backend, as does a
+    failure to create the GPU one.
+- **AMD's Vulkan driver crash.** Every GPU run crashed after one to two minutes in `amdvlk64.dll` (0xC0000005, at the
+  same offset 0x2323076 at 18:06:55 and 18:36:30). `MKSM_CRASH_TRACE=1` (diagnostic of patch 0026, `[gs-crash]` lines:
+  the faulting thread's stack, symbolized from the runner's PDB) showed a null read in `vkCreateComputePipelines`,
+  compiling paraLLEl-GS's sampler-feedback compute pipeline (`GSRenderer::dispatch_texture_analysis`, from a draw of
+  `sceGsPutDrawEnv`'s packet). Sampler feedback (texture analysis) is new in the paraLLEl-GS commit upstream pins and
+  optional; the backend turns it off (`DebugMode::disable_sampler_feedback`).
+- **Measurements** (quick build, NTSC mode, GPU backend, `MKSM_PAD_SCRIPT=45:cross,60:cross,75:start,90:cross,
+  105:cross,120:cross,135:cross`, 240 s): 60 fps on every screen up to the difficulty select, the 3D character select
+  included (20 fps on the 2D screens and 7-11 in the 3D menus with the CPU backend); dips at screen changes while
+  paraLLEl-GS compiles its pipelines on first use ("Stalled compile", 30-230 ms each). Bursts of twelve window captures
+  30-70 ms apart (scratchpad `burst.ps1`, `shifts.py`): no vertical jump between any two captures on the autosave
+  notice, the memory card prompt, the brightness screen, the character select and the main menu; the static screens
+  identical capture to capture. The user confirms: no shaking, good frame rate. No crash in 240 s with sampler
+  feedback off (the two runs before crashed at 66 s and 135 s).
+- **Still wrong.** The PAL disc's splash and loading screens are drawn at PAL size in the game's NTSC mode, so they
+  come out stretched and cut at the bottom. After the difficulty select the stage loads and the game stops
+  presenting (the stall of 2026-11-05); the GPU backend scans out the buffer the skipped stage movie set up (640x512),
+  which shows VRAM garbage where the CPU backend showed black.
+- **PAL's 50 Hz** (`patches/0027-pal-vblank-rate.patch`, test "the vertical blank comes at the video mode's rate"). The
+  EE scheduler gave every game NTSC's 60 Hz vertical blank; this PAL game's vblank-paced logic would have run a fifth
+  too fast at full speed. The period now follows SMODE1: 20 ms for PAL.
+- **The game's NTSC mode, 60 Hz** (override module, default; `MKSM_VIDEO=pal` keeps the disc's PAL mode). The PAL
+  disc keeps the NTSC build's code: the display set-up (`sub_00274030`) picks video mode 3 (PAL) or 2 (NTSC) from a PAL
+  flag at `0x4E5CAC`, which some 180 places read and the boot function sets to 1 (`addiu $v0, $zero, 1; sw $v0,
+  0x5CAC($fp)` at `0x2132D8`). The override clears the flag right after that store, in the call that follows it
+  (`sub_00476C38` from `0x2132E4`), so the game runs in its NTSC mode: sceGsResetGraph in mode 2, 640x224 fields,
+  60 Hz vertical blank (patch 0027), the game's own NTSC timing.
+- **Build.** `scripts\build.ps1` keeps one paraLLEl-GS checkout in `PS2Recomp\out\parallel-gs` at the commit
+  `cmake\ParallelGS.cmake` pins, with only Granite, volk and the Vulkan headers (216 MB; FetchContent would clone every
+  nested submodule, 1.4 GB per build tree, some paths beyond MAX_PATH), and hands it to FetchContent. The library builds
+  in about 12 s.

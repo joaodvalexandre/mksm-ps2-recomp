@@ -894,6 +894,51 @@ namespace
         std::fprintf(stderr, "[mksm] disc image: %s\n", iso);
     }
 
+    // The game's own NTSC mode, 60 fields a second, by default; MKSM_VIDEO=pal keeps the disc's PAL mode (50 Hz). The
+    // PAL disc keeps the NTSC build's code: its boot function stores 1 into the PAL flag (0x4E5CAC, at 0x2132E0), and
+    // some 180 places read the flag (the video mode sceGsResetGraph gets, 3 or 2, the field height and the rest). The
+    // flag is cleared right after that store, in the call that follows it (sub_00476C38, an allocation, called from
+    // 0x2132E4), so the game starts in NTSC mode; SetGsCrt's mode then gives the 60 Hz vertical blank
+    // (patches/0027).
+    constexpr uint32_t kPalFlagAddress = 0x004E5CACu;
+    constexpr uint32_t kAfterPalFlagFunction = 0x00476C38u;
+    constexpr uint32_t kAfterPalFlagReturn = 0x002132ECu; // 0x2132E4 + 8
+    constexpr uint32_t kPalFlagStore = 0x002132E0u;
+    constexpr uint32_t kPalFlagStoreWord = 0xAFC25CACu; // sw $v0, 0x5CAC($fp)
+    PS2Runtime::RecompiledFunction g_originalAfterPalFlag = nullptr;
+
+    void ntscAfterPalFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (getRegU32(ctx, 31) == kAfterPalFlagReturn && readU32(rdram, kPalFlagAddress) != 0u)
+        {
+            writeU32(rdram, kPalFlagAddress, 0u);
+            std::fprintf(stderr, "[mksm] NTSC mode: the PAL flag is cleared\n");
+        }
+        g_originalAfterPalFlag(rdram, ctx, runtime);
+    }
+
+    void configureVideoMode(PS2Runtime &runtime)
+    {
+        const char *setting = std::getenv("MKSM_VIDEO");
+        if (setting && std::strcmp(setting, "pal") == 0)
+        {
+            std::fprintf(stderr, "[mksm] MKSM_VIDEO=pal: the disc's PAL mode (50 Hz)\n");
+            return;
+        }
+        if (readU32(runtime.memory().getRDRAM(), kPalFlagStore) != kPalFlagStoreWord)
+        {
+            std::fprintf(stderr, "[mksm] NTSC mode: unexpected code at 0x%06X, the game stays PAL\n", kPalFlagStore);
+            return;
+        }
+        g_originalAfterPalFlag = runtime.lookupFunction(kAfterPalFlagFunction);
+        if (!g_originalAfterPalFlag || !runtime.replaceFunction(kAfterPalFlagFunction, ntscAfterPalFlag))
+        {
+            std::fprintf(stderr, "[mksm] NTSC mode: sub_%08X not found, the game stays PAL\n", kAfterPalFlagFunction);
+            return;
+        }
+        std::fprintf(stderr, "[mksm] the game's NTSC mode (60 Hz; MKSM_VIDEO=pal for the disc's 50 Hz)\n");
+    }
+
     void applyMksmOverrides(PS2Runtime &runtime)
     {
         // The runtime logs through stdout, which is block-buffered when redirected to a file; without this the end
@@ -906,6 +951,7 @@ namespace
         runtime.setPrivateGuestHeap(0x000A0000u, 0x00100000u);
         configureDiscImage();
         configureDisplay(runtime);
+        configureVideoMode(runtime);
         replaceSbrk(runtime);
         installMovieSkip(runtime);
         installSyncVTrace(runtime);

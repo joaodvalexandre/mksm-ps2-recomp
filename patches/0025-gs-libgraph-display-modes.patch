@@ -1,0 +1,323 @@
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
+index 97dd0e4..e22a5af 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
+@@ -4,6 +4,7 @@
+ #include "runtime/gs/ps2_gs_common.h"
+ #include "runtime/gs/ps2_gs_psmct16.h"
+ #include "runtime/ee_scheduler.h"
++#include "../Syscalls/System.h" // MKSM: configureGsCrt
+ 
+ namespace ps2_stubs
+ {
+@@ -823,51 +824,20 @@ namespace ps2_stubs
+             g_gparam.omode = static_cast<uint8_t>(omode & 0xFF);
+             g_gparam.ffmode = static_cast<uint8_t>(ffmode & 0x1);
+             writeGsGParamToScratch(runtime);
+-            uint64_t pmode = makePmode(1, 0, 0, 0, 0, 0x80);
+-            uint64_t smode2 = (interlace & 0x1) | ((ffmode & 0x1) << 1);
+-            uint64_t dispfb = makeDispFb(0, 10, 0, 0, 0);
+-            uint64_t display = makeDisplay(0, 0, 0, 0, 639, 447);
+-            uint64_t bgcolor = 0ULL;
+ 
++            // MKSM: the display registers are set directly, SMODE1 included, as SetGsCrt does on the console
++            // (upstream's feature/performance-patch-1). They were sent as a GIF packet whose register numbers only the
++            // CPU frontend understood (privileged-register aliases), and SMODE1 was never set.
+             if (runtime)
+             {
+-                uint32_t pktAddr = runtime->guestMalloc(128u, 16u);
+-                if (pktAddr != 0u)
+-                {
+-                    uint8_t *pkt = getMemPtr(rdram, pktAddr);
+-                    if (pkt)
+-                    {
+-                        uint64_t *q = reinterpret_cast<uint64_t *>(pkt);
+-                        q[0] = makeGiftagAplusD(7u);
+-                        q[1] = 0xEULL;
+-                        q[2] = pmode;
+-                        q[3] = 0x41ULL;
+-                        q[4] = smode2;
+-                        q[5] = 0x42ULL;
+-                        q[6] = dispfb;
+-                        q[7] = 0x59ULL;
+-                        q[8] = display;
+-                        q[9] = 0x5aULL;
+-                        q[10] = dispfb;
+-                        q[11] = 0x5bULL;
+-                        q[12] = display;
+-                        q[13] = 0x5cULL;
+-                        q[14] = bgcolor;
+-                        q[15] = 0x5fULL;
+-                        constexpr uint32_t GIF_CHANNEL = 0x1000A000;
+-                        constexpr uint32_t CHCR_STR_MODE0 = 0x101u;
+-                        auto &mem = runtime->memory();
+-                        mem.writeIORegister(GIF_CHANNEL + 0x10u, pktAddr);
+-                        mem.writeIORegister(GIF_CHANNEL + 0x20u, 8u);
+-                        mem.writeIORegister(GIF_CHANNEL + 0x00u, CHCR_STR_MODE0);
+-                        mem.processPendingTransfers();
+-                        runtime->guestFree(pktAddr);
+-                    }
+-                    else
+-                    {
+-                        runtime->guestFree(pktAddr);
+-                    }
+-                }
++                auto &regs = runtime->memory().gs();
++                ps2_syscalls::configureGsCrt(regs, interlace & 1u, omode & 0xFFu, ffmode & 1u);
++                regs.pmode = makePmode(1, 0, 0, 0, 0, 0x80);
++                regs.dispfb1 = regs.dispfb2 = makeDispFb(0, 10, 0, 0, 0);
++                const uint32_t lines = (omode & 0xFFu) == 3u ? 512u : 448u; // a full PAL or NTSC frame
++                regs.display1 = regs.display2 =
++                    makeLibgraphDisplay(640u, (g_gparam.interlace && g_gparam.ffmode) ? lines / 2u : lines);
++                regs.bgcolor = 0;
+             }
+         }
+ 
+@@ -928,7 +898,7 @@ namespace ps2_stubs
+         const uint64_t smode2 =
+             (static_cast<uint64_t>(g_gparam.interlace & 0x1u) << 0) |
+             (static_cast<uint64_t>(g_gparam.ffmode & 0x1u) << 1);
+-        const uint64_t display = makeDisplay(636u, 32u, 0u, 0u, w - 1u, h - 1u);
++        const uint64_t display = makeLibgraphDisplay(w, h); // MKSM: libgraph's DISPLAY (Support.h)
+ 
+         const int32_t drawWidth = static_cast<int32_t>(w);
+         const int32_t drawHeight = static_cast<int32_t>(h);
+@@ -1000,7 +970,7 @@ namespace ps2_stubs
+             (static_cast<uint64_t>(g_gparam.interlace & 0x1u) << 0) |
+             (static_cast<uint64_t>(g_gparam.ffmode & 0x1u) << 1);
+         const uint64_t dispfb = makeDispFb(0u, fbw, psm, 0u, 0u);
+-        const uint64_t display = makeDisplay(636u, 32u, 0u, 0u, w - 1u, h - 1u);
++        const uint64_t display = makeLibgraphDisplay(w, h); // MKSM: libgraph's DISPLAY (Support.h)
+ 
+         const int32_t drawWidth = static_cast<int32_t>(w);
+         const int32_t drawHeight = static_cast<int32_t>(h);
+@@ -1058,7 +1028,8 @@ namespace ps2_stubs
+ 
+         uint32_t fbw = (w + 63) / 64;
+         uint64_t dispfb = makeDispFb(0, fbw, psm, 0, 0);
+-        uint64_t display = makeDisplay(dx, dy, 0, 0, w - 1, h - 1);
++        // MKSM: libgraph's DISPLAY (Support.h); dx and dy are signed 16-bit offsets.
++        uint64_t display = makeLibgraphDisplay(w, h, static_cast<int16_t>(dx), static_cast<int16_t>(dy));
+         // MKSM: libgraph also fills PMODE and SMODE2: PMODE = 0x66 (read circuit 2; the value the game's own
+         // sceGsSetDefDispEnv stores) and SMODE2 from the video mode (non-interlaced 2, interlaced frame mode 3,
+         // interlaced field mode 1). Leaving them as found (zero in a fresh structure) made sceGsPutDispEnv switch the
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+index 24a025a..e60c3b7 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+@@ -1663,6 +1663,29 @@ namespace
+                (static_cast<uint64_t>(dh & 0x07FF) << 44);
+     }
+ 
++    // MKSM: the DISPLAY register libgraph computes for a picture of width x height (upstream's
++    // feature/performance-patch-1, makeDefaultGsDispEnv). In the analog video modes (NTSC 2, PAL 3) DX, DY, DW and DH
++    // count output clocks and raster lines: 640 pixels span 2560 clocks (MAGH 3), the picture starts where the TV's
++    // does, and in interlaced frame mode (FFMD) DH counts the lines of both fields. Other modes keep the pixel values.
++    static uint64_t makeLibgraphDisplay(uint32_t width, uint32_t height, int32_t dx = 0, int32_t dy = 0)
++    {
++        if (width == 0u)
++            width = 640u;
++        if (height == 0u)
++            height = 448u;
++        if (g_gparam.omode == 2u || g_gparam.omode == 3u)
++        {
++            const uint32_t magnification = std::max(1u, (width + 2559u) / width);
++            const int32_t originX = g_gparam.omode == 2u ? 636 : 656;
++            const int32_t originY = g_gparam.omode == 2u ? 25 : 36;
++            const uint32_t lines = (g_gparam.interlace && g_gparam.ffmode) ? height * 2u : height;
++            return makeDisplay(static_cast<uint32_t>(originX + dx * static_cast<int32_t>(magnification)),
++                               static_cast<uint32_t>(originY * (g_gparam.interlace ? 2 : 1) + dy),
++                               magnification - 1u, 0u, width * magnification - 1u, lines - 1u);
++        }
++        return makeDisplay(static_cast<uint32_t>(dx), static_cast<uint32_t>(dy), 0u, 0u, width - 1u, height - 1u);
++    }
++
+     static uint64_t makeFrame(uint32_t fbp, uint32_t fbw, uint32_t psm, uint32_t fbmsk)
+     {
+         return (static_cast<uint64_t>(fbp & 0x1FFu) << 0) |
+diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp b/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp
+index ada374a..fc31be2 100644
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp
+@@ -3,26 +3,34 @@
+ 
+ namespace ps2_syscalls
+ {
++    void configureGsCrt(GSRegisters &gs, uint32_t interlaced, uint32_t videoMode, uint32_t frameMode)
++    {
++        gs.smode2 = (static_cast<uint64_t>(interlaced) & 0x1ull) | ((static_cast<uint64_t>(frameMode) & 0x1ull) << 1);
++
++        // MKSM: SMODE1's colour mode (CMOD: NTSC 2, PAL 3) and line count (LC) for the video mode; a GS emulation that
++        // models the CRTC (paraLLEl-GS) reads the output mode from them.
++        const uint64_t cmod = videoMode == 3 ? 3u : videoMode == 2 ? 2u : 0u;
++        const uint64_t lc = (videoMode == 0x51 || videoMode == 0x52) ? 22u :
++                            (videoMode >= 0x1a && videoMode <= 0x4a) ? 15u : 32u;
++        gs.smode1 = (gs.smode1 & ~((127ull << 3) | (3ull << 13))) | (lc << 3) | (cmod << 13);
++
++        // Keep CRT1 enabled after the BIOS syscall selects a display mode.
++        if ((gs.pmode & 0x3ull) == 0ull)
++        {
++            gs.pmode |= 0x1ull;
++        }
++    }
++
+     void GsSetCrt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+         int interlaced = getRegU32(ctx, 4); // $a0 - 0=non-interlaced, 1=interlaced
+-        int videoMode = getRegU32(ctx, 5);  // $a1 - 0=NTSC, 1=PAL, 2=VESA, 3=HiVision
++        int videoMode = getRegU32(ctx, 5);  // $a1 - GS CRT mode (2=NTSC, 3=PAL, 0x50=480p) // MKSM: as libgraph passes it
+         int frameMode = getRegU32(ctx, 6);  // $a2 - 0=field, 1=frame
+ 
+         if (runtime)
+         {
+-            auto &gs = runtime->memory().gs();
+-            const uint64_t smode2 =
+-                (static_cast<uint64_t>(interlaced) & 0x1ull) |
+-                ((static_cast<uint64_t>(frameMode) & 0x1ull) << 1);
+-
+-            gs.smode2 = smode2;
+-
+-            // Keep CRT1 enabled after the BIOS syscall selects a display mode.
+-            if ((gs.pmode & 0x3ull) == 0ull)
+-            {
+-                gs.pmode |= 0x1ull;
+-            }
++            configureGsCrt(runtime->memory().gs(), static_cast<uint32_t>(interlaced), static_cast<uint32_t>(videoMode),
++                           static_cast<uint32_t>(frameMode));
+         }
+ 
+         RUNTIME_LOG("PS2 GsSetCrt: interlaced=" << interlaced
+diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/System.h b/ps2xRuntime/src/lib/Kernel/Syscalls/System.h
+index c9b9991..dc7716a 100644
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/System.h
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/System.h
+@@ -4,6 +4,8 @@
+ 
+ namespace ps2_syscalls
+ {
++    // MKSM: SMODE2 and SMODE1 for a video mode, as the SetGsCrt syscall sets them (upstream's feature/performance-patch-1).
++    void configureGsCrt(GSRegisters &gs, uint32_t interlaced, uint32_t videoMode, uint32_t frameMode);
+     bool dispatchSyscallOverride(uint32_t syscallNumber, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+     void GsSetCrt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+     void SetGsCrt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+diff --git a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+index f0ad507..02992cb 100644
+--- a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+@@ -315,7 +315,7 @@ namespace
+                                      ((a >= 0x40u) ? 0x8000u : 0u));
+     }
+ 
+-    void decodeDisplaySize(uint64_t display64, uint32_t &outWidth, uint32_t &outHeight)
++    void decodeDisplaySize(uint64_t display64, uint64_t smode2, uint32_t &outWidth, uint32_t &outHeight)
+     {
+         const uint32_t dw = static_cast<uint32_t>((display64 >> 32) & 0x0FFFu);
+         const uint32_t dh = static_cast<uint32_t>((display64 >> 44) & 0x07FFu);
+@@ -323,6 +323,10 @@ namespace
+ 
+         outWidth = (dw + 1u) / (magh + 1u);
+         outHeight = dh + 1u;
++        // MKSM: in interlaced frame mode (SMODE2 INT and FFMD) DH counts the raster lines of both fields, and each
++        // field shows every line of its buffer: half of them.
++        if ((smode2 & 3u) == 3u)
++            outHeight = (outHeight + 1u) / 2u;
+         if (outWidth < 64u || outHeight < 64u)
+         {
+             outWidth = kDefaultDisplayWidth;
+@@ -1869,8 +1873,8 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
+     const GSDisplayReadOrigin origin1 = decodeDisplayReadOrigin(request.dispfb1);
+     const GSDisplayReadOrigin origin2 = decodeDisplayReadOrigin(request.dispfb2);
+     uint32_t width1 = 0u, height1 = 0u, width2 = 0u, height2 = 0u;
+-    decodeDisplaySize(request.display1, width1, height1);
+-    decodeDisplaySize(request.display2, width2, height2);
++    decodeDisplaySize(request.display1, request.smode2, width1, height1);
++    decodeDisplaySize(request.display2, request.smode2, width2, height2);
+     const bool valid1 = pmode.enableCrt1 && hasDisplaySetup(request.display1, displayFrame1);
+     const bool valid2 = pmode.enableCrt2 && hasDisplaySetup(request.display2, displayFrame2);
+     if (!valid1 && !valid2)
+diff --git a/ps2xTest/src/ps2_gs_tests.cpp b/ps2xTest/src/ps2_gs_tests.cpp
+index f2ebdb2..3d9241f 100644
+--- a/ps2xTest/src/ps2_gs_tests.cpp
++++ b/ps2xTest/src/ps2_gs_tests.cpp
+@@ -558,8 +558,10 @@ void register_ps2_gs_tests()
+             std::memcpy(&xyoffset10Addr, rdram.data() + kEnvAddr + kXYOffset1AddrOffset, sizeof(xyoffset10Addr));
+ 
+             t.Equals((dispfb0 >> 9) & 0x3Fu, 10ull, "dbuff display env should seed FBW from width");
+-            t.Equals((display0 >> 32) & 0x0FFFull, 639ull, "dbuff display env should seed DW from width");
+-            t.Equals((display0 >> 44) & 0x07FFull, 447ull, "dbuff display env should seed DH from height");
++            // MKSM: libgraph's DISPLAY (upstream's feature/performance-patch-1 expectations): output clocks and raster lines.
++            t.Equals((display0 >> 23) & 0x0Full, 3ull, "NTSC should use four output clocks per pixel");
++            t.Equals((display0 >> 32) & 0x0FFFull, 2559ull, "DW is measured in output clocks, not framebuffer pixels");
++            t.Equals((display0 >> 44) & 0x07FFull, 895ull, "interlaced frame mode should double the supplied height");
+             t.Equals((frame10 >> 16) & 0x3Full, 10ull, "dbuff draw env should seed FRAME FBW from width");
+             t.Equals(frame10Addr, 0x4Cull, "dbuff draw env should seed FRAME_1 register id");
+             t.Equals(xyoffset10 & 0xFFFFull, 0x6C00ull, "dbuff draw env should seed OFX in 12.4 fixed point");
+@@ -580,10 +582,67 @@ void register_ps2_gs_tests()
+ 
+             t.Equals(runtime.memory().gs().dispfb1 & 0x1FFull, 151ull,
+                      "sceGsSwapDBuffDc should program GS to the selected display page");
+-            t.Equals((runtime.memory().gs().display1 >> 32) & 0x0FFFull, 639ull,
++            t.Equals((runtime.memory().gs().display1 >> 32) & 0x0FFFull, 2559ull,
+                      "sceGsSwapDBuffDc should preserve the display width from the seeded env");
+         });
+ 
++        // MKSM: libgraph's display modes. sceGsResetGraph sets SMODE1 for the video mode (a GS emulation that models the CRTC,
++        // paraLLEl-GS, reads the mode from it) and the display registers directly; sceGsSetDefDBuff fills DISPLAY in output
++        // clocks and raster lines as libgraph does; the CPU backend shows half of DH's lines per field in interlaced frame
++        // mode, so Shaolin Monks' 640x256 PAL fields are still presented at their own height.
++        tc.Run("libgraph's PAL display modes: SMODE1, DISPLAY in clocks and lines, a field's height", [](TestCase &t)
++        {
++            PS2Runtime runtime;
++            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
++            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
++            GSRegisters &regs = runtime.memory().gs();
++
++            R5900Context reset{};
++            setRegU32(reset, 4, 0u); // mode
++            setRegU32(reset, 5, 1u); // interlaced
++            setRegU32(reset, 6, 3u); // PAL
++            setRegU32(reset, 7, 1u); // frame mode (FFMD)
++            ps2_stubs::sceGsResetGraph(rdram.data(), &reset, &runtime);
++            t.Equals((regs.smode1 >> 13) & 3ull, 3ull, "SMODE1.CMOD should be PAL");
++            t.Equals((regs.smode1 >> 3) & 127ull, 32ull, "SMODE1.LC should be the analog line count");
++            t.Equals(regs.smode2, 3ull, "SMODE2 should be interlaced frame mode");
++            t.Equals((regs.display1 >> 44) & 0x07FFull, 511ull, "the reset display should be a full PAL frame");
++
++            constexpr uint32_t kEnvAddr = 0x6000u;
++            R5900Context ctx{};
++            setRegU32(ctx, 4, kEnvAddr);
++            setRegU32(ctx, 5, 0u);   // PSMCT32
++            setRegU32(ctx, 6, 640u);
++            setRegU32(ctx, 7, 256u); // one field
++            ps2_stubs::sceGsSetDefDBuff(rdram.data(), &ctx, &runtime);
++            uint64_t display = 0u;
++            std::memcpy(&display, rdram.data() + kEnvAddr + 24u, sizeof(display)); // disp[0].display
++            t.Equals(display & 0x0FFFull, 656ull, "DX should be where a PAL picture starts");
++            t.Equals((display >> 12) & 0x07FFull, 72ull, "DY should count the lines of both fields");
++            t.Equals((display >> 23) & 0x0Full, 3ull, "640 pixels should span 2560 clocks (MAGH 3)");
++            t.Equals((display >> 32) & 0x0FFFull, 2559ull, "DW should count output clocks");
++            t.Equals((display >> 44) & 0x07FFull, 511ull, "DH should count the lines of both fields");
++
++            // The CPU backend presents one field at its own height.
++            std::vector<uint8_t> vram(4u * 1024u * 1024u, 0u);
++            GSRegisters priv{};
++            GS gs;
++            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &priv);
++            for (uint32_t i = 0; i < 640u * 256u; ++i)
++                vram[i * 4u] = 0x40u; // something to show in the 640x256 PSMCT32 buffer at FBP 0
++            priv.pmode = 0x66u; // read circuit 2
++            priv.smode2 = 3u;
++            priv.dispfb2 = makeDispFb(0u, 10u, 0u, 0u, 0u);
++            priv.display2 = display;
++            gs.setFieldBlending(false);
++            gs.latchHostPresentationFrame();
++            std::vector<uint8_t> pixels;
++            uint32_t width = 0u, height = 0u;
++            t.IsTrue(gs.copyLatchedHostPresentationFrame(pixels, width, height), "the field should be presented");
++            t.Equals(width, 640u, "the field's width is DW in pixels");
++            t.Equals(height, 256u, "a field shows half of DH's lines in interlaced frame mode");
++        });
++
+         tc.Run("sceGsSetDefDBuffDc seeds a clear packet and swap clears the draw buffer", [](TestCase &t)
+         {
+             PS2Runtime runtime;

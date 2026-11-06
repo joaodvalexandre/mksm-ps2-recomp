@@ -1,0 +1,1727 @@
+diff --git a/ps2xRuntime/CMakeLists.txt b/ps2xRuntime/CMakeLists.txt
+index 589d768..d9da149 100644
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -396,6 +396,21 @@ add_library(ps2_runtime STATIC
+     src/lib/games_database.cpp
+ )
+ 
++# MKSM: upstream's GPU GS backend (paraLLEl-GS, Vulkan compute), from its branch feature/performance-patch-1 (PR #285).
++set(PS2X_GS_BACKEND "PARALLEL_GS" CACHE STRING "GS backend: CPU or PARALLEL_GS")
++set_property(CACHE PS2X_GS_BACKEND PROPERTY STRINGS CPU PARALLEL_GS)
++if(NOT PS2X_GS_BACKEND MATCHES "^(CPU|PARALLEL_GS)$")
++    message(FATAL_ERROR "PS2X_GS_BACKEND must be CPU or PARALLEL_GS")
++endif()
++if(PS2X_GS_BACKEND STREQUAL "PARALLEL_GS" AND
++   (ANDROID OR NOT (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")))
++    message(FATAL_ERROR "PARALLEL_GS is supported only on Windows and Linux desktop")
++endif()
++if(PS2X_GS_BACKEND STREQUAL "PARALLEL_GS")
++    message(STATUS "Using ParallelGS backend for PS2 graphics")
++    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/ParallelGS.cmake")
++endif()
++
+ if(PS2X_ENABLE_RUNTIME_LOGS)
+     target_compile_definitions(ps2_runtime PUBLIC
+         PS2_RUNTIME_LOGS=1
+diff --git a/ps2xRuntime/cmake/ParallelGS.cmake b/ps2xRuntime/cmake/ParallelGS.cmake
+new file mode 100644
+index 0000000..590a436
+--- /dev/null
++++ b/ps2xRuntime/cmake/ParallelGS.cmake
+@@ -0,0 +1,46 @@
++include(FetchContent)
++set(PARALLEL_GS_STANDALONE ON CACHE BOOL "Build parallel-gs as a library" FORCE)
++set(GRANITE_TOOLS OFF CACHE BOOL "" FORCE)
++set(GRANITE_INSTALL_TARGETS OFF CACHE BOOL "" FORCE)
++
++if(MSVC AND NOT CMAKE_MSVC_RUNTIME_LIBRARY)
++    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
++endif()
++
++FetchContent_Declare(parallel_gs
++    GIT_REPOSITORY https://github.com/Arntzen-Software/parallel-gs.git
++    GIT_TAG 3a66c1976170cbc2cb53a3593fabbc7c4b2ccfbd
++    GIT_SUBMODULES_RECURSE TRUE
++    EXCLUDE_FROM_ALL
++) 
++
++# Workaround for my pc large path remove this later hahaha
++if(CMAKE_HOST_WIN32)
++    set(_ps2x_git_config_count "$ENV{GIT_CONFIG_COUNT}")
++    set(_ps2x_git_config_index 0)
++    if(NOT _ps2x_git_config_count STREQUAL "")
++        set(_ps2x_git_config_index "${_ps2x_git_config_count}")
++    endif()
++    set(ENV{GIT_CONFIG_KEY_${_ps2x_git_config_index}} "core.longpaths")
++    set(ENV{GIT_CONFIG_VALUE_${_ps2x_git_config_index}} "true")
++    math(EXPR _ps2x_git_config_next "${_ps2x_git_config_index} + 1")
++    set(ENV{GIT_CONFIG_COUNT} "${_ps2x_git_config_next}")
++endif()
++
++FetchContent_MakeAvailable(parallel_gs)
++if(CMAKE_HOST_WIN32)
++    set(ENV{GIT_CONFIG_COUNT} "${_ps2x_git_config_count}")
++    unset(ENV{GIT_CONFIG_KEY_${_ps2x_git_config_index}})
++    unset(ENV{GIT_CONFIG_VALUE_${_ps2x_git_config_index}})
++endif()
++
++include("${CMAKE_CURRENT_LIST_DIR}/ParallelGSTransferTails.cmake")
++# MKSM: no gs_gl_interop.cpp: the backend reads its frames back to host memory (gs_parallel_backend.cpp, Present).
++target_sources(ps2_runtime PRIVATE
++    "${CMAKE_CURRENT_LIST_DIR}/../src/lib/gs/gs_parallel_backend.cpp"
++)
++target_link_libraries(ps2_runtime PRIVATE parallel-gs)
++# MKSM: PRIVATE (upstream: PUBLIC): only the runtime's own sources test it, and a PUBLIC definition would rebuild the
++# whole generated runner whenever the backend is switched.
++target_compile_definitions(ps2_runtime PRIVATE PS2X_GS_PARALLEL=1)
++install(FILES "${parallel_gs_SOURCE_DIR}/COPYING.LGPLv3" DESTINATION share/licenses/parallel-gs)
+diff --git a/ps2xRuntime/cmake/ParallelGSTransferTails.cmake b/ps2xRuntime/cmake/ParallelGSTransferTails.cmake
+new file mode 100644
+index 0000000..2ba7736
+--- /dev/null
++++ b/ps2xRuntime/cmake/ParallelGSTransferTails.cmake
+@@ -0,0 +1,24 @@
++file(READ "${parallel_gs_SOURCE_DIR}/gs/gs_interface.cpp" gs_interface_source)
++
++function(patch_gs_transfer before after)
++    string(FIND "${gs_interface_source}" "${before}" position)
++    if(position EQUAL -1)
++        message(FATAL_ERROR "parallel-gs transfer patch does not match the pinned source")
++    endif()
++    string(REPLACE "${before}" "${after}" gs_interface_source "${gs_interface_source}")
++    set(gs_interface_source "${gs_interface_source}" PARENT_SCOPE)
++endfunction()
++
++patch_gs_transfer("get_bits_per_pixel(transfer_state.copy.bitbltbuf.desc.DPSM)) / 64;" "get_bits_per_pixel(transfer_state.copy.bitbltbuf.desc.DPSM) + 63) / 64;")
++patch_gs_transfer("get_bits_per_pixel(transfer_state.copy.bitbltbuf.desc.SPSM)) / 8;" "get_bits_per_pixel(transfer_state.copy.bitbltbuf.desc.SPSM) + 7) / 8;")
++patch_gs_transfer("transfer_state.fifo_readback.reserve(required_bytes);" "transfer_state.fifo_readback.reserve((required_bytes + 15) & ~15u);\n\t\tif (required_bytes) memset(transfer_state.fifo_readback.data(), 0, (required_bytes + 15) & ~15u);")
++patch_gs_transfer("transfer_state.fifo_readback_128b_size = required_bytes / 16;" "transfer_state.fifo_readback_128b_size = (required_bytes + 15) / 16;")
++
++set(patched_interface "${parallel_gs_BINARY_DIR}/gs_interface_transfer_tails.cpp")
++file(CONFIGURE OUTPUT "${patched_interface}" CONTENT "${gs_interface_source}" @ONLY)
++
++get_target_property(gs_sources parallel-gs SOURCES)
++list(REMOVE_ITEM gs_sources gs_interface.cpp)
++set_property(TARGET parallel-gs PROPERTY SOURCES "${gs_sources}")
++
++target_sources(parallel-gs PRIVATE "${patched_interface}")
+diff --git a/ps2xRuntime/include/runtime/gs/gs_backend.h b/ps2xRuntime/include/runtime/gs/gs_backend.h
+index 3f00d01..d59e19b 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_backend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_backend.h
+@@ -5,6 +5,8 @@
+ #include <cstdint>
+ #include <vector>
+ 
++struct GSDebugSnapshot;
++
+ class GSRasterBackend
+ {
+ public:
+@@ -12,6 +14,12 @@ public:
+ 
+     virtual void Initialize(uint8_t *vram, uint32_t vramSize) = 0;
+     virtual void Reset() = 0;
++ 
++    virtual bool UsesRawCommands() const { return false; }
++    virtual void ProcessGIF(uint32_t, const uint8_t *, uint32_t) {}
++    virtual void WriteRegisterRaw(uint8_t, uint64_t) {}
++    virtual void ReadRegisterState(GSDebugSnapshot &) const {} 
++    virtual uint64_t GetReadbackCount() const { return 0; }
+ 
+     virtual void Submit(const GSPrimitiveBatch &batch) = 0;
+     virtual void LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut) = 0;
+@@ -31,4 +39,9 @@ public:
+     virtual void WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value) = 0;
+     virtual void SnapshotVram(std::vector<uint8_t> &out) const = 0;
+     virtual GSTransferSnapshot GetTransferSnapshot() const = 0;
++
++    // MKSM: a vertical blank, on the EE thread (EeScheduler, VBlankStart), for a backend that scans out itself: one call
++    // per field, in order, as the CRTC sees them (paraLLEl-GS's deinterlacer weaves each field with the ones before).
++    // Present then hands the host the last picture scanned out.
++    virtual void VBlank(const GSPresentationRequest &) {}
+ };
+diff --git a/ps2xRuntime/include/runtime/gs/gs_field_blend.h b/ps2xRuntime/include/runtime/gs/gs_field_blend.h
+index 83b6741..91729b9 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_field_blend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_field_blend.h
+@@ -23,8 +23,11 @@ struct GsFieldBlend
+     uint32_t fields = 0;           // how many of current and previous hold a field (0 to 2)
+     uint32_t heldLatches = 0;      // presentations of the current field so far
+     bool currentOnTop = true;      // current goes on the even (top) rows of the woven picture
++    bool parityZeroOnTop = true;   // MKSM: fields with a parity: parity 0 on the top rows (learned, see apply)
++    uint32_t contraryVotes = 0;    // MKSM: decisive combing comparisons in a row against parityZeroOnTop
+ 
+     static constexpr uint32_t kHeldLatches = 12; // a quarter of a second at 50 fields a second
++    static constexpr uint32_t kParityVotes = 8;  // MKSM: contrary decisive comparisons that swap the parity's rows
+ 
+     static bool applies(uint64_t smode2)
+     {
+@@ -39,6 +42,8 @@ struct GsFieldBlend
+     // pixels: the frame about to be shown, frameHeight rows of frameWidth RGBA pixels, from the buffer whose DISPFB is
+     // displayBuffer. It becomes the rebuilt picture, twice as tall, when that fits in maxHeight rows (otherwise the
+     // per-byte mean of the two fields at field height), and frameHeight is updated.
++    // MKSM: parity is the field's parity when known (a backend that scans out each field, 0 or 1), -1 otherwise: the
++    // order then follows it instead of each pair's combing, so moving pictures cannot swap it from field to field.
+     void apply(std::vector<uint8_t> &pixels, uint32_t frameWidth, uint32_t &frameHeight, uint64_t displayBuffer,
+-               uint32_t maxHeight);
++               uint32_t maxHeight, int parity = -1);
+ };
+diff --git a/ps2xRuntime/include/runtime/gs/gs_frontend.h b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+index cadeed6..4f4439c 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_frontend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+@@ -108,7 +108,7 @@ public:
+     void reset();
+     void setRasterBackend(std::unique_ptr<GSRasterBackend> backend);
+ 
+-    void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
++    void processGIFPacket(const uint8_t *data, uint32_t sizeBytes, uint32_t path = 3);
+     bool processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes);
+     void uploadImageNative(uint64_t bitbltbuf,
+                            uint64_t trxpos,
+@@ -121,9 +121,9 @@ public:
+     const uint8_t *lockDisplaySnapshot(uint32_t &outSize);
+     void unlockDisplaySnapshot();
+     uint32_t getLastDisplayBaseBytes() const;
+-    const GSFrameReg &getContextFrame(int index) const
++    GSFrameReg getContextFrame(int index) const
+     {
+-        return m_ctx[(index != 0) ? 1 : 0].frame;
++        return getDebugSnapshot().ctx[(index != 0) ? 1 : 0].frame;
+     }
+     GSDebugSnapshot getDebugSnapshot() const;
+     std::vector<GSDebugHistoryEntry> getDebugHistory() const;
+@@ -132,6 +132,8 @@ public:
+     void setDebugHistoryPaused(bool paused);
+     bool getPreferredDisplaySource(GSFrameReg &outSource, uint32_t &outDestFbp) const;
+     void latchHostPresentationFrame();
++    // MKSM: a vertical blank (EeScheduler, VBlankStart, EE thread): a backend that scans out itself does so now.
++    void vblank();
+     // MKSM: field rendering is shown as the blend of the last two fields (runtime/gs/gs_field_blend.h); on by default.
+     void setFieldBlending(bool enabled) { m_fieldBlending.store(enabled, std::memory_order_relaxed); }
+     bool copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
+@@ -234,6 +236,7 @@ private:
+     bool m_hostPresentationUsedPreferred = false;
+     bool m_hasHostPresentationFrame = false;
+     GsFieldBlend m_fieldBlend;                 // MKSM: only latchHostPresentationFrame (the host thread) uses it
++    uint64_t m_lastWovenField = 0;             // MKSM: the last scanned field the weave got (fieldSequence)
+     std::atomic<bool> m_fieldBlending{true};
+     uint64_t m_nativeImageUploadCount = 0;
+     uint64_t m_nativePackedGIFPacketCount = 0;
+diff --git a/ps2xRuntime/include/runtime/gs/gs_parallel_backend.h b/ps2xRuntime/include/runtime/gs/gs_parallel_backend.h
+new file mode 100644
+index 0000000..4d940f9
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/gs/gs_parallel_backend.h
+@@ -0,0 +1,8 @@
++#pragma once
++#include "runtime/gs/gs_backend.h"
++
++#include <memory>
++
++struct GSRegisters;
++
++std::unique_ptr<GSRasterBackend> CreateParallelGSBackend(GSRegisters &registers);
+diff --git a/ps2xRuntime/include/runtime/gs/gs_types.h b/ps2xRuntime/include/runtime/gs/gs_types.h
+index 836a3ff..ae4aaca 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_types.h
++++ b/ps2xRuntime/include/runtime/gs/gs_types.h
+@@ -277,6 +277,8 @@ struct GSTransferSnapshot
+ struct GSPresentationRequest
+ {
+     uint64_t pmode = 0;
++    uint64_t smode1 = 0;
++    uint64_t syncv = 0;
+     uint64_t smode2 = 0;
+     uint64_t dispfb1 = 0;
+     uint64_t display1 = 0;
+@@ -284,6 +286,8 @@ struct GSPresentationRequest
+     uint64_t display2 = 0;
+     uint64_t bgcolor = 0;
+     uint64_t vsyncTick = 0;
++    uint32_t field = 0;
++    bool deinterlace = true; // MKSM: false shows the fields one by one (MKSM_DEINTERLACE=0, GS::setFieldBlending)
+     GSFrameReg contextFrames[2]{};
+     GSFrameReg preferredSource{};
+     uint32_t preferredDestFbp = 0;
+@@ -298,6 +302,18 @@ struct PresentationFrame
+     uint32_t displayFbp = 0;
+     uint32_t sourceFbp = 0;
+     bool usedPreferred = false;
++    // MKSM: the picture as the TV shows it, fields already woven by the backend (paraLLEl-GS); the frontend's own
++    // field weave (gs_field_blend.h) leaves it alone.
++    bool deinterlaced = false;
++    // MKSM: a field a backend scanned out at its vertical blank: its number (0: not such a field), parity and display
++    // buffer (DISPFB), and the field just before it (empty if gone), so the frontend weaves neighbours whatever the
++    // host's refresh skipped or repeated.
++    uint64_t fieldSequence = 0;
++    uint32_t fieldParity = 0;
++    uint64_t fieldBuffer = 0;
++    std::vector<uint8_t> previousPixels;
++    uint32_t previousParity = 0;
++    uint64_t previousBuffer = 0;
+ 
+     explicit operator bool() const
+     {
+diff --git a/ps2xRuntime/include/runtime/gs/ps2_gif_arbiter.h b/ps2xRuntime/include/runtime/gs/ps2_gif_arbiter.h
+index 2012083..f82d3e0 100644
+--- a/ps2xRuntime/include/runtime/gs/ps2_gif_arbiter.h
++++ b/ps2xRuntime/include/runtime/gs/ps2_gif_arbiter.h
+@@ -23,10 +23,12 @@ struct GifArbiterPacket
+ class GifArbiter
+ {
+ public:
+-    using ProcessPacketFn = std::function<void(const uint8_t *, uint32_t)>;
++    using ProcessPacketFn = std::function<void(GifPathId, const uint8_t *, uint32_t)>;
+ 
+     GifArbiter() = default;
+     explicit GifArbiter(ProcessPacketFn processFn);
++    explicit GifArbiter(std::function<void(const uint8_t *, uint32_t)> processFn)
++        : GifArbiter([fn = std::move(processFn)](GifPathId, const uint8_t *data, uint32_t size) { fn(data, size); }) {}
+ 
+     void setProcessPacketFn(ProcessPacketFn fn) { m_processFn = std::move(fn); }
+ 
+diff --git a/ps2xRuntime/include/runtime/ps2_memory.h b/ps2xRuntime/include/runtime/ps2_memory.h
+index ea86a9c..c54c223 100644
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -316,6 +316,9 @@ public:
+     using GifPacketCallback = std::function<void(const uint8_t *, uint32_t)>;
+     void setGifPacketCallback(GifPacketCallback cb) { m_gifPacketCallback = std::move(cb); }
+     void setGifArbiter(GifArbiter *arbiter) { m_gifArbiter = arbiter; }
++    // MKSM: the GS keeps each GIF path's state between packets (a raw-command backend, paraLLEl-GS): a VIF1 DIRECT
++    // image that continues into the next VIF packet is sent on as it is, without the IMAGE tag the CPU frontend needs.
++    void setGifPathsStateful(bool stateful) { m_gifPathsStateful = stateful; }
+ 
+     using Vu1MscalCallback = std::function<void(uint32_t startPC, uint32_t top, uint32_t itop)>;
+     void setVu1MscalCallback(Vu1MscalCallback cb) { m_vu1MscalCallback = std::move(cb); }
+@@ -408,6 +411,7 @@ public:
+     uint8_t *m_vu1Data = nullptr;
+     bool m_path3Masked = false;
+     uint32_t m_vif1PendingPath2ImageQwc = 0u;
++    bool m_gifPathsStateful = false; // MKSM: see setGifPathsStateful
+     bool m_vif1PendingPath2DirectHl = false;
+     std::vector<std::vector<uint8_t>> m_path3MaskedFifo;
+ 
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index 1834028..c72b4ae 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -1896,6 +1896,10 @@ void EeScheduler::processEvent(const EeEvent &event)
+         requestStop();
+         break;
+     case EeEventType::VBlankStart:
++        // MKSM: a backend that scans out itself (paraLLEl-GS) sees every field: the buffer on screen during the field
++        // that ends here, with that field's parity (CSR.FIELD before it changes, and before the game's vsync handling
++        // flips the display buffer).
++        m_runtime.gs().vblank();
+         ++m_vsyncTick;
+         m_runtime.memory().gs().vsyncTick.store(m_vsyncTick, std::memory_order_release);
+         // MKSM: the window title's frame counter; a display buffer change since the last vblank is a frame.
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index bbbfd08..4dc9711 100644
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -260,6 +260,8 @@ GSDebugSnapshot GS::getDebugSnapshot() const
+         snapshot.hasHostPresentationFrame = m_hasHostPresentationFrame;
+     }
+     snapshot.localToHostPendingBytes = transfer.localToHostPendingBytes;
++    if (m_backend && m_backend->UsesRawCommands())
++        m_backend->ReadRegisterState(snapshot);
+     return snapshot;
+ }
+ 
+@@ -509,6 +511,9 @@ GSPresentationRequest GS::buildPresentationRequestUnlocked() const
+     if (!m_privRegs)
+         return request;
+     request.pmode = m_privRegs->pmode;
++    request.smode1 = m_privRegs->smode1;
++    request.syncv = m_privRegs->syncv;
++    request.field = (m_privRegs->csr.load() >> 13u) & 1u;
+     request.smode2 = m_privRegs->smode2;
+     request.dispfb1 = m_privRegs->dispfb1;
+     request.display1 = m_privRegs->display1;
+@@ -563,7 +568,7 @@ namespace
+ }
+ 
+ void GsFieldBlend::apply(std::vector<uint8_t> &pixels, uint32_t frameWidth, uint32_t &frameHeight, uint64_t displayBuffer,
+-                         uint32_t maxHeight)
++                         uint32_t maxHeight, int parity)
+ {
+     const size_t rowBytes = static_cast<size_t>(frameWidth) * 4u;
+     const size_t fieldBytes = rowBytes * frameHeight;
+@@ -593,8 +598,32 @@ void GsFieldBlend::apply(std::vector<uint8_t> &pixels, uint32_t frameWidth, uint
+     current.assign(pixels.begin(), pixels.begin() + static_cast<std::ptrdiff_t>(fieldBytes));
+     if (fields == 2u && newField)
+     {
+-        currentOnTop = fieldCombing(current, previous, rowBytes, height) <=
+-                       fieldCombing(previous, current, rowBytes, height);
++        const uint64_t currentTop = fieldCombing(current, previous, rowBytes, height);
++        const uint64_t previousTop = fieldCombing(previous, current, rowBytes, height);
++        const bool leastCombing = currentTop <= previousTop;
++        if (parity < 0)
++        {
++            currentOnTop = leastCombing;
++        }
++        else
++        {
++            // MKSM: the rows of parity 0, learned from the comparisons that are decisive (a fifth apart) and swapped
++            // only when kParityVotes of them in a row disagree.
++            if (currentTop * 5u < previousTop * 4u || previousTop * 5u < currentTop * 4u)
++            {
++                const bool zeroOnTop = leastCombing == (parity == 0);
++                if (zeroOnTop == parityZeroOnTop)
++                {
++                    contraryVotes = 0;
++                }
++                else if (++contraryVotes >= kParityVotes)
++                {
++                    parityZeroOnTop = zeroOnTop;
++                    contraryVotes = 0;
++                }
++            }
++            currentOnTop = (parity == 0) == parityZeroOnTop;
++        }
+     }
+     // one field, or one held on screen: each row twice
+     const std::vector<uint8_t> &other = fields == 2u && heldLatches < kHeldLatches ? previous : current;
+@@ -664,19 +693,40 @@ void GS::latchHostPresentationFrame()
+         std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
+         if (m_backend)
+         {
+-            m_backend->Flush();
+-            m_backend->Sync(GSSyncReason::Presentation);
++            if (!m_backend->UsesRawCommands()) // MKSM: a raw backend scanned out at the vblank (GS::vblank)
++            {
++                m_backend->Flush();
++                m_backend->Sync(GSSyncReason::Presentation);
++            }
+             frame = m_backend->Present(request);
+         }
+     }
+ 
+     // MKSM: field rendering is shown as the blend of the last two fields (runtime/gs/gs_field_blend.h).
+-    if (frame && m_fieldBlending.load(std::memory_order_relaxed) && GsFieldBlend::applies(request.smode2))
++    if (frame && !frame.deinterlaced && m_fieldBlending.load(std::memory_order_relaxed) && GsFieldBlend::applies(request.smode2))
+     {
+         constexpr uint32_t kMaxPresentationRows = 512u; // the host's frame texture (ps2_runtime.cpp, FB_HEIGHT)
+         // the displayed circuit's buffer (read circuit 2 when PMODE enables it), read origin included
+         const uint64_t displayBuffer = (request.pmode & 2u) != 0u ? request.dispfb2 : request.dispfb1;
+-        m_fieldBlend.apply(frame.pixels, frame.width, frame.height, displayBuffer, kMaxPresentationRows);
++        if (frame.fieldSequence == 0u)
++        {
++            m_fieldBlend.apply(frame.pixels, frame.width, frame.height, displayBuffer, kMaxPresentationRows);
++        }
++        else
++        {
++            // MKSM: a field scanned out at its vertical blank (GPU backend): the field before it first when the host's
++            // refresh skipped it, so the weave pairs neighbours, each known by its own display buffer and parity.
++            if (!frame.previousPixels.empty() && frame.fieldSequence != m_lastWovenField &&
++                frame.fieldSequence - 1u != m_lastWovenField)
++            {
++                uint32_t previousHeight = frame.height;
++                m_fieldBlend.apply(frame.previousPixels, frame.width, previousHeight, frame.previousBuffer,
++                                   kMaxPresentationRows, static_cast<int>(frame.previousParity));
++            }
++            m_fieldBlend.apply(frame.pixels, frame.width, frame.height, frame.fieldBuffer, kMaxPresentationRows,
++                               static_cast<int>(frame.fieldParity));
++            m_lastWovenField = frame.fieldSequence;
++        }
+     }
+     else
+     {
+@@ -707,6 +757,21 @@ void GS::latchHostPresentationFrame()
+     }
+ }
+ 
++void GS::vblank()
++{
++    GSPresentationRequest request{};
++    {
++        std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
++        if (!m_backend || !m_privRegs || !m_backend->UsesRawCommands())
++            return;
++        request = buildPresentationRequestUnlocked();
++    }
++    request.deinterlace = m_fieldBlending.load(std::memory_order_relaxed);
++    std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
++    if (m_backend)
++        m_backend->VBlank(request);
++}
++
+ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
+                                           uint32_t &outWidth,
+                                           uint32_t &outHeight,
+@@ -742,7 +807,10 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
+     outPixels.resize(packedRowBytes * static_cast<size_t>(outHeight));
+     if (outWidth != 0u && outHeight != 0u)
+     {
+-        const size_t sourceRowBytes = static_cast<size_t>(kHostFrameWidth) * 4u;
++        // MKSM: a packed picture (a GPU backend's, which may be wider than the CPU backend's 640) has its own stride.
++        const size_t sourceRowBytes = m_hostPresentationFrame.size() == packedRowBytes * outHeight
++                                          ? packedRowBytes
++                                          : static_cast<size_t>(kHostFrameWidth) * 4u;
+         for (uint32_t y = 0; y < outHeight; ++y)
+         {
+             const size_t srcOffset = static_cast<size_t>(y) * sourceRowBytes;
+@@ -770,9 +838,16 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
+     return true;
+ }
+ 
+-void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
++void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes, uint32_t path)
+ {
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
++    if (m_backend && m_backend->UsesRawCommands())
++    {
++        if (data && sizeBytes && (sizeBytes & 15u) == 0u)
++            m_backend->ProcessGIF(path, data, sizeBytes);
++        return;
++    }
++
+     if (!data || sizeBytes < 16 || !m_backend)
+         return;
+ 
+@@ -878,6 +953,13 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+     if (!validatePackedGifPacket(data, sizeBytes))
+         return false;
+ 
++    if (m_backend->UsesRawCommands())
++    {
++        m_backend->ProcessGIF(3, data, sizeBytes);
++        ++m_nativePackedGIFPacketCount;
++        return true;
++    }
++
+     const bool processed = visitPackedGifPacket(data, sizeBytes, [&](const PackedGifPacketTag &tag)
+                                                 {
+         m_curQ = 1.0f;
+@@ -1200,6 +1282,11 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
+ 
+ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
+ {
++    if (m_backend && m_backend->UsesRawCommands())
++    {
++        m_backend->WriteRegisterRaw(regAddr, value);
++        return;
++    }
+     const bool interestingReg =
+         regAddr == GS_REG_PRIM ||
+         regAddr == GS_REG_RGBAQ ||
+@@ -1750,13 +1837,14 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
+ bool GS::clearFramebufferContext(uint32_t contextIndex, uint32_t rgba)
+ {
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+-    return m_backend && m_backend->ClearFramebuffer(m_ctx[(contextIndex != 0u) ? 1 : 0], rgba);
++    return m_backend && m_backend->ClearFramebuffer(getDebugSnapshot().ctx[(contextIndex != 0u) ? 1 : 0], rgba);
+ }
+ 
+ bool GS::clearActiveFramebuffer(uint32_t rgba)
+ {
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+-    return m_backend && m_backend->ClearFramebuffer(activeContext(), rgba);
++    const auto state = getDebugSnapshot();
++    return m_backend && m_backend->ClearFramebuffer(state.ctx[state.prim.ctxt ? 1 : 0], rgba);
+ }
+ 
+ uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
+@@ -1866,3 +1954,4 @@ void GS::updatePreferredDisplaySourceForDraw(const GSPrimitiveBatch &batch)
+         m_hasPreferredDisplaySource = true;
+     }
+ }
++
+diff --git a/ps2xRuntime/src/lib/gs/gs_parallel_backend.cpp b/ps2xRuntime/src/lib/gs/gs_parallel_backend.cpp
+new file mode 100644
+index 0000000..790da8f
+--- /dev/null
++++ b/ps2xRuntime/src/lib/gs/gs_parallel_backend.cpp
+@@ -0,0 +1,791 @@
++#include "runtime/gs/gs_parallel_backend.h"
++#include "runtime/gs/gs_frontend.h"
++#include "runtime/gs/ps2_gs_memory.h"
++#include "runtime/ps2_memory.h"
++#include "ps2_log.h"
++#include "context.hpp"
++#include "device.hpp"
++#include "gs_interface.hpp"
++#include "thread_id.hpp"
++#include <algorithm>
++#include <array>
++#include <cstdlib>
++#include <cstring>
++#include <string>
++#include <iostream>
++#include <mutex>
++#include <stdexcept>
++#include <cstdio>
++
++#ifdef _WIN32
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#include <windows.h>
++#include <dbghelp.h>
++#pragma comment(lib, "dbghelp.lib")
++
++namespace
++{
++    // MKSM: MKSM_CRASH_TRACE=1 prints the faulting thread's stack, with symbols from the runner's PDB, when the process
++    // crashes ([gs-crash] lines): AMD's Vulkan driver crashed (amdvlk64.dll, 0xC0000005) one to two minutes in.
++    LONG WINAPI crashTrace(EXCEPTION_POINTERS *info)
++    {
++        HANDLE process = GetCurrentProcess();
++        HANDLE thread = GetCurrentThread();
++        SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
++        SymInitialize(process, nullptr, TRUE);
++        CONTEXT context = *info->ContextRecord;
++        std::fprintf(stderr, "[gs-crash] exception 0x%08lX at %p, thread %lu" "\n",
++                     info->ExceptionRecord->ExceptionCode, info->ExceptionRecord->ExceptionAddress, GetCurrentThreadId());
++        if (info->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && info->ExceptionRecord->NumberParameters >= 2)
++            std::fprintf(stderr, "[gs-crash] %s address 0x%llX" "\n",
++                         info->ExceptionRecord->ExceptionInformation[0] ? "writing" : "reading",
++                         static_cast<unsigned long long>(info->ExceptionRecord->ExceptionInformation[1]));
++        STACKFRAME64 frame{};
++        frame.AddrPC.Offset = context.Rip;
++        frame.AddrPC.Mode = AddrModeFlat;
++        frame.AddrFrame.Offset = context.Rbp;
++        frame.AddrFrame.Mode = AddrModeFlat;
++        frame.AddrStack.Offset = context.Rsp;
++        frame.AddrStack.Mode = AddrModeFlat;
++        for (int depth = 0; depth < 48; ++depth)
++        {
++            if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, process, thread, &frame, &context, nullptr, SymFunctionTableAccess64,
++                             SymGetModuleBase64, nullptr) || frame.AddrPC.Offset == 0)
++                break;
++            const DWORD64 pc = frame.AddrPC.Offset;
++            const DWORD64 base = SymGetModuleBase64(process, pc);
++            char module[MAX_PATH] = "?";
++            if (base)
++                GetModuleFileNameA(reinterpret_cast<HMODULE>(base), module, MAX_PATH);
++            const char *moduleName = std::strrchr(module, '\\') ? std::strrchr(module, '\\') + 1 : module;
++            alignas(SYMBOL_INFO) char buffer[sizeof(SYMBOL_INFO) + 512];
++            auto *symbol = reinterpret_cast<SYMBOL_INFO *>(buffer);
++            symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
++            symbol->MaxNameLen = 511;
++            DWORD64 displacement = 0;
++            const bool named = SymFromAddr(process, pc, &displacement, symbol) != FALSE;
++            std::fprintf(stderr, "[gs-crash] #%02d %s+0x%llX %s+0x%llX" "\n", depth, moduleName,
++                         static_cast<unsigned long long>(pc - base), named ? symbol->Name : "?",
++                         static_cast<unsigned long long>(displacement));
++        }
++        std::fflush(stderr);
++        return EXCEPTION_CONTINUE_SEARCH;
++    }
++
++    void installCrashTrace()
++    {
++        const char *setting = std::getenv("MKSM_CRASH_TRACE");
++        if (setting && std::atoi(setting) != 0)
++        {
++            SetUnhandledExceptionFilter(crashTrace);
++            std::fprintf(stderr, "[gs-crash] crash trace installed (MKSM_CRASH_TRACE)" "\n");
++        }
++    }
++}
++#else
++namespace
++{
++    void installCrashTrace() {}
++}
++#endif
++
++namespace
++{
++    constexpr size_t VramSize = 4 * 1024 * 1024;
++    uint64_t word(const void *data)
++    {
++        uint64_t value;
++        std::memcpy(&value, data, 8);
++        return value;
++    }
++
++    unsigned bitsPerPixel(unsigned psm)
++    {
++        switch (psm & 63)
++        {
++        case GS_PSM_CT24:
++        case GS_PSM_Z24:
++            return 24;
++        case GS_PSM_CT16:
++        case GS_PSM_CT16S:
++        case GS_PSM_Z16:
++        case GS_PSM_Z16S:
++            return 16;
++        case GS_PSM_T8:
++        case GS_PSM_T8H:
++            return 8;
++        case GS_PSM_T4:
++        case GS_PSM_T4HL:
++        case GS_PSM_T4HH:
++            return 4;
++        default:
++            return 32;
++        }
++    }
++
++    using Reader = uint32_t (*)(uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t);
++    using Writer = void (*)(uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
++    struct PixelAccess
++    {
++        Reader read;
++        Writer write;
++    };
++
++    PixelAccess pixelAccess(unsigned psm)
++    {
++        using namespace GSMem;
++        switch (psm & 63)
++        {
++#define PSM(id, name) \
++    case GS_PSM_##id: \
++        return {Read##name, Write##name}
++            PSM(CT32, CT32);
++            PSM(CT24, CT24);
++            PSM(CT16, CT16);
++            PSM(CT16S, CT16S);
++            PSM(T8, P8);
++            PSM(T8H, P8H);
++            PSM(T4, P4);
++            PSM(T4HL, P4HL);
++            PSM(T4HH, P4HH);
++            PSM(Z32, Z32);
++            PSM(Z24, Z24);
++            PSM(Z16, Z16);
++            PSM(Z16S, Z16S);
++#undef PSM
++        default:
++            return {ReadNull, WriteNull};
++        }
++    }
++
++    // MKSM: the backend's own Vulkan device (Granite picks the GPU). Upstream shares the frames with the window's
++    // OpenGL context (gs_gl_interop.cpp), which crashed AMD's OpenGL driver (atio6axx.dll) here; Present reads them
++    // back to host memory instead, and the host shows them as it shows the CPU backend's.
++    struct VulkanDevice
++    {
++        Vulkan::Context context;
++        Vulkan::Device device;
++
++        VulkanDevice()
++        {
++            if (!Vulkan::Context::init_loader(nullptr))
++                throw std::runtime_error("parallel-gs: Vulkan loader unavailable");
++            context.set_num_thread_indices(1);
++            if (!context.init_instance_and_device(nullptr, 0, nullptr, 0))
++                throw std::runtime_error("parallel-gs: Vulkan device initialization failed");
++            device.set_context(context);
++            device.init_frame_contexts(8); // paraLLEl-GS flushes often: two made each flush wait for the GPU
++            device.next_frame_context();
++        }
++    };
++
++    // MKSM: the picture's settings. By default a field-rendered game's fields (SMODE2 INT and FFMD) come raw and the
++    // frontend weaves them (gs_field_blend.h), as on the CPU backend. PS2X_GS_SSAA (1, 2, 4, 8 or 16 samples, 1 by
++    // default) super-samples the drawing; with 4 or more, PS2X_GS_PROGRESSIVE=1 scans out a progressive picture at
++    // twice the resolution instead, the fields drawn field-aware (each at twice the height, the other field's
++    // half-line offset turned into a whole line), which depends on the game's field parity (PS2X_GS_FIELD_PHASE=flip).
++    struct PictureSettings
++    {
++        ParallelGS::SuperSampling samples = ParallelGS::SuperSampling::X1;
++        bool progressive = false;
++        bool flipPhase = false; // PS2X_GS_FIELD_PHASE=flip: the other field parity (for checking a game's field order)
++
++        PictureSettings()
++        {
++            if (const char *ssaa = std::getenv("PS2X_GS_SSAA"))
++            {
++                switch (std::atoi(ssaa))
++                {
++                case 1: samples = ParallelGS::SuperSampling::X1; break;
++                case 2: samples = ParallelGS::SuperSampling::X2; break;
++                case 8: samples = ParallelGS::SuperSampling::X8; break;
++                case 16: samples = ParallelGS::SuperSampling::X16; break;
++                case 4: samples = ParallelGS::SuperSampling::X4; break;
++                default: samples = ParallelGS::SuperSampling::X1; break;
++                }
++            }
++            if (const char *progressiveSetting = std::getenv("PS2X_GS_PROGRESSIVE"))
++                progressive = std::atoi(progressiveSetting) != 0;
++            if (const char *phase = std::getenv("PS2X_GS_FIELD_PHASE"))
++                flipPhase = std::string(phase) == "flip";
++            if (int(samples) < int(ParallelGS::SuperSampling::X4))
++                progressive = false; // high-resolution scanout needs 4 samples or more
++        }
++    };
++
++    class ParallelBackend final : public GSRasterBackend, private ParallelGS::SignalInterface
++    {
++        // All GSInterface/Device entry points are serialized, including presentation.
++        mutable std::recursive_mutex mutex;
++        VulkanDevice vulkan; // MKSM: instead of GSGLInterop
++        PictureSettings settings; // MKSM
++        mutable ParallelGS::GSInterface gs;
++        // MKSM: the pictures scanned out at the last vertical blanks, in host-visible memory (VBlank, Present).
++        struct Picture
++        {
++            Vulkan::BufferHandle buffer;
++            VkDeviceSize capacity = 0;
++            Vulkan::Fence fence;
++            uint32_t width = 0, height = 0;
++            uint64_t sequence = 0;
++            bool deinterlaced = false;
++            uint32_t parity = 0;
++            uint64_t displayBuffer = 0; // the display buffer (DISPFB) it showed
++        };
++        std::array<Picture, 3> pictures;
++        int latest = -1, next = 0;
++        uint64_t scanouts = 0;
++        GSRegisters &priv;
++        struct Lock
++        {
++            std::lock_guard<std::recursive_mutex> guard;
++            explicit Lock(std::recursive_mutex &m) : guard(m) { Util::register_thread_index(0); }
++        };
++        uint64_t bitblt = 0, trxreg = 0;
++        GSTransferSnapshot transfer;
++        size_t transferBytes = 0, uploadedBytes = 0;
++        std::array<uint8_t, 8> uploadTail{};
++        size_t uploadTailSize = 0;
++        std::array<uint8_t, 16> fifoTail{};
++        size_t fifoOffset = 16;
++        mutable uint64_t readbacks = 0;
++
++        void observeRegister(uint8_t addr, uint64_t value)
++        {
++            if (addr == GS_REG_BITBLTBUF)
++                bitblt = value;
++            if (addr == GS_REG_TRXREG)
++                trxreg = value;
++            if (addr == GS_REG_TRXDIR)
++            {
++                transfer = {};
++                transfer.direction = value & 3;
++                transfer.totalPixels = uint32_t(trxreg & 0xfff) * uint32_t((trxreg >> 32) & 0xfff);
++                unsigned psm = unsigned(bitblt >> (transfer.direction == 1 ? 24 : 56)) & 63;
++                transferBytes = (size_t(transfer.totalPixels) * bitsPerPixel(psm) + 7) / 8;
++                transfer.localToHostPendingBytes = transfer.direction == 1 ? transferBytes : 0;
++                if (transfer.direction == 1 && transferBytes)
++                    ++readbacks;
++                transfer.copiedPixels = transfer.direction == 2 ? transfer.totalPixels : 0;
++                uploadedBytes = uploadTailSize = 0;
++                fifoOffset = fifoTail.size();
++            }
++
++            if (addr == GS_REG_HWREG)
++                observeImage(8);
++        }
++        void observeImage(size_t bytes)
++        {
++            if (transfer.direction != 0)
++                return;
++            uploadedBytes = std::min(transferBytes, uploadedBytes + bytes);
++            transfer.copiedPixels = std::min<size_t>(transfer.totalPixels, uploadedBytes * 8 / bitsPerPixel(unsigned(bitblt >> 56)));
++            auto width = uint32_t(trxreg & 0xfff);
++            if (width)
++            {
++                transfer.x = transfer.copiedPixels % width;
++                transfer.y = transfer.copiedPixels / width;
++            }
++        }
++
++        // Observe transfer boundaries only; the upstream decoder alone executes commands.
++        // Start from upstream's saved PATH state, including packets split across DMA calls.
++        void observeGIF(uint32_t path, const uint8_t *data, size_t size)
++        {
++            auto state = gs.get_gif_path(path);
++            for (size_t offset = 0; offset < size;)
++            {
++                if (state.loop == state.tag.NLOOP)
++                {
++                    std::memcpy(&state.tag, data + offset, 16);
++                    state.reg = state.loop = 0;
++                    offset += 16;
++                    continue;
++                }
++                unsigned nreg = state.tag.NREG ? state.tag.NREG : 16;
++                if (state.tag.FLG >= 2)
++                {
++                    size_t count = std::min<size_t>(state.tag.NLOOP - state.loop, (size - offset) / 16);
++                    observeImage(count * 16);
++                    state.loop += uint32_t(count);
++                    offset += count * 16;
++                }
++                else
++                {
++                    // Only packed A+D can address the transfer registers (>= 0x50).
++                    const uint64_t descriptors = word(reinterpret_cast<const uint8_t *>(&state.tag) + 8);
++                    if (state.tag.FLG == 0 && ((descriptors >> (state.reg * 4)) & 15) == 14)
++                        observeRegister(uint8_t(word(data + offset + 8) & 127), word(data + offset));
++                    unsigned count = state.tag.FLG == 0 ? 1 : 2;
++                    while (count-- && state.loop < state.tag.NLOOP)
++                        if (++state.reg == nreg)
++                        {
++                            state.reg = 0;
++                            ++state.loop;
++                        }
++                    offset += 16;
++                }
++            }
++        }
++
++        bool on_signal(uint64_t value) override
++        {
++            auto mask = uint32_t(value >> 32);
++            auto id = (uint32_t(priv.siglblid) & ~mask) | (uint32_t(value) & mask);
++            priv.siglblid = (priv.siglblid & 0xffffffff00000000ull) | id;
++            priv.csr.fetch_or(1);
++            return false;
++        }
++
++        bool on_finish(uint64_t) override
++        {
++            // MKSM: no flush() and wait_idle() here (upstream): returning true asks for a flush, and the readbacks wait
++            // for the GPU themselves. The drain ran on the game thread at every FINISH.
++            priv.csr.fetch_or(2);
++            return true;
++        }
++
++        bool on_label(uint64_t value) override
++        {
++            auto mask = uint32_t(value >> 32);
++            auto id = (uint32_t(priv.siglblid >> 32) & ~mask) | (uint32_t(value) & mask);
++            priv.siglblid = (uint64_t(id) << 32) | uint32_t(priv.siglblid);
++            return false;
++        }
++
++    public:
++        explicit ParallelBackend(GSRegisters &registers) : priv(registers)
++        {
++            installCrashTrace(); // MKSM: diagnostic (MKSM_CRASH_TRACE)
++            ParallelGS::GSOptions options{}; // MKSM: super-sampling (PictureSettings)
++            options.super_sampling = settings.samples;
++            if (!gs.init(&vulkan.device, options))
++                throw std::runtime_error("parallel-gs: GS initialization failed; check Vulkan feature diagnostics above");
++            // MKSM: no sampler feedback (texture analysis, new in paraLLEl-GS 3a66c19): AMD's Vulkan driver
++            // (amdvlk64.dll 32.0.21045.20006) crashed compiling its compute pipeline (a null read in
++            // vkCreateComputePipelines, from GSRenderer::dispatch_texture_analysis), one to two minutes in.
++            ParallelGS::DebugMode debug{};
++            debug.disable_sampler_feedback = true;
++            gs.set_debug_mode(debug);
++            gs.set_signal_interface(this);
++        }
++
++        ~ParallelBackend() override
++        {
++            Lock lock(mutex);
++            gs.flush();
++            vulkan.device.wait_idle();
++        }
++
++        bool UsesRawCommands() const override
++        {
++            return true;
++        }
++
++        uint64_t GetReadbackCount() const override
++        {
++            Lock lock(mutex);
++            return readbacks;
++        }
++
++        void Initialize(uint8_t *vram, uint32_t size) override
++        {
++            Lock lock(mutex);
++            if (!vram || size < VramSize)
++                throw std::invalid_argument("parallel-gs requires 4 MiB initial VRAM");
++            std::memcpy(gs.map_vram_write(0, VramSize), vram, VramSize);
++            gs.end_vram_write(0, VramSize);
++        }
++
++        void Reset() override
++        {
++            Lock lock(mutex);
++            gs.flush();
++            vulkan.device.wait_idle();
++            gs.reset_context_state();
++            bitblt = trxreg = transferBytes = uploadedBytes = uploadTailSize = 0;
++            fifoOffset = 16;
++            transfer = {};
++        }
++
++        void ProcessGIF(uint32_t path, const uint8_t *data, uint32_t size) override
++        {
++            Lock lock(mutex);
++            if (path < 1 || path > 3 || size % 16)
++                throw std::invalid_argument("parallel-gs: invalid GIF path or size");
++            if (!data || !size)
++                return;
++            observeGIF(path, data, size);
++            gs.gif_transfer(path, data, size);
++        }
++
++        void WriteRegisterRaw(uint8_t addr, uint64_t value) override
++        {
++            Lock lock(mutex);
++            if (addr >= 128)
++                return; // Reserved addresses never index upstream's 128-entry table.
++            observeRegister(addr, value);
++            // Compatibility aliases used by native stubs, not actual GIF registers.
++            switch (addr)
++            {
++            case 0x59:
++                priv.dispfb1 = value; // MKSM: upstream counts flips here (writeDisplayFramebuffer); see ps2_frame_counter.h
++                return;
++            case 0x5a:
++                priv.display1 = value;
++                return;
++            case 0x5b:
++                priv.dispfb2 = value; // MKSM: as above
++                return;
++            case 0x5c:
++                priv.display2 = value;
++                return;
++            case 0x5f:
++                priv.bgcolor = value;
++                return;
++            }
++            gs.write_register(static_cast<ParallelGS::RegisterAddr>(addr), value);
++        }
++
++        void Submit(const GSPrimitiveBatch &) override
++        {
++            throw std::logic_error("parallel-gs received a CPU primitive batch");
++        }
++
++        void LoadClut(const GSTex0Reg &, const GSTexClutReg &) override
++        {
++        }
++
++        void BeginTransfer(const GSTransferCommand &) override
++        {
++            throw std::logic_error("parallel-gs requires raw transfer registers");
++        }
++
++        void UploadImage(const uint8_t *data, uint32_t size) override
++        {
++            Lock lock(mutex);
++            if (!data || transfer.direction != 0)
++                return;
++            size = uint32_t(std::min<size_t>(size, transferBytes - uploadedBytes));
++            observeImage(size);
++            while (size)
++            {
++                auto n = std::min<size_t>(size, 8 - uploadTailSize);
++                std::memcpy(uploadTail.data() + uploadTailSize, data, n);
++                uploadTailSize += n;
++                data += n;
++                size -= uint32_t(n);
++                if (uploadTailSize == 8 || uploadedBytes == transferBytes && size == 0)
++                {
++                    std::fill(uploadTail.begin() + uploadTailSize, uploadTail.end(), 0);
++                    gs.write_register(ParallelGS::RegisterAddr::HWREG, word(uploadTail.data()));
++                    uploadTailSize = 0;
++                }
++            }
++        }
++
++        void Flush() override
++        {
++            Lock lock(mutex);
++            gs.flush();
++        }
++
++        void TextureFlush() override
++        {
++            WriteRegisterRaw(GS_REG_TEXFLUSH, 0);
++        }
++
++        void Sync(GSSyncReason reason) override
++        {
++            Lock lock(mutex);
++            if (reason == GSSyncReason::Reset) // MKSM: not on FINISH (see on_finish)
++            {
++                gs.flush();
++                vulkan.device.wait_idle();
++            }
++            // map_vram_read and the upstream FIFO synchronize their own readbacks.
++        }
++
++        // MKSM: one vsync() per field on the EE thread (GS::vblank), its picture copied to one of three host-visible
++        // buffers. paraLLEl-GS's deinterlacer needs every field in order; upstream called vsync() from the host loop,
++        // which skips and repeats fields.
++        void VBlank(const GSPresentationRequest &request) override
++        {
++            Lock lock(mutex);
++            gs.flush();
++            auto &p = gs.get_priv_register_state();
++            p.qwords_lo[0] = request.pmode;
++            p.qwords_lo[2] = request.smode1;
++            p.qwords_lo[4] = request.smode2;
++            p.qwords_lo[12] = request.syncv;
++            p.qwords_lo[14] = request.dispfb1;
++            p.qwords_lo[16] = request.display1;
++            p.qwords_lo[18] = request.dispfb2;
++            p.qwords_lo[20] = request.display2;
++            p.qwords_lo[28] = request.bgcolor;
++            ParallelGS::VSyncInfo info{};
++            info.phase = request.field ^ (settings.flipPhase ? 1u : 0u);
++            // MKSM: the library's own layout, which every scanout path ends in (upstream asked for TRANSFER_SRC, which
++            // the interlaced and high-resolution paths leave in READ_ONLY_OPTIMAL); the copy below moves it on.
++            info.dst_layout = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
++            info.dst_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
++            info.dst_access = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
++            // MKSM: off: libgraph's PAL origin (DX 656) against paraLLEl-GS's (169 x 4) moved the picture 5 pixels left.
++            info.crtc_offsets = false;
++            // MKSM: the progressive, super-sampled picture (PictureSettings); otherwise the raw fields of interlaced
++            // frame mode for the frontend's weave, and paraLLEl-GS's own deinterlacer for the other interlaced modes.
++            const bool fieldRendered = (request.smode2 & 3u) == 3u;
++            const bool progressive = settings.progressive && request.deinterlace;
++            info.force_progressive = progressive;
++            info.high_resolution_scanout = progressive;
++            info.anti_blur = progressive;
++            info.skip_deinterlace = !progressive && (fieldRendered || !request.deinterlace);
++            const auto scanout = gs.vsync(info);
++            if (!scanout.image)
++            {
++                latest = -1; // nothing on screen (display off, no read circuit)
++                return;
++            }
++            if (scanout.image->get_format() != VK_FORMAT_R8G8B8A8_UNORM)
++                throw std::runtime_error("parallel-gs: unexpected scanout format");
++
++            Picture &slot = pictures[next];
++            if (slot.fence)
++            {
++                slot.fence->wait(); // three fields ago: done long since
++                slot.fence.reset();
++            }
++            slot.width = scanout.image->get_width();
++            slot.height = scanout.image->get_height();
++            const VkDeviceSize bytes = VkDeviceSize(slot.width) * slot.height * 4u;
++            if (!slot.buffer || slot.capacity < bytes)
++            {
++                Vulkan::BufferCreateInfo buffer{};
++                buffer.domain = Vulkan::BufferDomain::CachedHost;
++                buffer.size = bytes;
++                buffer.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
++                slot.buffer = vulkan.device.create_buffer(buffer);
++                slot.capacity = slot.buffer ? bytes : 0;
++                if (!slot.buffer)
++                    throw std::runtime_error("parallel-gs: readback buffer allocation failed");
++            }
++            auto cmd = vulkan.device.request_command_buffer();
++            cmd->image_barrier(*scanout.image, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++                               VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0, // whatever pass wrote it last
++                               VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
++            cmd->copy_image_to_buffer(*slot.buffer, *scanout.image, 0, {0, 0, 0}, {slot.width, slot.height, 1}, 0, 0,
++                                      {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1});
++            cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
++                         VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
++            vulkan.device.submit(cmd, &slot.fence);
++            slot.sequence = ++scanouts;
++            slot.deinterlaced = !info.skip_deinterlace;
++            slot.parity = info.phase;
++            slot.displayBuffer = (request.pmode & 2u) != 0u ? request.dispfb2 : request.dispfb1;
++            latest = next;
++            next = (next + 1) % int(pictures.size());
++        }
++
++        // MKSM: the host thread's copy of the last picture scanned out (VBlank), presented like the CPU backend's.
++        PresentationFrame Present(const GSPresentationRequest &) override
++        {
++            Vulkan::Fence fence;
++            Vulkan::Fence previousFence;
++            int index = -1;
++            int previousIndex = -1;
++            uint64_t sequence = 0;
++            {
++                Lock lock(mutex);
++                if (latest < 0)
++                    return {};
++                index = latest;
++                fence = pictures[index].fence;
++                sequence = pictures[index].sequence;
++                // MKSM: the field just before it, for the frontend's weave
++                const int before = (index + int(pictures.size()) - 1) % int(pictures.size());
++                if (pictures[before].sequence + 1u == sequence && pictures[before].buffer &&
++                    pictures[before].width == pictures[index].width && pictures[before].height == pictures[index].height)
++                {
++                    previousIndex = before;
++                    previousFence = pictures[before].fence;
++                }
++            }
++            if (previousFence)
++                previousFence->wait();
++            if (fence)
++                fence->wait(); // without the lock: the game thread goes on meanwhile
++            PresentationFrame frame;
++            {
++                Lock lock(mutex);
++                fence.reset();
++                previousFence.reset();
++                const Picture &slot = pictures[index];
++                if (slot.sequence != sequence || !slot.buffer) // reused meanwhile (the host fell three fields behind)
++                    return {};
++                const auto *mapped = static_cast<const uint8_t *>(
++                    vulkan.device.map_host_buffer(*slot.buffer, Vulkan::MEMORY_ACCESS_READ_BIT));
++                if (!mapped)
++                    return {};
++                frame.pixels.assign(mapped, mapped + size_t(slot.width) * slot.height * 4u);
++                vulkan.device.unmap_host_buffer(*slot.buffer, Vulkan::MEMORY_ACCESS_READ_BIT);
++                frame.width = slot.width;
++                frame.height = slot.height;
++                frame.deinterlaced = slot.deinterlaced;
++                frame.fieldSequence = slot.sequence;
++                frame.fieldParity = slot.parity;
++                frame.fieldBuffer = slot.displayBuffer;
++                if (previousIndex >= 0 && pictures[previousIndex].sequence + 1u == sequence)
++                {
++                    const Picture &before = pictures[previousIndex];
++                    const auto *previous = static_cast<const uint8_t *>(
++                        vulkan.device.map_host_buffer(*before.buffer, Vulkan::MEMORY_ACCESS_READ_BIT));
++                    if (previous)
++                    {
++                        frame.previousPixels.assign(previous, previous + size_t(before.width) * before.height * 4u);
++                        vulkan.device.unmap_host_buffer(*before.buffer, Vulkan::MEMORY_ACCESS_READ_BIT);
++                        frame.previousParity = before.parity;
++                        frame.previousBuffer = before.displayBuffer;
++                    }
++                }
++            }
++            for (size_t i = 3; i < frame.previousPixels.size(); i += 4)
++                frame.previousPixels[i] = 0xFF;
++            for (size_t i = 3; i < frame.pixels.size(); i += 4)
++                frame.pixels[i] = 0xFF; // opaque, as the CPU backend presents
++            return frame;
++        }
++
++        uint32_t ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const override
++        {
++            Lock lock(mutex);
++            auto *mapped = const_cast<uint8_t *>(static_cast<const uint8_t *>(gs.map_vram_read(0, VramSize)));
++            ++readbacks;
++            return pixelAccess(psm).read(mapped, base, bw, x, y);
++        }
++
++        void WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value) override
++        {
++            Lock lock(mutex);
++            gs.map_vram_read(0, VramSize); // Preserve untouched pixels and packed-format lanes.
++            auto *mapped = static_cast<uint8_t *>(gs.map_vram_write(0, VramSize));
++            ++readbacks;
++            pixelAccess(psm).write(mapped, base, bw, x, y, value);
++            gs.end_vram_write(0, VramSize);
++        }
++
++        void SnapshotVram(std::vector<uint8_t> &out) const override
++        {
++            Lock lock(mutex);
++            auto *mapped = static_cast<const uint8_t *>(gs.map_vram_read(0, VramSize));
++            ++readbacks;
++            out.assign(mapped, mapped + VramSize);
++        }
++
++        bool ClearFramebuffer(const GSContext &ctx, uint32_t rgba) override
++        {
++            Lock lock(mutex);
++            if (!ctx.frame.fbw || (ctx.frame.psm != GS_PSM_CT32 && ctx.frame.psm != GS_PSM_CT24 &&
++                                   ctx.frame.psm != GS_PSM_CT16 && ctx.frame.psm != GS_PSM_CT16S))
++                return false;
++
++            gs.map_vram_read(0, VramSize); // FBMSK and untouched VRAM require current contents.
++            auto *mapped = static_cast<uint8_t *>(gs.map_vram_write(0, VramSize));
++            ++readbacks;
++            auto access = pixelAccess(ctx.frame.psm);
++
++            if (ctx.fba & 1)
++                rgba |= 0x80000000u;
++            if (bitsPerPixel(ctx.frame.psm) == 16)
++                rgba = ((rgba >> 3) & 31) | ((rgba >> 6) & 0x3e0) | ((rgba >> 9) & 0x7c00) | ((rgba >> 16) & 0x8000);
++
++            for (uint32_t y = ctx.scissor.y0; y <= ctx.scissor.y1; ++y)
++                for (uint32_t x = ctx.scissor.x0; x <= ctx.scissor.x1; ++x)
++                {
++                    auto old = access.read(mapped, ctx.frame.fbp * 32, ctx.frame.fbw, x, y);
++                    access.write(mapped, ctx.frame.fbp * 32, ctx.frame.fbw, x, y,
++                                 (rgba & ~ctx.frame.fbmsk) | (old & ctx.frame.fbmsk));
++                }
++            gs.end_vram_write(0, VramSize);
++            return true;
++        }
++
++        uint32_t ConsumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes) override
++        {
++            Lock lock(mutex);
++            if (!dst)
++                return 0;
++            auto count = uint32_t(std::min<size_t>(maxBytes, transfer.localToHostPendingBytes));
++            for (uint32_t i = 0; i < count; ++i)
++            {
++                if (fifoOffset == 16)
++                {
++                    gs.read_transfer_fifo(fifoTail.data(), 1);
++                    fifoOffset = 0;
++                }
++                dst[i] = fifoTail[fifoOffset++];
++            }
++            transfer.localToHostPendingBytes -= count;
++            return count;
++        }
++
++        GSTransferSnapshot GetTransferSnapshot() const override
++        {
++            Lock lock(mutex);
++            return transfer;
++        }
++
++        void ReadRegisterState(GSDebugSnapshot &s) const override
++        {
++            Lock lock(mutex);
++            const auto &r = gs.get_register_state();
++            for (unsigned i = 0; i < 2; ++i)
++            {
++                auto &c = s.ctx[i];
++                const auto &v = r.ctx[i];
++                auto f = v.frame.bits, t = v.tex0.bits, sc = v.scissor.bits, z = v.zbuf.bits;
++                c.frame = {uint32_t(f & 511), uint32_t((f >> 16) & 63), uint8_t((f >> 24) & 63), uint32_t(f >> 32)};
++                c.zbuf = {uint32_t(z & 511), uint8_t(((z >> 24) & 15) | 0x30), bool((z >> 32) & 1)};
++                c.scissor = {uint16_t(sc & 2047), uint16_t((sc >> 16) & 2047), uint16_t((sc >> 32) & 2047), uint16_t((sc >> 48) & 2047)};
++                c.xyoffset = {uint16_t(v.xyoffset.bits), uint16_t(v.xyoffset.bits >> 32)};
++                c.tex0 = {uint32_t(t & 16383), uint8_t((t >> 14) & 63), uint8_t((t >> 20) & 63), uint8_t((t >> 26) & 15),
++                          uint8_t((t >> 30) & 15), uint8_t((t >> 34) & 1), uint8_t((t >> 35) & 3), uint32_t((t >> 37) & 16383),
++                          uint8_t((t >> 51) & 15), uint8_t((t >> 55) & 1), uint8_t((t >> 56) & 31), uint8_t(t >> 61)};
++                c.tex1 = v.tex1.bits;
++                c.miptbp1 = v.miptbl_1_3.bits;
++                c.miptbp2 = v.miptbl_4_6.bits;
++                c.clamp = v.clamp.bits;
++                c.alpha = v.alpha.bits;
++                c.test = v.test.bits;
++                c.fba = v.fba.bits;
++            }
++
++            auto p = r.prim.bits;
++            s.prim = {GSPrimType(p & 7), bool(p & 8), bool(p & 16), bool(p & 32), bool(p & 64), bool(p & 128), bool(p & 256), bool(p & 512), bool(p & 1024)};
++            auto b = r.bitbltbuf.bits, t = r.trxpos.bits, a = r.texa.bits, c = r.texclut.bits;
++            s.texa = {uint8_t(a), bool(a & 0x8000), uint8_t(a >> 32)};
++            s.texclut = {uint8_t(c & 63), uint8_t((c >> 6) & 63), uint16_t((c >> 12) & 1023)};
++            s.scanmsk = r.scanmsk.bits;
++            s.dimx = r.dimx.bits;
++            s.dthe = r.dthe.bits;
++            s.colclamp = r.colclamp.bits;
++            s.bitbltbuf = {uint32_t(b & 16383), uint8_t((b >> 16) & 63), uint8_t((b >> 24) & 63),
++                           uint32_t((b >> 32) & 16383), uint8_t((b >> 48) & 63), uint8_t((b >> 56) & 63)};
++
++            s.trxpos = {uint16_t(t & 2047), uint16_t((t >> 16) & 2047), uint16_t((t >> 32) & 2047), uint16_t((t >> 48) & 2047), uint8_t((t >> 59) & 3)};
++            s.trxreg = {uint16_t(r.trxreg.bits & 4095), uint16_t((r.trxreg.bits >> 32) & 4095)};
++            s.trxdir = uint32_t(r.trxdir.bits & 3);
++        }
++    };
++}
++
++std::unique_ptr<GSRasterBackend> CreateParallelGSBackend(GSRegisters &registers)
++{
++    // MKSM: upstream's RUNTIME_WARNING (ps2_log.h on its branch) is not in the pinned tree.
++    std::cerr << "GS Parallel backend is experimental and may not be fully compatible with all games." << std::endl;
++    return std::make_unique<ParallelBackend>(registers);
++}
+diff --git a/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp b/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+index c0507c7..04100bd 100644
+--- a/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
++++ b/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+@@ -57,7 +57,7 @@ void GifArbiter::drain()
+         auto &pkt = m_queue[i];
+         if (!pkt.data.empty())
+         {
+-            m_processFn(pkt.data.data(), static_cast<uint32_t>(pkt.data.size()));
++            m_processFn(pkt.pathId, pkt.data.data(), static_cast<uint32_t>(pkt.data.size()));
+         }
+     }
+     m_queue.clear();
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 4f85e13..c1d9ad6 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -5,6 +5,9 @@
+ #include "game_overrides.h"
+ #include "ps2_runtime_macros.h"
+ #include "runtime/gs/gs_frontend.h"
++#ifdef PS2X_GS_PARALLEL
++#include "runtime/gs/gs_parallel_backend.h"
++#endif
+ #include "runtime/ee_scheduler.h"
+ #include "runtime/ps2_dma_address.h"
+ #include "ThreadNaming.h"
+@@ -25,6 +28,7 @@
+ #include <cstring>
+ #include <limits>
+ #include <chrono>
++#include <cstdlib>
+ #include <atomic>
+ #include <thread>
+ #include <unordered_map>
+@@ -436,7 +440,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
+             outHeight = (s_lastHeight != 0u) ? s_lastHeight : DEFAULT_DISPLAY_HEIGHT;
+             return;
+         }
+-        Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLACK);
++        Image blank = GenImageColor(tex.width, tex.height, BLACK); // MKSM: the texture's size (it grows, below)
+         UpdateTexture(tex, blank.data);
+         UnloadImage(blank);
+         outWidth = FB_WIDTH;
+@@ -473,13 +477,29 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
+     s_lastWidth = width;
+     s_lastHeight = height;
+ 
++    // MKSM: a picture larger than the texture (a GPU backend's super-sampled, progressive scanout is twice as large) gets a
++    // texture of its size, with the same filter; smaller pictures keep using its top-left corner.
++    constexpr uint32_t kMaxTextureSide = 4096u;
++    if ((width > static_cast<uint32_t>(tex.width) || height > static_cast<uint32_t>(tex.height)) &&
++        width <= kMaxTextureSide && height <= kMaxTextureSide)
++    {
++        const int newWidth = std::max<int>(tex.width, static_cast<int>(width));
++        const int newHeight = std::max<int>(tex.height, static_cast<int>(height));
++        UnloadTexture(tex);
++        Image grown = GenImageColor(newWidth, newHeight, BLANK);
++        tex = LoadTextureFromImage(grown);
++        UnloadImage(grown);
++        SetTextureFilter(tex, ps2HostSmoothScaling() ? TEXTURE_FILTER_BILINEAR : TEXTURE_FILTER_POINT);
++    }
++    s_uploadBuffer.resize(static_cast<size_t>(tex.width) * static_cast<size_t>(tex.height) * 4u);
++
+     std::fill(s_uploadBuffer.begin(), s_uploadBuffer.end(), 0u);
+     if (!s_scratch.empty() && width != 0u && height != 0u)
+     {
+-        const uint32_t copyWidth = std::min<uint32_t>(width, FB_WIDTH);
+-        const uint32_t copyHeight = std::min<uint32_t>(height, FB_HEIGHT);
++        const uint32_t copyWidth = std::min<uint32_t>(width, static_cast<uint32_t>(tex.width));
++        const uint32_t copyHeight = std::min<uint32_t>(height, static_cast<uint32_t>(tex.height));
+         const size_t srcRowBytes = static_cast<size_t>(width) * 4u;
+-        const size_t dstRowBytes = static_cast<size_t>(FB_WIDTH) * 4u;
++        const size_t dstRowBytes = static_cast<size_t>(tex.width) * 4u;
+         const size_t copyRowBytes = static_cast<size_t>(copyWidth) * 4u;
+         for (uint32_t y = 0; y < copyHeight; ++y)
+         {
+@@ -690,8 +710,10 @@ bool PS2Runtime::syncCoreSubsystems()
+     }
+ 
+     m_gs.init(gsVram, static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &m_memory.gs());
+-    m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
+-                                    { m_gs.processGIFPacket(data, size); });
++    // MKSM: the GIF path travels with the packet (upstream's feature/performance-patch-1): the raw GPU backend keeps
++    // one GIFtag state per path.
++    m_gifArbiter.setProcessPacketFn([this](GifPathId path, const uint8_t *data, uint32_t size)
++                                    { m_gs.processGIFPacket(data, size, static_cast<uint32_t>(path)); });
+     m_memory.setGifArbiter(&m_gifArbiter);
+     m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t top, uint32_t itop)
+                                  {
+@@ -761,6 +783,27 @@ bool PS2Runtime::initialize(const char *title)
+         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
+         InitAudioDevice();
+         m_audioBackend.setAudioReady(IsAudioDeviceReady());
++#endif
++#ifdef PS2X_GS_PARALLEL
++        // MKSM: upstream's GPU GS backend (paraLLEl-GS, branch feature/performance-patch-1). PS2X_GS_BACKEND=cpu keeps
++        // the CPU backend, and so does a failure to create it (no Vulkan device), which is reported.
++        {
++            const char *choice = std::getenv("PS2X_GS_BACKEND");
++            const bool cpu = choice && (std::string(choice) == "cpu" || std::string(choice) == "CPU");
++            if (!cpu)
++            {
++                try
++                {
++                    m_gs.setRasterBackend(CreateParallelGSBackend(m_memory.gs()));
++                    m_memory.setGifPathsStateful(true);
++                    std::cerr << "[gs] GPU backend (paraLLEl-GS)" << std::endl;
++                }
++                catch (const std::exception &e)
++                {
++                    std::cerr << "[gs] GPU backend unavailable, the CPU backend stays: " << e.what() << std::endl;
++                }
++            }
++        }
+ #endif
+         SetTargetFPS(60);
+         if (m_debugUiInitCallback)
+diff --git a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+index f872edd..49b222f 100644
+--- a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
++++ b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+@@ -313,6 +313,17 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+             }
+ 
+             const uint32_t chunkQw = std::min<uint32_t>(m_vif1PendingPath2ImageQwc, availableQw);
++            if (m_gifPathsStateful) // MKSM: the GS is still in the image's IMAGE packet (setGifPathsStateful)
++            {
++                submitGifPacket(GifPathId::Path2, data + pos, chunkQw * 16u, true, m_vif1PendingPath2DirectHl);
++                pos += chunkQw * 16u;
++                m_vif1PendingPath2ImageQwc -= chunkQw;
++                if (m_vif1PendingPath2ImageQwc == 0u)
++                {
++                    m_vif1PendingPath2DirectHl = false;
++                }
++                continue;
++            }
+             std::vector<uint8_t> imagePacket(16u + static_cast<size_t>(chunkQw) * 16u, 0u);
+             const uint64_t imageTag =
+                 static_cast<uint64_t>(chunkQw & 0x7FFFu) |
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index f19e281..c000477 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -922,7 +922,7 @@ void VU1Interpreter::finishXgkick()
+     if (m_activeMemory)
+         m_activeMemory->submitGifPacket(GifPathId::Path1, m_xgkick.packet.data(), m_xgkick.totalBytes);
+     else if (m_activeGs)
+-        m_activeGs->processGIFPacket(m_xgkick.packet.data(), m_xgkick.totalBytes);
++        m_activeGs->processGIFPacket(m_xgkick.packet.data(), m_xgkick.totalBytes, 1u); // MKSM: PATH1
+     m_xgkick.active = false;
+ }
+ 
+diff --git a/ps2xTest/src/ps2_gs_tests.cpp b/ps2xTest/src/ps2_gs_tests.cpp
+index 3d9241f..3ff5b2c 100644
+--- a/ps2xTest/src/ps2_gs_tests.cpp
++++ b/ps2xTest/src/ps2_gs_tests.cpp
+@@ -19,9 +19,90 @@
+ #include <cstring>
+ #include <thread>
+ #include <vector>
++#include <memory>
+ 
+ using namespace ps2_syscalls;
+ 
++namespace
++{
++    // MKSM: a backend that takes raw GS commands, like upstream's paraLLEl-GS backend (feature/performance-patch-1),
++    // recording what the frontend hands it (upstream's ps2xTest/gs_cache/gs_raw_routing_tests.cpp).
++    // MKSM: a backend that hands over scanned fields with their numbers (a GPU backend's raw fields).
++    struct FieldBackend final : GSRasterBackend
++    {
++        std::vector<PresentationFrame> frames;
++        size_t next = 0;
++        void Initialize(uint8_t *, uint32_t) override {}
++        void Reset() override {}
++        bool UsesRawCommands() const override { return true; }
++        void Submit(const GSPrimitiveBatch &) override {}
++        void LoadClut(const GSTex0Reg &, const GSTexClutReg &) override {}
++        void BeginTransfer(const GSTransferCommand &) override {}
++        void UploadImage(const uint8_t *, uint32_t) override {}
++        void Flush() override {}
++        void TextureFlush() override {}
++        void Sync(GSSyncReason) override {}
++        PresentationFrame Present(const GSPresentationRequest &) override
++        {
++            return next < frames.size() ? frames[next++] : PresentationFrame{};
++        }
++        bool ClearFramebuffer(const GSContext &, uint32_t) override { return true; }
++        uint32_t ConsumeLocalToHostBytes(uint8_t *, uint32_t) override { return 0u; }
++        uint32_t ReadVram(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) const override { return 0u; }
++        void WriteVram(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) override {}
++        void SnapshotVram(std::vector<uint8_t> &out) const override { out.assign(4u * 1024u * 1024u, 0u); }
++        GSTransferSnapshot GetTransferSnapshot() const override { return {}; }
++    };
++
++    struct RawCommandBackend final : GSRasterBackend
++    {
++        std::vector<GifArbiterPacket> packets;
++        std::vector<std::pair<uint8_t, uint64_t>> registers;
++        std::vector<uint8_t> image;
++        unsigned batches = 0, cluts = 0, transfers = 0, vblanks = 0;
++        uint32_t vblankField = 99u;
++        bool vblankDeinterlace = false;
++
++        void Initialize(uint8_t *, uint32_t) override {}
++        void Reset() override {}
++        bool UsesRawCommands() const override { return true; }
++        void ProcessGIF(uint32_t path, const uint8_t *data, uint32_t size) override
++        {
++            packets.push_back({GifPathId(path), false, false, {data, data + size}});
++        }
++        void WriteRegisterRaw(uint8_t addr, uint64_t value) override { registers.emplace_back(addr, value); }
++        void ReadRegisterState(GSDebugSnapshot &s) const override { s.ctx[0].frame.fbp = 37; }
++        void Submit(const GSPrimitiveBatch &) override { ++batches; }
++        void LoadClut(const GSTex0Reg &, const GSTexClutReg &) override { ++cluts; }
++        void BeginTransfer(const GSTransferCommand &) override { ++transfers; }
++        void UploadImage(const uint8_t *data, uint32_t size) override { image.insert(image.end(), data, data + size); }
++        void Flush() override {}
++        void TextureFlush() override {}
++        void Sync(GSSyncReason) override {}
++        PresentationFrame Present(const GSPresentationRequest &) override
++        {
++            PresentationFrame out; // a picture the backend has deinterlaced itself, as paraLLEl-GS does
++            out.width = 640u;
++            out.height = 256u;
++            out.pixels.assign(640u * 256u * 4u, 0x80u);
++            out.deinterlaced = true;
++            return out;
++        }
++        bool ClearFramebuffer(const GSContext &, uint32_t) override { return true; }
++        uint32_t ConsumeLocalToHostBytes(uint8_t *, uint32_t) override { return 0u; }
++        uint32_t ReadVram(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) const override { return 0u; }
++        void WriteVram(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) override {}
++        void SnapshotVram(std::vector<uint8_t> &out) const override { out.assign(4u * 1024u * 1024u, 0u); }
++        GSTransferSnapshot GetTransferSnapshot() const override { return {}; }
++        void VBlank(const GSPresentationRequest &request) override
++        {
++            ++vblanks;
++            vblankField = request.field;
++            vblankDeinterlace = request.deinterlace;
++        }
++    };
++}
++
+ namespace
+ {
+     std::atomic<uint32_t> g_gsSyncCallbackHits{0u};
+@@ -4522,6 +4603,147 @@ void register_ps2_gs_tests()
+                      "aspect 0 fills the window");
+         });
+ 
++        // MKSM: upstream's GPU backend (paraLLEl-GS, feature/performance-patch-1) takes the GS commands raw: the frontend
++        // hands it every GIF packet with its PATH and every register write, decodes nothing itself, and leaves SIGNAL,
++        // FINISH and LABEL to it. Its pictures come deinterlaced: the frontend's field weave leaves them alone.
++        tc.Run("a raw-command GS backend gets the GIF packets with their PATH and its pictures are not woven again", [](TestCase &t)
++        {
++            std::vector<uint8_t> vram(4u * 1024u * 1024u, 0u);
++            GSRegisters priv{};
++            GS gs;
++            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &priv);
++            auto backend = std::make_unique<RawCommandBackend>();
++            RawCommandBackend &raw = *backend;
++            gs.setRasterBackend(std::move(backend));
++
++            const uint64_t packed[] = {1ull | (1ull << 15) | (1ull << 60), 14ull, 0xff112233ull, GS_REG_RGBAQ};
++            const auto *packet = reinterpret_cast<const uint8_t *>(packed);
++            GifArbiter arbiter([&](GifPathId path, const uint8_t *data, uint32_t size)
++                               { gs.processGIFPacket(data, size, static_cast<uint32_t>(path)); });
++            for (const GifPathId path : {GifPathId::Path3, GifPathId::Path1, GifPathId::Path2})
++                arbiter.submit(path, packet, sizeof(packed));
++            arbiter.drain();
++            arbiter.drain();
++            t.Equals(raw.packets.size(), static_cast<size_t>(3u), "the arbiter should hand over each packet once");
++            bool pathsKept = raw.packets.size() == 3u;
++            for (size_t i = 0; pathsKept && i < raw.packets.size(); ++i)
++                pathsKept = static_cast<uint32_t>(raw.packets[i].pathId) == i + 1u && // drained by priority: PATH1, 2, 3
++                            raw.packets[i].data == std::vector<uint8_t>(packet, packet + sizeof(packed));
++            t.IsTrue(pathsKept, "each packet should keep its PATH and its bytes");
++            t.IsTrue(gs.processNativePackedGIFPacket(packet, sizeof(packed)), "a native packed packet should be taken");
++            t.IsTrue(raw.packets.size() == 4u && raw.packets.back().pathId == GifPathId::Path3, "and go to PATH3");
++            t.IsTrue(raw.registers.empty(), "the frontend should not decode the GIF data itself");
++            gs.processGIFPacket(packet, 16u, 1u);
++            gs.processGIFPacket(packet + 16, 16u, 1u);
++            t.IsTrue(raw.packets.size() == 6u && raw.packets[4].data.size() == 16u, "a packet split in two should arrive in two parts");
++
++            const uint8_t imageBytes[] = {1, 2, 3, 4, 5};
++            gs.uploadImageNative(1u, 2u, 3u, 0u, imageBytes, sizeof(imageBytes));
++            t.IsTrue(raw.registers == std::vector<std::pair<uint8_t, uint64_t>>{
++                                          {GS_REG_BITBLTBUF, 1u}, {GS_REG_TRXPOS, 2u}, {GS_REG_TRXREG, 3u}, {GS_REG_TRXDIR, 0u}},
++                     "a native upload should set up the transfer through the backend's registers");
++            t.IsTrue(raw.image == std::vector<uint8_t>(imageBytes, imageBytes + sizeof(imageBytes)), "and hand it the bytes");
++            raw.registers.clear();
++
++            gs.writeRegister(GS_REG_SIGNAL, ~0ull);
++            gs.writeRegister(GS_REG_FINISH, 0ull);
++            gs.writeRegister(GS_REG_LABEL, ~0ull);
++            t.IsTrue(priv.csr.load() == 0u && priv.siglblid == 0u, "SIGNAL, FINISH and LABEL belong to the backend");
++            gs.writeRegister(GS_REG_TEX0_1, 0ull);
++            gs.writeRegister(GS_REG_XYZ2, 0ull);
++            t.IsTrue(raw.batches == 0u && raw.cluts == 0u && raw.transfers == 0u, "no CPU drawing should happen");
++            t.Equals(raw.registers.size(), static_cast<size_t>(5u), "the register writes should go to the backend");
++            t.Equals(gs.getDebugSnapshot().ctx[0].frame.fbp, 37u, "the debug state should come from the backend");
++            t.Equals(gs.getContextFrame(0).fbp, 37u, "and so should the context frame");
++
++            priv.pmode = 1u;
++            priv.smode2 = 3u; // interlaced frame mode: the frontend's weave would rebuild the picture
++            priv.dispfb1 = 0u;
++            priv.csr.store(0x2000u); // CSR.FIELD
++            gs.vblank();
++            t.IsTrue(raw.vblanks == 1u && raw.vblankField == 1u && raw.vblankDeinterlace,
++                     "a vertical blank should reach the backend with the field and the weave setting");
++            gs.setFieldBlending(false);
++            gs.vblank();
++            t.IsTrue(raw.vblanks == 2u && !raw.vblankDeinterlace, "MKSM_DEINTERLACE=0 should reach the backend too");
++            gs.setFieldBlending(true);
++
++            gs.latchHostPresentationFrame();
++            std::vector<uint8_t> pixels;
++            uint32_t width = 0u, height = 0u;
++            t.IsTrue(gs.copyLatchedHostPresentationFrame(pixels, width, height), "the backend's picture should be latched");
++            t.IsTrue(width == 640u && height == 256u, "a deinterlaced picture keeps its size (the weave would double it)");
++            t.IsTrue(!pixels.empty() && pixels[0] == 0x80u, "and its pixels");
++        });
++
++        // MKSM: a field the GPU backend scanned out at its vertical blank is woven with the field just before it, even
++        // when the host's refresh (not locked to the game's fields) skipped that one, and the order follows the field's
++        // parity, learned from the combing and kept against single contrary pairs: the picture shook from time to time
++        // when the weave paired fields two apart or swapped the order of moving pictures.
++        tc.Run("a scanned field is woven with its neighbour, in the order of its parity", [](TestCase &t)
++        {
++            const auto field = [](std::initializer_list<uint8_t> rows)
++            {
++                std::vector<uint8_t> pixels;
++                for (const uint8_t value : rows)
++                    pixels.insert(pixels.end(), 4u, value); // one RGBA pixel per row
++                return pixels;
++            };
++
++            GsFieldBlend blend;
++            uint32_t height = 3u;
++            std::vector<uint8_t> first = field({0x10u, 0x30u, 0x50u});
++            blend.apply(first, 1u, height, 0u, 512u, 0);
++            height = 3u;
++            std::vector<uint8_t> second = field({0x20u, 0x40u, 0x60u});
++            blend.apply(second, 1u, height, 80u, 512u, 1);
++            t.IsTrue(!blend.currentOnTop, "a parity 1 field goes on the odd rows");
++            // a pair whose combing says the opposite once does not swap the order
++            height = 3u;
++            std::vector<uint8_t> contrary = field({0x00u, 0x20u, 0x40u});
++            blend.apply(contrary, 1u, height, 0u, 512u, 0);
++            t.IsTrue(blend.currentOnTop, "a single contrary pair keeps parity 0 on the top rows");
++
++            std::vector<uint8_t> vram(4u * 1024u * 1024u, 0u);
++            GSRegisters priv{};
++            GS gs;
++            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &priv);
++            auto backend = std::make_unique<FieldBackend>();
++            FieldBackend &fields = *backend;
++            const auto scanned = [&](uint64_t sequence, uint8_t value, uint64_t buffer, bool withPrevious, uint8_t before)
++            {
++                PresentationFrame frame;
++                frame.width = 1u;
++                frame.height = 3u;
++                frame.pixels = field({value, value, value});
++                frame.fieldSequence = sequence;
++                frame.fieldParity = static_cast<uint32_t>(sequence & 1u);
++                frame.fieldBuffer = buffer;
++                if (withPrevious)
++                {
++                    frame.previousPixels = field({before, before, before});
++                    frame.previousParity = static_cast<uint32_t>((sequence - 1u) & 1u);
++                    frame.previousBuffer = buffer == 0u ? 80u : 0u;
++                }
++                return frame;
++            };
++            fields.frames.push_back(scanned(1u, 0x10u, 0u, false, 0u));
++            fields.frames.push_back(scanned(3u, 0x30u, 0u, true, 0x20u)); // field 2 was skipped by the host
++            gs.setRasterBackend(std::move(backend));
++            priv.pmode = 1u;
++            priv.smode2 = 3u;
++            gs.latchHostPresentationFrame();
++            gs.latchHostPresentationFrame();
++            std::vector<uint8_t> pixels;
++            uint32_t width = 0u, height2 = 0u;
++            t.IsTrue(gs.copyLatchedHostPresentationFrame(pixels, width, height2), "the woven picture should be latched");
++            t.Equals(height2, 6u, "two fields woven at twice the height");
++            bool neighbours = !pixels.empty();
++            for (size_t i = 0; i < pixels.size(); i += 4u)
++                neighbours = neighbours && pixels[i] >= 0x20u; // only fields 2 and 3, never field 1
++            t.IsTrue(neighbours, "field 3 should be woven with field 2, the one the host skipped, not with field 1");
++        });
++
+         // MKSM: with no frame to present the window keeps the last picture for a moment, then shows black; upstream filled
+         // it with magenta, which flashed through the game's screen changes.
+         tc.Run("the host keeps the last picture for a moment when there is no frame, then shows black", [](TestCase &t)

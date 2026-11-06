@@ -1,0 +1,97 @@
+diff --git a/ps2xRuntime/include/runtime/ee_scheduler.h b/ps2xRuntime/include/runtime/ee_scheduler.h
+index e35b54c..ffccf8a 100644
+--- a/ps2xRuntime/include/runtime/ee_scheduler.h
++++ b/ps2xRuntime/include/runtime/ee_scheduler.h
+@@ -268,6 +268,13 @@ public:
+     static constexpr uint32_t kGuestDispatchCycles = 8u;
+     static constexpr uint64_t kDefaultTimeSliceCycles = 65536ull;
+ 
++    // MKSM: the vertical blank period of the video mode in SMODE1: PAL (CMOD 3) 50 Hz, anything else 60 Hz. Every
++    // game had NTSC's 60 Hz, so a PAL game's vblank-paced logic ran a fifth too fast.
++    static constexpr uint64_t vblankPeriodMicroseconds(uint64_t smode1)
++    {
++        return ((smode1 >> 13) & 3u) == 3u ? 20000u : 16667u;
++    }
++
+     explicit EeScheduler(PS2Runtime &runtime);
+     ~EeScheduler();
+ 
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index c72b4ae..5c4d8d5 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -32,7 +32,6 @@ namespace
+     constexpr uint32_t WEF_OR = 0x01u;
+     constexpr uint32_t WEF_CLEAR = 0x10u;
+     constexpr uint32_t WEF_CLEAR_ALL = 0x20u;
+-    constexpr auto kVBlankPeriod = std::chrono::microseconds(16667);
+     constexpr auto kVBlankDuration = std::chrono::microseconds(500);
+     constexpr uint64_t kAlarmTickMicroseconds = 64u;
+     constexpr uint32_t kDebugPublishDispatchInterval = 4096u;
+@@ -51,7 +50,6 @@ namespace
+         return std::chrono::seconds(wholeSeconds) + std::chrono::nanoseconds(remainingNanoseconds);
+     }
+ 
+-    constexpr uint64_t kVBlankPeriodCycles = microsecondsToEeCycles(16667u);
+     constexpr uint64_t kVBlankDurationCycles = microsecondsToEeCycles(500u);
+     constexpr uint64_t kAlarmTickCycles = microsecondsToEeCycles(kAlarmTickMicroseconds);
+ 
+@@ -147,8 +145,9 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
+     main.status = EeThreadStatus::Ready;
+     m_threads.emplace(main.id, std::move(main));
+     m_readyQueues[0].push_back(kMainThreadId);
+-    scheduleEvent(m_eeCycle + kVBlankPeriodCycles,
+-                  std::chrono::steady_clock::now() + kVBlankPeriod,
++    const uint64_t vblankUs = vblankPeriodMicroseconds(m_runtime.memory().gs().smode1); // MKSM: the video mode's rate
++    scheduleEvent(m_eeCycle + microsecondsToEeCycles(vblankUs),
++                  std::chrono::steady_clock::now() + std::chrono::microseconds(vblankUs),
+                   EeEvent{EeEventType::VBlankStart, 0, 0});
+     publishSnapshot();
+ }
+@@ -1879,8 +1878,10 @@ void EeScheduler::processDueDeadlines()
+                 scheduleEvent(scheduled.deadlineCycle + kVBlankDurationCycles,
+                               scheduled.hostDeadline + kVBlankDuration,
+                               EeEvent{EeEventType::VBlankEnd, 0, m_vsyncTick + 1u});
+-                scheduleEvent(scheduled.deadlineCycle + kVBlankPeriodCycles,
+-                              scheduled.hostDeadline + kVBlankPeriod,
++                // MKSM: the video mode's rate (vblankPeriodMicroseconds), PAL's 50 Hz included.
++                const uint64_t vblankUs = vblankPeriodMicroseconds(m_runtime.memory().gs().smode1);
++                scheduleEvent(scheduled.deadlineCycle + microsecondsToEeCycles(vblankUs),
++                              scheduled.hostDeadline + std::chrono::microseconds(vblankUs),
+                               EeEvent{EeEventType::VBlankStart, 0, 0});
+             }
+             processEvent(scheduled.event);
+diff --git a/ps2xTest/src/ps2_runtime_interrupt_tests.cpp b/ps2xTest/src/ps2_runtime_interrupt_tests.cpp
+index 095d66c..8ae9491 100644
+--- a/ps2xTest/src/ps2_runtime_interrupt_tests.cpp
++++ b/ps2xTest/src/ps2_runtime_interrupt_tests.cpp
+@@ -2,6 +2,7 @@
+ #include "ps2_runtime.h"
+ #include "ps2_syscalls.h"
+ #include "runtime/ee_scheduler.h"
++#include "Syscalls/System.h" // MKSM: configureGsCrt
+ 
+ #include <atomic>
+ #include <chrono>
+@@ -572,6 +573,21 @@ void register_ps2_runtime_interrupt_tests()
+                      "the VBlank should arrive within a couple of host vblank periods");
+         });
+ 
++        // MKSM: the vertical blank follows the video mode: PAL's 50 Hz once SMODE1 says PAL (SetGsCrt, sceGsResetGraph),
++        // NTSC's 60 Hz otherwise. Every game had 60 Hz, so Shaolin Monks (PAL only) ran a fifth too fast at full speed.
++        tc.Run("the vertical blank comes at the video mode's rate", [](TestCase &t)
++        {
++            t.Equals(EeScheduler::vblankPeriodMicroseconds(0u), 16667ull, "no mode set yet: 60 Hz, as before");
++            t.Equals(EeScheduler::vblankPeriodMicroseconds((2ull << 13) | (32ull << 3)), 16667ull, "NTSC: 60 Hz");
++            t.Equals(EeScheduler::vblankPeriodMicroseconds((3ull << 13) | (32ull << 3)), 20000ull, "PAL: 50 Hz");
++
++            TestEnv env;
++            t.IsTrue(env.runtime.memory().initialize(), "runtime memory initialize should succeed");
++            ps2_syscalls::configureGsCrt(env.runtime.memory().gs(), 1u, 3u, 1u);
++            t.Equals(EeScheduler::vblankPeriodMicroseconds(env.runtime.memory().gs().smode1), 20000ull,
++                     "SetGsCrt's PAL mode should give the PAL period");
++        });
++
+         tc.Run("VBlank IRQ invocation completes before the resumed base context", [](TestCase &t)
+         {
+             TestEnv env;
