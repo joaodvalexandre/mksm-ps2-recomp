@@ -19,7 +19,7 @@ scripts and the research log ([`docs/MKSM.md`](docs/MKSM.md)). No game files and
 | `tools/ee_disasm.py` | disassembler for the game ELF (capstone), with the names of the generated code and of the configuration |
 | `tools/missing_targets.py` | lists the direct calls and tail jumps whose target has no generated function (run after a build) |
 | `config/vu1_images.txt` | the game's VU1 program images for `tools/vu1gen`: ELF addresses, hashes, entry points (addresses only) |
-| `tools/vu1gen/` | ahead-of-time translator of the game's VU1 programs, in progress: generator, runtime interface, `vu1difftest` against upstream's interpreter. Not part of `scripts\build.cmd` yet; state, commands and measurements in its `PROGRESS.md` |
+| `tools/vu1gen/` | ahead-of-time translator of the game's VU1 programs: generator, runtime helpers, `vu1difftest` against upstream's interpreter. `scripts\build.cmd` translates the images from the ELF during the build (into the build folder, never committed) and links them into the runner; state, commands and measurements in its `PROGRESS.md` |
 
 ## Rules
 
@@ -62,6 +62,9 @@ scripts and the research log ([`docs/MKSM.md`](docs/MKSM.md)). No game files and
    The game's movies do not play yet and are skipped by default (`MKSM_SKIP_MOVIES=0` plays them). Diagnostics
    of the override module (`MKSM_TRACE_*`, `MKSM_PROFILE`, `MKSM_PAD_SCRIPT`) are described in `docs/MKSM.md`.
    The game runs in its own NTSC mode, 60 frames a second (`MKSM_VIDEO=pal` keeps the disc's PAL mode, 50 Hz).
+   The VU1 microcode runs translated to C++ (`src/vu1_runtime.cpp`, `tools/vu1gen`): `MKSM_VU1=0` runs upstream's
+   interpreter instead, `MKSM_VU1=verify` runs the interpreter and compares the translation with it on every launch
+   (`[mksm-vu1]` lines; `MKSM_VU1_DUMP=<folder>` saves the launches that differ for `vu1difftest`).
    The picture is drawn on the GPU (a Vulkan GPU is needed; `PS2X_GS_BACKEND=cpu` draws it on the CPU, much slower),
    one field per vertical blank, and the fields are woven into full height on the CPU as with the CPU backend.
    Options of the GPU backend: `PS2X_GS_SSAA=2|4|8|16` super-samples the drawing, and with 4 or more

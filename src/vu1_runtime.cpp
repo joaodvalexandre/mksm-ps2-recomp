@@ -20,6 +20,7 @@
 // an interpreted MSCNT then enters through execute() at the saved pc instead of resume(); the PATH1 packets of a
 // translated launch are submitted after it returned, under the caller's MXCSR (vu1nRun sets the VU rounding inside).
 #include "ps2_runtime.h"
+#include "runtime/ee_scheduler.h"
 #include "runtime/gs/ps2_gif_arbiter.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu1.h"
