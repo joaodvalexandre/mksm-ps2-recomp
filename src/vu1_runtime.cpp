@@ -14,8 +14,12 @@
 //                    VU1State, the 16 KB of data memory and the PATH1 packets. [mksm-vu1] lines report the
 //                    differences; MKSM_VU1_DUMP=<folder> writes the launches that differ as launch records
 //                    (launches_<hash>.bin and code_<hash>.bin, which tools/vu1gen's vu1difftest --captures replays).
+//   MKSM_VU1=verify:<n>  the translated programs run the game, as with 1; every n-th launch is also run by a second
+//                    interpreter on a copy of its input, and the two results are compared the same way. With n = 1
+//                    that is every launch (at the interpreter's speed); a larger n checks the launches the game
+//                    makes at full speed, which differ from the ones it makes when it runs slowly.
 //   MKSM_VU1_STATS=1 (diagnostic) with MKSM_VU1=1: a [mksm-vu1] line every 10 s with the launches translated,
-//                    interpreted and given back at an indirect jump. The verify mode always prints its counts.
+//                    interpreted and given back at an indirect jump. The verify modes always print their counts.
 //
 // Rules this follows (vu1-study/integration.md 1.2, 1.9): a translated launch is prepared as upstream's execute()
 // prepares one, an MSCNT included; after a translated launch the interpreter's private pipeline state is stale, so
@@ -84,6 +88,12 @@ namespace
         std::vector<uint8_t> inputData = std::vector<uint8_t>(PS2_VU1_DATA_SIZE);
         std::string dumpFolder;
         bool statsLines = false; // MKSM_VU1_STATS: the periodic line in the translated mode too
+
+        // verify:<n>
+        uint32_t sampleEvery = 0;                  // 0: not this mode
+        uint64_t sampleCounter = 0;
+        bool shadowRun = false;                    // the second interpreter is running: its packets are only copied
+        std::unique_ptr<VU1Interpreter> shadowVu1; // runs the sampled launches on a copy
         uint64_t dumped = 0;
 
         Vu1Stats stats;
@@ -200,7 +210,7 @@ namespace
 
     void report()
     {
-        if (g_vu1.mode != Vu1Mode::Verify && !g_vu1.statsLines)
+        if (g_vu1.mode != Vu1Mode::Verify && g_vu1.sampleEvery == 0u && !g_vu1.statsLines)
             return;
         const auto now = std::chrono::steady_clock::now();
         if (g_vu1.lastReport.time_since_epoch().count() == 0)
@@ -213,7 +223,14 @@ namespace
         g_vu1.lastReport = now;
         const Vu1Stats &s = g_vu1.stats;
         Vu1Stats &r = g_vu1.reported;
-        if (g_vu1.mode == Vu1Mode::Verify)
+        if (g_vu1.sampleEvery != 0u)
+            std::fprintf(stderr, "[mksm-vu1] last 10 s: %llu launches translated, %llu of them verified, %llu differ, %llu interpreted (total %llu verified, %llu differ)\n",
+                         static_cast<unsigned long long>(s.translated - r.translated),
+                         static_cast<unsigned long long>(s.verified - r.verified),
+                         static_cast<unsigned long long>(s.differences - r.differences),
+                         static_cast<unsigned long long>(s.interpreted - r.interpreted),
+                         static_cast<unsigned long long>(s.verified), static_cast<unsigned long long>(s.differences));
+        else if (g_vu1.mode == Vu1Mode::Verify)
             std::fprintf(stderr, "[mksm-vu1] last 10 s: %llu launches verified, %llu differ, %llu interpreted only (total %llu verified, %llu differ)\n",
                          static_cast<unsigned long long>(s.verified - r.verified),
                          static_cast<unsigned long long>(s.differences - r.differences),
@@ -245,6 +262,12 @@ namespace
         }
 
         R5900Context &context = guestContext(runtime);
+        const bool sampled = g_vu1.sampleEvery != 0u && ++g_vu1.sampleCounter % g_vu1.sampleEvery == 0u;
+        if (sampled)
+        {
+            std::memcpy(g_vu1.shadow.get(), &state, sizeof(VU1State));
+            std::memcpy(g_vu1.inputData.data(), memory.getVU1Data(), PS2_VU1_DATA_SIZE);
+        }
         const bool snapshot = program->needsSnapshot(entryPc);
         if (snapshot)
         {
@@ -276,6 +299,8 @@ namespace
         context.vu0_vpu_stat &= ~0x0600u; // the translated programs have no D or T bit
         g_vu1.interpreterStale = true;
         ++g_vu1.stats.translated;
+        if (sampled)
+            verifySampled(*program, mscal, entryPc, top, itop);
         report();
     }
 
@@ -388,6 +413,86 @@ namespace
         return {};
     }
 
+    // The first difference between the interpreter's result of a launch and the translation's: the compared fields
+    // of the state, the data memory, then the PATH1 packets. Empty when they are equal.
+    std::string describeDifference(const VU1State &oracle, const uint8_t *oracleData, const Vu1nHost &oraclePackets,
+                                   const VU1State &translated, const uint8_t *translatedData, const Vu1nHost &translatedPackets)
+    {
+        std::string difference = firstDifference(oracle, translated);
+        if (difference.empty())
+        {
+            for (uint32_t offset = 0; offset < PS2_VU1_DATA_SIZE; offset += 4u)
+            {
+                if (std::memcmp(oracleData + offset, translatedData + offset, 4u) != 0)
+                {
+                    uint32_t a, b;
+                    std::memcpy(&a, oracleData + offset, 4u);
+                    std::memcpy(&b, translatedData + offset, 4u);
+                    char text[96];
+                    std::snprintf(text, sizeof(text), "data memory at 0x%04X: interpreter %08X, translation %08X", offset, a, b);
+                    difference = text;
+                    break;
+                }
+            }
+        }
+        if (difference.empty())
+        {
+            const Vu1nHost &a = oraclePackets;
+            const Vu1nHost &b = translatedPackets;
+            if (a.kicks.size() != b.kicks.size())
+                difference = "packet count: interpreter " + std::to_string(a.kicks.size()) + ", translation " + std::to_string(b.kicks.size());
+            for (size_t index = 0; difference.empty() && index < a.kicks.size(); ++index)
+            {
+                if (a.kicks[index].bytes != b.kicks[index].bytes)
+                    difference = "packet " + std::to_string(index + 1u) + " of " + std::to_string(a.kicks.size()) + ": " +
+                                 std::to_string(a.kicks[index].bytes) + " bytes in the interpreter's, " +
+                                 std::to_string(b.kicks[index].bytes) + " in the translation's";
+                else if (std::memcmp(a.packet(index), b.packet(index), a.kicks[index].bytes) != 0)
+                {
+                    uint32_t at = 0;
+                    while (a.packet(index)[at] == b.packet(index)[at])
+                        ++at;
+                    difference = "packet " + std::to_string(index + 1u) + " of " + std::to_string(a.kicks.size()) +
+                                 ": first different byte at " + std::to_string(at) + " of " + std::to_string(a.kicks[index].bytes);
+                }
+            }
+        }
+        return difference;
+    }
+
+    void noteDifference(const Vu1nProgram &program, bool mscal, uint32_t entryPc, const std::string &difference,
+                        const VU1State &input, const uint8_t *inputData, uint32_t top, uint32_t itop)
+    {
+        if (++g_vu1.stats.differences <= 20u)
+            std::fprintf(stderr, "[mksm-vu1] DIFFERENCE %s %s 0x%04X: %s\n", program.name, mscal ? "MSCAL" : "MSCNT", entryPc,
+                         difference.c_str());
+        dumpLaunch(input, inputData, entryPc, top, itop);
+    }
+
+    // verify:<n>: the launch the translation just ran on the real state, run again by the second interpreter on the
+    // copy of its input (g_vu1.shadow, g_vu1.inputData), and compared.
+    void verifySampled(const Vu1nProgram &program, bool mscal, uint32_t entryPc, uint32_t top, uint32_t itop)
+    {
+        PS2Runtime &runtime = *g_vu1.runtime;
+        PS2Memory &memory = runtime.memory();
+        VU1State &oracle = g_vu1.shadowVu1->state();
+        std::memcpy(&oracle, g_vu1.shadow.get(), sizeof(VU1State));
+        const R5900Context &context = guestContext(runtime);
+        oracle.dBitEnabled = (context.vu0_fbrst & (1u << 10)) != 0u;
+        oracle.tBitEnabled = (context.vu0_fbrst & (1u << 11)) != 0u;
+        std::memcpy(g_vu1.shadowData.data(), g_vu1.inputData.data(), PS2_VU1_DATA_SIZE);
+        g_vu1.oracleGif.beginLaunch();
+        g_vu1.shadowRun = true;
+        g_vu1.shadowVu1->execute(memory.getVU1Code(), PS2_VU1_CODE_SIZE, g_vu1.shadowData.data(), PS2_VU1_DATA_SIZE,
+                                 runtime.gs(), &memory, entryPc, top, itop, 65536);
+        g_vu1.shadowRun = false;
+        ++g_vu1.stats.verified;
+        const std::string difference = describeDifference(oracle, g_vu1.shadowData.data(), g_vu1.oracleGif,
+                                                          runtime.vu1().state(), memory.getVU1Data(), g_vu1.host);
+        if (!difference.empty())
+            noteDifference(program, mscal, entryPc, difference, *g_vu1.shadow, g_vu1.inputData.data(), top, itop);
+    }
+
     void verify(bool mscal, uint32_t startPc, uint32_t top, uint32_t itop)
     {
         PS2Runtime &runtime = *g_vu1.runtime;
@@ -431,40 +536,10 @@ namespace
             report();
             return;
         }
-        difference = firstDifference(state, *g_vu1.shadow);
-        if (difference.empty())
-        {
-            for (uint32_t offset = 0; offset < PS2_VU1_DATA_SIZE; offset += 4u)
-            {
-                if (std::memcmp(memory.getVU1Data() + offset, g_vu1.shadowData.data() + offset, 4u) != 0)
-                {
-                    char text[64];
-                    std::snprintf(text, sizeof(text), "data memory at 0x%04X", offset);
-                    difference = text;
-                    break;
-                }
-            }
-        }
-        if (difference.empty())
-        {
-            const Vu1nHost &a = g_vu1.oracleGif;
-            const Vu1nHost &b = g_vu1.host;
-            if (a.kicks.size() != b.kicks.size())
-                difference = "packet count " + std::to_string(a.kicks.size()) + " / " + std::to_string(b.kicks.size());
-            for (size_t index = 0; difference.empty() && index < a.kicks.size(); ++index)
-            {
-                if (a.kicks[index].bytes != b.kicks[index].bytes ||
-                    std::memcmp(a.packet(index), b.packet(index), a.kicks[index].bytes) != 0)
-                    difference = "packet " + std::to_string(index + 1u) + " of " + std::to_string(a.kicks.size());
-            }
-        }
+        difference = describeDifference(state, memory.getVU1Data(), g_vu1.oracleGif, *g_vu1.shadow,
+                                        g_vu1.shadowData.data(), g_vu1.host);
         if (!difference.empty())
-        {
-            if (++g_vu1.stats.differences <= 20u)
-                std::fprintf(stderr, "[mksm-vu1] DIFFERENCE %s %s 0x%04X: %s\n", program->name, mscal ? "MSCAL" : "MSCNT",
-                             entryPc, difference.c_str());
-            dumpLaunch(input, g_vu1.inputData.data(), entryPc, top, itop);
-        }
+            noteDifference(*program, mscal, entryPc, difference, input, g_vu1.inputData.data(), top, itop);
         report();
     }
 }
@@ -483,6 +558,13 @@ void mksmInstallVu1(PS2Runtime &runtime)
     }
     g_vu1.runtime = &runtime;
     g_vu1.mode = value == "verify" ? Vu1Mode::Verify : Vu1Mode::Translated;
+    if (value.compare(0u, 7u, "verify:") == 0)
+    {
+        g_vu1.sampleEvery = static_cast<uint32_t>(std::strtoul(value.c_str() + 7, nullptr, 10));
+        if (g_vu1.sampleEvery == 0u)
+            g_vu1.sampleEvery = 1u;
+        g_vu1.shadowVu1 = std::make_unique<VU1Interpreter>();
+    }
     PS2Memory &memory = runtime.memory();
     g_vu1.interpreterMscal = memory.m_vu1MscalCallback;
     g_vu1.interpreterMscnt = memory.m_vu1MscntCallback;
@@ -495,27 +577,36 @@ void mksmInstallVu1(PS2Runtime &runtime)
     for (size_t index = 0; index < count; ++index)
         names += (index != 0u ? ", " : "") + std::string(programs[index].name);
 
-    if (g_vu1.mode == Vu1Mode::Verify)
+    if (g_vu1.mode == Vu1Mode::Verify || g_vu1.sampleEvery != 0u)
     {
         if (const char *folder = std::getenv("MKSM_VU1_DUMP"))
             g_vu1.dumpFolder = folder;
         // The interpreter's PATH1 packets, copied on their way to the GS (the body is upstream's arbiter function,
-        // PS2Runtime::syncCoreSubsystems).
+        // PS2Runtime::syncCoreSubsystems). The packets of the second interpreter (verify:<n>) are only copied.
         runtime.gifArbiter().setProcessPacketFn([&runtime](GifPathId path, const uint8_t *data, uint32_t size) {
-            if (g_vu1.capturing && path == GifPathId::Path1)
+            if ((g_vu1.capturing || g_vu1.shadowRun) && path == GifPathId::Path1)
             {
                 const uint32_t offset = static_cast<uint32_t>(g_vu1.oracleGif.arena.size());
                 g_vu1.oracleGif.arena.insert(g_vu1.oracleGif.arena.end(), data, data + size);
                 g_vu1.oracleGif.kicks.push_back({offset, size});
+                if (g_vu1.shadowRun)
+                    return;
             }
             runtime.gs().processGIFPacket(data, size, static_cast<uint32_t>(path));
         });
+    }
+    if (g_vu1.mode == Vu1Mode::Verify)
+    {
         memory.setVu1MscalCallback([](uint32_t startPc, uint32_t top, uint32_t itop) { verify(true, startPc, top, itop); });
         memory.setVu1MscntCallback([](uint32_t top, uint32_t itop) { verify(false, 0u, top, itop); });
         std::fprintf(stderr, "[mksm-vu1] verify: the interpreter runs every launch, the translation (%s) is compared%s\n",
                      names.c_str(), g_vu1.dumpFolder.empty() ? "" : "; differing launches are written to MKSM_VU1_DUMP");
         return;
     }
+    if (g_vu1.sampleEvery != 0u)
+        std::fprintf(stderr, "[mksm-vu1] verify:%u: the translation (%s) runs every launch, a second interpreter checks one in %u%s\n",
+                     g_vu1.sampleEvery, names.c_str(), g_vu1.sampleEvery,
+                     g_vu1.dumpFolder.empty() ? "" : "; differing launches are written to MKSM_VU1_DUMP");
     const char *statsSetting = std::getenv("MKSM_VU1_STATS");
     g_vu1.statsLines = statsSetting && *statsSetting != '0';
     memory.setVu1MscalCallback([](uint32_t startPc, uint32_t top, uint32_t itop) { launch(true, startPc, top, itop); });
