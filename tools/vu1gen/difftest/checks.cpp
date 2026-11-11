@@ -225,8 +225,50 @@ namespace vu1diff
         return checker->mismatches == 0u;
     }
 
+    namespace
+    {
+        // The three ways a launch of the oracle can end must be told apart: the comparison only uses launches that
+        // ended.
+        bool checkOracleEnds(Oracle &oracle)
+        {
+            OracleMachine machine;
+            std::vector<uint8_t> data(kDataBytes, 0u);
+            Vu1nHost packets;
+            std::vector<uint8_t> code(kCodeBytes, 0u);
+
+            // The E bit and its delay slot.
+            putPair(code.data(), 0u, kLowerNop, kUpperNop | kEBit);
+            putPair(code.data(), 8u, kLowerNop, kUpperNop);
+            oracle.setCode(code.data());
+            const OracleRun ended = oracle.run(machine, OracleEntry::Execute, 0u, 0u, 0u, data.data(), packets);
+
+            // "B 0x0000" at 0 and its delay slot: never ends.
+            putPair(code.data(), 0u, 0x400007FFu, kUpperNop);
+            oracle.setCode(code.data());
+            const OracleRun looping = oracle.run(machine, OracleEntry::Execute, 0u, 0u, 0u, data.data(), packets);
+
+            // A reserved lower instruction: an error line and a stop.
+            putPair(code.data(), 0u, 0x70000000u, kUpperNop);
+            oracle.setCode(code.data());
+            const OracleRun reserved = oracle.run(machine, OracleEntry::Execute, 0u, 0u, 0u, data.data(), packets);
+
+            const bool passed = ended.end == OracleEnd::Ended && ended.cycles == 2u &&
+                                looping.end == OracleEnd::Budget && looping.cycles == kCycleBudget &&
+                                reserved.end == OracleEnd::Error && reserved.cycles == 0u;
+            std::printf("oracle ends: a program that ends (%llu cycles), one that never does (%llu cycles: the budget) and a reserved "
+                        "instruction (%llu cycles, an error) are told apart: %s\n",
+                        static_cast<unsigned long long>(ended.cycles), static_cast<unsigned long long>(looping.cycles),
+                        static_cast<unsigned long long>(reserved.cycles), passed ? "PASSED" : "FAILED");
+            return passed;
+        }
+    }
+
     bool runKickCheck(Oracle &oracle, uint64_t count)
     {
+        // The interpreter writes a line for every packet it refuses, and for the reserved instruction below.
+        std::streambuf *const errorStream = std::cerr.rdbuf(nullptr);
+        const bool endsPassed = checkOracleEnds(oracle);
+
         // XGKICK vi01; then the E bit and its delay slot. The packet is transferred during the flush.
         std::vector<uint8_t> code(kCodeBytes, 0u);
         putPair(code.data(), 0u, 0x800006FCu | (1u << 11), kUpperNop);
@@ -248,8 +290,6 @@ namespace vu1diff
         uint64_t largest = 0;
         uint64_t mismatches = 0;
 
-        // The interpreter writes a line for every packet it refuses.
-        std::streambuf *const errorStream = std::cerr.rdbuf(nullptr);
         for (uint64_t index = 0; index < count; ++index)
         {
             for (uint32_t offset = 0; offset < kDataBytes; offset += 8u)
@@ -362,6 +402,6 @@ namespace vu1diff
                     static_cast<unsigned long long>(count), static_cast<unsigned long long>(sent), static_cast<unsigned long long>(wrapped),
                     static_cast<unsigned long long>(full), static_cast<unsigned long long>(largest), static_cast<unsigned long long>(dropped),
                     static_cast<unsigned long long>(mismatches), mismatches == 0u ? "PASSED" : "FAILED");
-        return mismatches == 0u;
+        return endsPassed && mismatches == 0u;
     }
 }

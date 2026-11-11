@@ -666,3 +666,44 @@ independent of that runtime:
   the cutscene takes minutes at this speed and Start does not skip it. (3) Sound: the archived SPU2 and libsd engine
   is ported to upstream's IOP in a worktree (SPU2 core, libsd by ordinal; unit tests and a harness with the game's
   own IRX modules pass); the host audio output and the IRX argument fix remain. The user put it after the 3D work.
+
+## 2026-11-11 (later) — VU1 ahead-of-time translation: the foundation (branch `vu1-native`)
+
+First step of item (1) of "Next" above. Nothing is translated yet and nothing changes in the game: this is the ground
+the translation will stand on, all of it outside `scripts\build.cmd` for now. `tools/vu1gen/PROGRESS.md` has the
+commands, the full tables and the notes for the steps that follow.
+
+- **Four images, not three** (`config/vu1_images.txt`). The uploader always sends 16 KB from the address it is given,
+  and a fourth address is uploaded by EE `0x22B2D8`: `0x49BAE0`, a 17-pair routine followed by the front-end program
+  shifted by 0x90 bytes (never launched in the captures). The cutscene program's own code is 1,932 pairs; the 1,937
+  above counted the five pairs of a VIF packet that follows it. The list holds 36 MSCAL entry points and the one
+  target of the cutscene program's indirect calls (`0x30E0`). The hash the captures are named by is 64-bit FNV-1a
+  with the offset basis `1469598103934665603` (the standard basis without its last digit).
+- **The generator's decoder is the interpreter's** (`tools/vu1gen/src/vu_decode.*`). Its listing of all 8,192 pairs
+  of the four images, usage tables included, equals the Python reference of the study byte for byte; and against
+  `VU1Interpreter::decodeInstructionPair` itself (reached without a patch) it agrees on 97.5 million pairs: every
+  upper word, every word of the lower-1 group, every register field of the other lower opcodes, 20 million random
+  pairs.
+- **A build tree of its own** (`tools/vu1gen/devbuild.cmd`): configured from a patched PS2Recomp with the quick
+  profile's arguments plus `-DCMAKE_PROJECT_PS2Runtime_INCLUDE=tools/vu1gen/cmake/ps2recomp.cmake`, which adds the
+  targets without a patch. The interpreter's compile commands there equal those of `out\build-quick` token for token.
+- **The interpreter as the oracle** (`vu1difftest`). It replays the 30,000 captured launches on a `PS2Memory` and `GS`
+  fixture, with the PATH1 packets taken by the GIF callback. **Verified:** the state after a launch equals the input
+  of the next record in 11,964 of 11,997 consecutive pairs (front end 3,999 of 3,999, gameplay 3,994, cutscenes
+  3,971), every field and the cycle count included; in the 33 others the captured clock shows that another program's
+  launch ran in between. No captured launch starts with `ebit`, `haltAfterDelaySlot` or `branchPending` set. Entering
+  the interpreter with `execute(startPC = state.pc)` for an MSCNT gives what `resume()` gives on all 17,942 captured
+  MSCNT launches (state, data memory, packets, `mac`, `status`, cycles), 5,830 of them against a `resume()` on the
+  very interpreter that ran the launch before: a translated launch can therefore be followed by an interpreted
+  MSCNT entered that way.
+- **The runtime interface of the translated programs** (`tools/vu1gen/runtime/`): the packets of a launch are copied
+  at each XGKICK into a list and submitted after it; the packet walk equals the interpreter's transfer on 20,000
+  random packets (tag chains of every format, 4,448 that wrap at 16 KB, 455 of exactly 64 KB, 2,324 that both
+  refuse). `vu1nRun` sets MXCSR for the launch and puts the caller's back.
+- **What the interpreter costs** (host time of `execute()` alone, quick-profile build, idle machine, best of three
+  runs of each captured launch, no GS work): 255 us a launch and 207 ns a VU cycle on average. Front end `MSCAL 0`:
+  489 us (1,613 cycles, 131 packets a launch). Gameplay MSCNT: 240-353 us (192-206 ns a cycle, three packets a
+  launch). Cutscene MSCNT: 152-426 us (135-181 ns a cycle, one packet). The init launches (MSCAL, 10-25 cycles):
+  3-5 us. The same measurement during another build was up to four times slower on the short launches.
+- **Next.** Control flow from the entry points, the timing exploration that resolves each Q, P, MAC and clip read,
+  emission, the arithmetic helpers, then the comparison of every captured launch with the interpreter.

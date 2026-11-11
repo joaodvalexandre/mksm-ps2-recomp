@@ -6,8 +6,12 @@
 
 #include <chrono>
 #include <cstring>
-#include <intrin.h>
 #include <thread>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#else
+#include <x86intrin.h>
+#endif
 
 namespace vu1diff
 {

@@ -18,6 +18,8 @@ scripts and the research log ([`docs/MKSM.md`](docs/MKSM.md)). No game files and
 | `docs/MKSM.md` | research log: what was tried, with what result, and the next steps |
 | `tools/ee_disasm.py` | disassembler for the game ELF (capstone), with the names of the generated code and of the configuration |
 | `tools/missing_targets.py` | lists the direct calls and tail jumps whose target has no generated function (run after a build) |
+| `config/vu1_images.txt` | the game's VU1 program images for `tools/vu1gen`: ELF addresses, hashes, entry points (addresses only) |
+| `tools/vu1gen/` | ahead-of-time translator of the game's VU1 programs, in progress: generator, runtime interface, `vu1difftest` against upstream's interpreter. Not part of `scripts\build.cmd` yet; state, commands and measurements in its `PROGRESS.md` |
 
 ## Rules
 

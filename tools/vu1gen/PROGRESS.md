@@ -41,6 +41,7 @@ or the game from here.
 | `tools/vu1gen/difftest/no_programs.cpp` | empty `vu1nPrograms()` until the generator emits the table |
 | `tools/vu1gen/tests/` | `vu1n_tests`: decoder, float notation, image list, ELF reader, hash, runtime |
 | `tools/vu1gen/selftest/vudis_listing.py` | reference side of the decoder self-test (development only) |
+| `tools/vu1gen/selftest/compare_compile_commands.py` | checks that the oracle is compiled with the flags of the game's build (development only) |
 | `tools/vu1gen/cmake/targets.cmake` | the targets; `CMakeLists.txt` makes the folder a project of its own |
 | `tools/vu1gen/cmake/ps2recomp.cmake` | hook that adds the targets to a PS2Recomp build without a patch |
 | `tools/vu1gen/devbuild.cmd` | configures and builds the development tree |
@@ -76,7 +77,19 @@ The oracle is compiled as in the game's quick build: the compile commands of `vu
 `ps2_vu1_upper.cpp`, `ps2_vu1_lower.cpp`, `ps2_memory.cpp`, `ps2_vif1_interpreter.cpp` and `gs/ps2_gif_arbiter.cpp`
 in `mksm-vu1-build/compile_commands.json` have the same flags and definitions, token for token, as in
 `mksm-ps2-recomp/PS2Recomp/out/build-quick/compile_commands.json` (`/EHsc /Zi /DNDEBUG -std:c++20 -MD /O2 /Ob2`,
-no `/fp` option, so `/fp:precise`, and no `/arch`); only the paths differ.
+no `/fp` option, so `/fp:precise`, and no `/arch`); only the paths differ. To repeat the check (exit code 0 and
+`ALL SAME`):
+
+```
+python -I tools/vu1gen/selftest/compare_compile_commands.py D:/Projects/Recomps/mksm-vu1-build \
+    D:/Projects/Recomps/mksm-ps2-recomp/PS2Recomp/out/build-quick
+```
+
+Those six sources and their headers are byte for byte the same in `ps2recomp-pgs` and in the game's patched
+`mksm-ps2-recomp/PS2Recomp` (compared with `cmp` on 2026-11-11). And the build behaves like the game's on real data:
+see the harness sanity below.
+
+A build from nothing (the tree deleted) with the commands above took 73 s: configure 19 s, build 52 s.
 
 The folder also configures on its own (no PS2Recomp, no oracle): `cmake -S tools/vu1gen -B <dir> -G Ninja` inside a
 Visual Studio environment gives `vu1gen` and `vu1n_tests`.
@@ -174,7 +187,7 @@ For every record of every `launches_<hash>.bin` (30,000 launches: 5,314 front, 1
 3. the translation, when the build has a program for the image and the entry: `prepareLaunch` (what `execute()` does
    to the state), then `vu1nRun`, then `compareLaunch` against 1.
 
-Results (16 s without `--bench`; exit code 0):
+Results (16 to 21 s without `--bench`; exit code 0):
 
 | | front | game | cut | all |
 |---|---|---|---|---|
@@ -211,8 +224,11 @@ A launch whose oracle did not end (cycle budget, error) is counted and not compa
 ### vu1difftest --bench: the oracle's host time
 
 `--bench` times `execute()` alone with the time stamp counter (best of `--repeat` runs of each launch, 3 by
-default); the oracle's packets go to a memory callback, so no GS work is in the numbers. Run it on an idle machine:
-two consecutive runs agreed within 1 %, a run during another build was up to 4 times slower on the short launches.
+default); the oracle's packets go to a memory callback, so no GS work is in the numbers. The machine is shared with
+another session, and the numbers follow its load: the table is the first of two consecutive runs that agreed within
+1 % (all images: 255.3 and 255.8 us a launch); two later runs with other processes at work gave 290.9 and 280.4 us,
+and one run during a build was up to 4 times slower on the short launches. Compare the oracle and a translation
+within one run.
 
 | image, entry | launches | cycles a launch | kicks a launch | qwords a launch | us a launch | ns a cycle |
 |---|---|---|---|---|---|---|
@@ -251,9 +267,13 @@ $B/vu1gen/vu1difftest.exe --kick-check [packets, 20000 by default]
 ```
 
 A three-pair program (`XGKICK vi01`, the E bit, its delay slot) on random data memory with a chain of GIF tags of
-every format; the interpreter's packet against `Vu1nHost::kick` on the same memory. Result (1 s):
-`20000 random packets: 17676 sent by both with the same bytes (4448 wrap at 16 KB, 455 of exactly 64 KB, the largest
-65536 bytes), 2324 refused by both, 0 different: PASSED`.
+every format; the interpreter's packet against `Vu1nHost::kick` on the same memory. It first checks that the harness
+tells the three ends of an oracle launch apart (`OracleEnd`). Result (1 s):
+
+```
+oracle ends: a program that ends (2 cycles), one that never does (65536 cycles: the budget) and a reserved instruction (0 cycles, an error) are told apart: PASSED
+kick check: 20000 random packets: 17676 sent by both with the same bytes (4448 wrap at 16 KB, 455 of exactly 64 KB, the largest 65536 bytes), 2324 refused by both, 0 different: PASSED
+```
 
 ## The runtime interface (`runtime/`)
 
@@ -300,6 +320,13 @@ side of the difftest. Things this stage found or fixed that they should know:
   `execute()` does, for an MSCNT too: `pc` = entry, `ebit`, `haltAfterDelaySlot`, `stoppedByD/T` false,
   `branchPending` false, `branchTarget` = `branchDelay` = 0, `top`, `itop`, `vf00`. The oracle of the comparison is
   `execute()` at the entry pc, which was shown equal to `resume()` on every captured MSCNT.
+- **What `execute()` at the saved pc cannot keep** is the interpreter's remembered VI value for a branch in the
+  first pair of the continuation (the E-bit delay slot wrote a VI register with an instruction that delays the next
+  branch read, and the continuation starts with a branch that reads it; `resume()` keeps it). No captured MSCNT
+  shows a difference, and a one-off scan with `vudis.py` over all 2048 pairs of the four images found no such
+  continuation (the continuations that start with a branch start with `B`, which reads no register; the delay slots
+  are NOP, IADDIU or the I-bit immediate). The generator's static refusals (brief, fact 5: a branch reading a VI
+  register written by the pair before it) must count the E-bit delay slot as the pair before a continuation.
 - **`branchTarget` and `branchDelay` are compared.** After a launch the interpreter leaves `branchPending` false,
   `branchDelay` 0 and `branchTarget` = the target of the last branch taken in the launch (0 when none was taken; the
   value is dead, nothing reads it while `branchPending` is false). Generated code has to store it (a constant store
