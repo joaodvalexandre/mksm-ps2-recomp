@@ -14,6 +14,8 @@
 //                    VU1State, the 16 KB of data memory and the PATH1 packets. [mksm-vu1] lines report the
 //                    differences; MKSM_VU1_DUMP=<folder> writes the launches that differ as launch records
 //                    (launches_<hash>.bin and code_<hash>.bin, which tools/vu1gen's vu1difftest --captures replays).
+//   MKSM_VU1_STATS=1 (diagnostic) with MKSM_VU1=1: a [mksm-vu1] line every 10 s with the launches translated,
+//                    interpreted and given back at an indirect jump. The verify mode always prints its counts.
 //
 // Rules this follows (vu1-study/integration.md 1.2, 1.9): a translated launch is prepared as upstream's execute()
 // prepares one, an MSCNT included; after a translated launch the interpreter's private pipeline state is stale, so
@@ -64,6 +66,8 @@ namespace
 
         uint64_t generation = ~0ull;
         const Vu1nProgram *program = nullptr;
+        std::vector<const Vu1nProgram *> announced; // the images already named in the log
+        std::vector<uint64_t> unknownImages;        // hashes of micro memories that are no translated image
         // The interpreter's private pipeline state no longer belongs to the state in VU1State (a translated launch
         // ran since the interpreter's last one): an interpreted MSCNT must enter through execute().
         bool interpreterStale = false;
@@ -79,6 +83,7 @@ namespace
         std::vector<uint8_t> shadowData = std::vector<uint8_t>(PS2_VU1_DATA_SIZE);
         std::vector<uint8_t> inputData = std::vector<uint8_t>(PS2_VU1_DATA_SIZE);
         std::string dumpFolder;
+        bool statsLines = false; // MKSM_VU1_STATS: the periodic line in the translated mode too
         uint64_t dumped = 0;
 
         Vu1Stats stats;
@@ -115,13 +120,31 @@ namespace
             return g_vu1.program;
         g_vu1.generation = generation;
         const Vu1nProgram *program = vu1nFindProgram(memory.getVU1Code());
-        if (program != g_vu1.program)
-        {
-            std::fprintf(stderr, "[mksm-vu1] micro memory %016llX: %s\n",
-                         static_cast<unsigned long long>(imageHash(memory.getVU1Code(), PS2_VU1_CODE_SIZE)),
-                         program ? program->name : "not a translated image, interpreted");
-        }
         g_vu1.program = program;
+        // Each image is announced the first time it is seen (the game switches programs several times a frame).
+        if (program)
+        {
+            for (const Vu1nProgram *seen : g_vu1.announced)
+            {
+                if (seen == program)
+                    return program;
+            }
+            g_vu1.announced.push_back(program);
+            std::fprintf(stderr, "[mksm-vu1] micro memory %016llX: %s\n",
+                         static_cast<unsigned long long>(imageHash(memory.getVU1Code(), PS2_VU1_CODE_SIZE)), program->name);
+        }
+        else if (g_vu1.unknownImages.size() < 16u)
+        {
+            const uint64_t hash = imageHash(memory.getVU1Code(), PS2_VU1_CODE_SIZE);
+            for (uint64_t seen : g_vu1.unknownImages)
+            {
+                if (seen == hash)
+                    return program;
+            }
+            g_vu1.unknownImages.push_back(hash);
+            std::fprintf(stderr, "[mksm-vu1] micro memory %016llX: not a translated image, interpreted\n",
+                         static_cast<unsigned long long>(hash));
+        }
         return program;
     }
 
@@ -177,6 +200,8 @@ namespace
 
     void report()
     {
+        if (g_vu1.mode != Vu1Mode::Verify && !g_vu1.statsLines)
+            return;
         const auto now = std::chrono::steady_clock::now();
         if (g_vu1.lastReport.time_since_epoch().count() == 0)
         {
@@ -491,6 +516,8 @@ void mksmInstallVu1(PS2Runtime &runtime)
                      names.c_str(), g_vu1.dumpFolder.empty() ? "" : "; differing launches are written to MKSM_VU1_DUMP");
         return;
     }
+    const char *statsSetting = std::getenv("MKSM_VU1_STATS");
+    g_vu1.statsLines = statsSetting && *statsSetting != '0';
     memory.setVu1MscalCallback([](uint32_t startPc, uint32_t top, uint32_t itop) { launch(true, startPc, top, itop); });
     memory.setVu1MscntCallback([](uint32_t top, uint32_t itop) { launch(false, 0u, top, itop); });
     std::fprintf(stderr, "[mksm-vu1] VU1 programs translated: %s (MKSM_VU1=0 interprets, MKSM_VU1=verify compares)\n", names.c_str());
