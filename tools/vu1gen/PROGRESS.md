@@ -23,7 +23,7 @@ or the game from here.
 | emitter (`src/vu_emit.*`) and reference arithmetic (`runtime/vu1n.h`, `VU1N_MATH_REFERENCE`) | done: **30,000 of 30,000 captured launches translated and compared, 0 mismatches**; every entry of the three programs handled |
 | build integration (`VU1GEN_ELF`: vu1gen runs in the build, the generated library is linked into `vu1difftest`) | done |
 | fast SSE arithmetic (stage 3, `vu1n.h` default build) and one function per entry | done: 0 mismatches on the captures, 0 in 600 million fuzzed lanes against the reference; 83 times faster than the interpreter on the captures (below) |
-| synthetic launches for the pairs the captures do not execute | not started |
+| synthetic launches (`difftest/synthetic.*`, `vu1difftest --synthetic`) | done: 60,000 launches, 0 mismatches; reachable pairs executed 927 / 1,873 / 1,616 of 1,388 / 1,930 / 1,924 (captures: 50 / 664 / 795) |
 | glue in the override module (`src/mksm_vu1.cpp`) | not started |
 
 ## Layout
@@ -475,6 +475,42 @@ instruction cache. That is what stage 3 replaces.
 
   About 2.4 ns a cycle of the interpreter's clock, 2.9 ns an executed pair.
 
+## Synthetic launches
+
+```
+$B/vu1gen/vu1difftest.exe --captures $CAP --images config/vu1_images.txt --coverage --synthetic 20000 \
+        [--seed n] [--synthetic-out $B/synthetic]
+```
+
+After the captures of each image, `--synthetic n` runs n launches built from up to 1,024 of its records (`synthetic.cpp`):
+one in 64, 16, 6 or 3 float-like words (exponent 1..254) of VF01..VF31, ACC, Q, P, I and of the 16 KB of data memory
+changed (sign, exponent by up to 3, a large mantissa change, a few units in the last place, or one of a list of
+special values: zeros, exponent 255, FLT_MAX, FLT_MIN, a denormal, 1.0, 2^-70, the colour constant). VI registers and
+words with exponent 0 (counts, pointers, flags, the low words of GIF tags) are kept, so the loops keep their counts.
+Three launches in four start at the base's entry, the fourth at every handled entry in turn (entries the captures
+never launched included). Each launch: the oracle at once, the oracle one pair a call (coverage, and its packets
+read at each XGKICK), the translation; compared as a captured launch. A mismatching launch is written to
+`--synthetic-out` as `launches_<hash>.bin` with `code_<hash>.bin`, which `--captures <that folder>` replays.
+
+Fact 4 (the packet read whole at the XGKICK is the packet the interpreter transfers) is a property of the data, and
+changed data breaks it: a float-like GIF tag word changed makes a packet run into memory the program writes next.
+Such launches are counted ("transfer") and their packets compared with the read at the instruction (what the
+translation promises); state and data memory are still compared with the oracle. The first run, before that rule,
+reported 64 mismatches, all of this kind and only in the packets; replayed with `--coverage` every one of them showed
+"read at the instruction" differing from "transferred".
+
+Result (2026-11-11, seed 1, 20,000 a image, 1 min 56 s with the captures and `--coverage`):
+
+| | front | game | cut |
+|---|---|---|---|
+| launches / oracle ended / out of cycles / oracle error | 20,000 / 16,930 / 2,981 / 89 | 20,000 / 19,097 / 48 / 855 | 20,000 / 18,748 / 395 / 857 |
+| translated and compared / mismatches | 16,930 / 0 | 19,097 / 0 | 18,748 / 0 |
+| of them "transfer" (fact 4 broken by the changed data) | 182 | 118 | 0 |
+| reachable pairs executed (captures alone) | 927 of 1,388 (50) | 1,873 of 1,930 (664) | 1,616 of 1,924 (795) |
+
+The launches that run out of cycles start mostly at continuations with a base state of another routine (their input
+headers do not fit). The pairs still not executed are mostly in the front end's routines the captures never launch.
+
 ## The runtime interface (`runtime/`)
 
 What is decided, and why, where the brief left room:
@@ -505,11 +541,11 @@ What is decided, and why, where the brief left room:
 
 ## Next
 
-1. **Synthetic launches** (DESIGN.md section 6): the captures execute 50 / 664 / 795 of the 1,388 / 1,930 / 1,924
-   reachable pairs. Build records from captured ones with randomised lanes and input buffers, feed them through the
-   comparison of `processFile`, report the coverage reached (`--coverage`).
-2. **Glue** (`src/mksm_vu1.cpp` in the main repository, `MKSM_VU1=0|1|verify`), the build integration of the generated
-   library into the game (its own library, `/fp:precise`, no `/GL`), then a game run.
+1. **Glue** (`src/mksm_vu1.cpp` in the main repository, `MKSM_VU1=0|1|verify`), the build integration of the generated
+   library into the game (its own library, `/fp:precise`, no `/GL`), then a game run. The verify mode is where fact 4
+   is checked on the game's real data beyond the captures.
+2. Coverage of the remaining pairs: synthetic bases fitted to each entry (a captured state of the same routine), or
+   records captured from the front end's other routines.
 3. Possible later speed: VF registers kept in `__m128` locals instead of `Vu1nRegs` in memory; operand normalisation
    skipped for registers known to hold normalised values (FMAC results); the code duplication of the entry functions.
 

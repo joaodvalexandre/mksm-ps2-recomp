@@ -2,6 +2,7 @@
 //
 //   vu1difftest --captures <folder> [--images <config/vu1_images.txt>] [--only <text>] [--limit <n>]
 //               [--self | --self-fault <n>] [--bench] [--repeat <n>] [--coverage] [--max-report <n>]
+//               [--synthetic <n> [--seed <n>] [--synthetic-out <folder>]]
 //   vu1difftest --kick-check [<n>]
 //   vu1difftest --decode-check [<n>] [--captures <folder>]
 //
@@ -19,6 +20,11 @@
 // --bench measures the host time of every launch (best of --repeat runs, 3 by default).
 // --coverage runs every launch a second time on the oracle one pair a call: it reports the pairs a launch executes,
 // the distinct pairs the captures reach, and that the stepped launch gives the result of the launch run at once.
+// --synthetic runs n synthetic launches per image after its captures (synthetic.h): captured states and data memory
+// with their float values changed, from the captured entries and from every entry the translation handles, compared
+// with the oracle as a captured launch; it reports the pairs they execute, with the captures' when --coverage is
+// given. --seed changes the launches; --synthetic-out writes the mismatching ones there as launches_<hash>.bin with
+// the code file, which --captures <folder> replays.
 // --kick-check compares Vu1nHost::kick with the interpreter's XGKICK transfer on n random packets, after checking
 // that the harness tells apart a launch that ended, one that ran out of cycles and one stopped by an error.
 // --decode-check compares vu1gen's decoder with the interpreter's own on every encoding class, on n random pairs
@@ -29,6 +35,7 @@
 #include "checks.h"
 #include "launch.h"
 #include "oracle.h"
+#include "synthetic.h"
 
 #include "images.h"
 #include "vu_decode.h"
@@ -62,6 +69,9 @@ namespace
         bool kickCheck = false;
         bool decodeCheck = false;
         uint64_t checkCount = 0;
+        uint64_t synthetic = 0;
+        uint64_t seed = 1;
+        std::string syntheticOut;
     };
 
     struct EntryKey
@@ -199,6 +209,8 @@ namespace
         uint64_t kicksExecuted = 0; // XGKICKs of the stepped launches
         uint64_t kicksEqual = 0;    // the packet read whole at the instruction is the packet the interpreter sent
         uint64_t kickLaunchesDifferent = 0;
+        // --synthetic
+        SyntheticReport synthetic;
     };
 
     // ---- the interpreter as a "translated program": tests the machinery through the real interface ----
@@ -356,6 +368,10 @@ namespace
         LaunchResult scratch;
         Vu1nHost scratchPackets;
 
+        // --synthetic: up to 1024 records spread over the file are the bases of the synthetic launches.
+        std::vector<std::unique_ptr<LaunchRecord>> bases;
+        const uint64_t baseStride = std::max<uint64_t>(1u, capture.recordCount() / 1024u);
+
         bool havePrevious = false;
         uint64_t previousIndex = 0;
         uint64_t previousCycleStamp = 0; // state.cycles of the previous record
@@ -369,6 +385,8 @@ namespace
         {
             const LaunchRecord &rec = *record;
             const uint32_t entryPc = rec.entryPc();
+            if (options.synthetic != 0u && position % baseStride == 0u && bases.size() < 1024u)
+                bases.push_back(std::make_unique<LaunchRecord>(rec));
             EntryStats &stats = report.entries[{rec.resume, entryPc}];
             ++stats.launches;
             ++report.records;
@@ -617,7 +635,34 @@ namespace
             std::memcpy(&previousUpstreamState, &upstreamResult.state, sizeof(VU1State));
             ++position;
         }
-        return error.empty();
+        if (!error.empty())
+            return false;
+
+        if (options.synthetic != 0u && !self)
+        {
+            SyntheticOptions synthetic;
+            synthetic.count = options.synthetic;
+            synthetic.seed = options.seed;
+            synthetic.maxReport = options.maxReport;
+            const uint64_t hash = std::strtoull(hashText.c_str(), nullptr, 16);
+            if (!options.syntheticOut.empty())
+            {
+                std::error_code code2;
+                std::filesystem::create_directories(options.syntheticOut, code2);
+                const std::filesystem::path out(options.syntheticOut);
+                synthetic.failureFile = (out / ("launches_" + hashText + ".bin")).string();
+                std::filesystem::remove(synthetic.failureFile, code2);
+                std::FILE *codeFile = std::fopen((out / ("code_" + hashText + ".bin")).string().c_str(), "wb");
+                if (codeFile)
+                {
+                    std::fwrite(code.data(), 1u, code.size(), codeFile);
+                    std::fclose(codeFile);
+                }
+            }
+            if (!runSynthetic(synthetic, oracle, bases, program, hash, report.synthetic, error))
+                return false;
+        }
+        return true;
     }
 
     // ---- reports ----
@@ -718,6 +763,7 @@ namespace
         std::fprintf(stderr,
                      "usage: vu1difftest --captures <folder> [--images <config/vu1_images.txt>] [--only <text>] [--limit <n>]\n"
                      "                   [--self | --self-fault <n>] [--bench] [--repeat <n>] [--coverage] [--max-report <n>]\n"
+                     "                   [--synthetic <n> [--seed <n>] [--synthetic-out <folder>]]\n"
                      "       vu1difftest --kick-check [<n>]\n"
                      "       vu1difftest --decode-check [<n>] [--captures <folder>]\n");
         return 2;
@@ -755,6 +801,12 @@ int main(int argc, char **argv)
             options.bench = true;
         else if (argument == "--coverage")
             options.coverage = true;
+        else if (argument == "--synthetic" && isNumber(value))
+            options.synthetic = std::strtoull(argv[++index], nullptr, 10);
+        else if (argument == "--seed" && isNumber(value))
+            options.seed = std::strtoull(argv[++index], nullptr, 10);
+        else if (argument == "--synthetic-out" && value)
+            options.syntheticOut = argv[++index];
         else if (argument == "--repeat" && isNumber(value))
             options.repeat = std::max(1u, static_cast<uint32_t>(std::strtoul(argv[++index], nullptr, 10)));
         else if (argument == "--max-report" && isNumber(value))
@@ -848,6 +900,7 @@ int main(int argc, char **argv)
     EntryStats grandTotal;
     uint64_t snapshotErrors = 0;
     uint64_t steppingErrors = 0;
+    uint64_t syntheticMismatches = 0;
     for (const std::filesystem::path &path : files)
     {
         const std::string fileName = path.filename().string();
@@ -900,6 +953,57 @@ int main(int argc, char **argv)
             steppingErrors += report.steppedLaunches - report.steppedEqual + report.kickLaunchesDifferent;
         }
 
+        if (options.synthetic != 0u)
+        {
+            SyntheticEntryStats sum;
+            std::printf("   synthetic launches (%llu, seed %llu)\n", static_cast<unsigned long long>(options.synthetic),
+                        static_cast<unsigned long long>(options.seed));
+            std::printf("   entry  launches    ended   budget    error translated  unk.tgt.  compared mismatches  transfer\n");
+            for (const auto &[pc, stats] : report.synthetic.entries)
+            {
+                std::printf("   %04X %10llu %8llu %8llu %8llu %10llu %9llu %9llu %10llu %9llu\n", pc,
+                            static_cast<unsigned long long>(stats.launches), static_cast<unsigned long long>(stats.oracleEnded),
+                            static_cast<unsigned long long>(stats.oracleBudget), static_cast<unsigned long long>(stats.oracleError),
+                            static_cast<unsigned long long>(stats.translated), static_cast<unsigned long long>(stats.unknownTarget),
+                            static_cast<unsigned long long>(stats.compared), static_cast<unsigned long long>(stats.mismatches),
+                            static_cast<unsigned long long>(stats.transferDiffers));
+                sum.launches += stats.launches;
+                sum.oracleEnded += stats.oracleEnded;
+                sum.oracleBudget += stats.oracleBudget;
+                sum.oracleError += stats.oracleError;
+                sum.translated += stats.translated;
+                sum.unknownTarget += stats.unknownTarget;
+                sum.compared += stats.compared;
+                sum.mismatches += stats.mismatches;
+                sum.transferDiffers += stats.transferDiffers;
+            }
+            std::printf("   all  %10llu %8llu %8llu %8llu %10llu %9llu %9llu %10llu %9llu\n",
+                        static_cast<unsigned long long>(sum.launches), static_cast<unsigned long long>(sum.oracleEnded),
+                        static_cast<unsigned long long>(sum.oracleBudget), static_cast<unsigned long long>(sum.oracleError),
+                        static_cast<unsigned long long>(sum.translated), static_cast<unsigned long long>(sum.unknownTarget),
+                        static_cast<unsigned long long>(sum.compared), static_cast<unsigned long long>(sum.mismatches),
+                        static_cast<unsigned long long>(sum.transferDiffers));
+            std::printf("   (transfer: launches whose packets read at the XGKICK are not the ones the interpreter transferred; "
+                        "their packets are compared with the read at the instruction)\n");
+            if (!report.synthetic.mismatchFields.empty())
+                std::printf("   synthetic: first field that differs: %s\n", fieldCountsText(report.synthetic.mismatchFields).c_str());
+            uint32_t synth = 0;
+            uint32_t both = 0;
+            for (uint32_t pair = 0; pair < report.synthetic.executed.size(); ++pair)
+            {
+                synth += report.synthetic.executed[pair];
+                both += (report.synthetic.executed[pair] | report.executed[pair]) != 0u ? 1u : 0u;
+            }
+            std::printf("   synthetic coverage: %u distinct pairs executed", synth);
+            if (options.coverage)
+                std::printf("; with the captures' %u distinct pairs", both);
+            std::printf("; the oracle one pair a call differed from the launch at once in %llu launches; %llu mismatching launches saved\n",
+                        static_cast<unsigned long long>(report.synthetic.steppedDifferent),
+                        static_cast<unsigned long long>(report.synthetic.saved));
+            syntheticMismatches += sum.mismatches;
+            steppingErrors += report.synthetic.steppedDifferent;
+        }
+
         sanityTotal.add(report.sanity);
         trueResumeTotal.add(report.trueResume);
         afterResetTotal.add(report.resumeAfterReset);
@@ -929,5 +1033,7 @@ int main(int argc, char **argv)
         std::printf("   comparison machinery: %s\n", passed ? "PASSED" : "FAILED");
         return passed ? 0 : 1;
     }
-    return grandTotal.mismatches == 0u && snapshotErrors == 0u && steppingErrors == 0u ? 0 : 1;
+    if (options.synthetic != 0u)
+        std::printf("   synthetic mismatches, all images: %llu\n", static_cast<unsigned long long>(syntheticMismatches));
+    return grandTotal.mismatches == 0u && snapshotErrors == 0u && steppingErrors == 0u && syntheticMismatches == 0u ? 0 : 1;
 }

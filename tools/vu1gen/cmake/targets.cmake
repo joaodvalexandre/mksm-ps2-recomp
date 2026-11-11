@@ -120,6 +120,7 @@ if(TARGET ps2_runtime)
             "${VU1GEN_DIR}/difftest/checks.cpp"
             "${VU1GEN_DIR}/difftest/launch.cpp"
             "${VU1GEN_DIR}/difftest/oracle.cpp"
+            "${VU1GEN_DIR}/difftest/synthetic.cpp"
             "${VU1GEN_DIR}/difftest/vu1difftest.cpp"
         )
         if(difftest STREQUAL "vu1difftest_ref")
