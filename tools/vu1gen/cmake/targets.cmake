@@ -12,6 +12,8 @@ function(vu1gen_target_defaults target)
         RUNTIME_OUTPUT_DIRECTORY "${VU1GEN_OUTPUT_DIR}")
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8)
+        # Standard C file functions without the CRT's deprecation warnings.
+        target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
     else()
         target_compile_options(${target} PRIVATE -Wall -Wextra)
     endif()
@@ -54,3 +56,32 @@ add_executable(vu1n_tests
 target_compile_definitions(vu1n_tests PRIVATE "VU1GEN_IMAGES_FILE=\"${VU1GEN_REPO_DIR}/config/vu1_images.txt\"")
 target_link_libraries(vu1n_tests PRIVATE vu1gen_core vu1n_runtime)
 vu1gen_target_defaults(vu1n_tests)
+
+# Inside a PS2Recomp build: the differential test. ps2_runtime holds upstream's VU1 interpreter, compiled with the
+# flags of the build tree's profile; it is the oracle.
+if(TARGET ps2_runtime)
+    # The translated programs. vu1gen does not emit them yet, so an empty table stands in; the emission stage
+    # replaces this source by the generated ones (outside the repository, compiled /fp:precise).
+    add_library(vu1n_programs STATIC
+        "${VU1GEN_DIR}/difftest/no_programs.cpp"
+    )
+    target_link_libraries(vu1n_programs PUBLIC vu1n_runtime)
+    vu1gen_target_defaults(vu1n_programs)
+
+    add_executable(vu1difftest
+        "${VU1GEN_DIR}/difftest/captures.cpp"
+        "${VU1GEN_DIR}/difftest/checks.cpp"
+        "${VU1GEN_DIR}/difftest/launch.cpp"
+        "${VU1GEN_DIR}/difftest/oracle.cpp"
+        "${VU1GEN_DIR}/difftest/vu1difftest.cpp"
+    )
+    target_link_libraries(vu1difftest PRIVATE vu1gen_core vu1n_programs vu1n_runtime ps2_runtime)
+    vu1gen_target_defaults(vu1difftest)
+    if(MSVC)
+        # As upstream's ps2x_tests: the interpreter's objects are large.
+        target_link_options(vu1difftest PRIVATE "/STACK:8388608")
+    endif()
+    if(COMMAND ps2x_stage_ffmpeg_runtime_dlls)
+        ps2x_stage_ffmpeg_runtime_dlls(vu1difftest)
+    endif()
+endif()
