@@ -10,16 +10,21 @@ captures: they go to the build tree); the main repository tree `D:/Projects/Reco
 PS2Recomp tree `D:/Projects/Recomps/ps2recomp-pgs` are read only; never run `scripts/build.cmd`, `scripts/run.cmd`
 or the game from here.
 
-## State (2026-11-11): the foundation stage is done, nothing is translated yet
+## State (2026-11-11, evening): stage 2 done, the translation equals the interpreter on every captured launch
 
 | Piece | State |
 |---|---|
 | development build (own tree, oracle compiled as in the quick profile) | works |
 | `config/vu1_images.txt` and its parser | done |
 | decoder and usage tables | done; equal to `vudis.py` on the four images and to the interpreter's own decoder on 97.5 million pairs |
-| runtime interface (`vu1n_api.h`, `vu1n.h`, `vu1n_runtime.cpp`) | done as far as the interface goes; `kick` equal to the interpreter's transfer on 20,000 random packets and on the 731,100 XGKICKs of the captures |
+| runtime interface (`vu1n_api.h`, `vu1n.h`, `vu1n_runtime.cpp`) | done; `kick` equal to the interpreter's transfer on 20,000 random packets and on the 731,100 XGKICKs of the captures |
 | `vu1difftest`, oracle side | done: 30,000 captured launches replayed; sanity, `execute` against `resume`, comparison machinery, bench, pair coverage, packets read at the XGKICK |
-| control flow, timing exploration, emission, arithmetic helpers, translation side of `vu1difftest`, synthetic launches | not started |
+| control flow and timing exploration (`src/vu_flow.*`, port of `vutiming.py`) | done; its counts equal the study's timing table (below) |
+| emitter (`src/vu_emit.*`) and reference arithmetic (`runtime/vu1n.h`, `VU1N_MATH_REFERENCE`) | done: **30,000 of 30,000 captured launches translated and compared, 0 mismatches**; every entry of the three programs handled |
+| build integration (`VU1GEN_ELF`: vu1gen runs in the build, the generated library is linked into `vu1difftest`) | done |
+| fast SSE arithmetic (stage 3) | not started: the reference build is only 3.5 times faster than the interpreter (below) |
+| synthetic launches for the pairs the captures do not execute | not started |
+| glue in the override module (`src/mksm_vu1.cpp`) | not started |
 
 ## Layout
 
@@ -29,16 +34,18 @@ or the game from here.
 | `tools/vu1gen/src/vu_decode.*` | decoder and usage tables, a port of `vudis.py` checked against the interpreter's sources |
 | `tools/vu1gen/src/images.*` | parser of `config/vu1_images.txt`, ELF segment reader, the image hash |
 | `tools/vu1gen/src/listing.*` | the two text listings of an image (the self-test compares them with `vudis.py`) |
+| `tools/vu1gen/src/vu_flow.*` | control flow and timing exploration: launch starts, per-pair timing classes, refusals, handled entries |
+| `tools/vu1gen/src/vu_emit.*` | emission of `vu1n_<image>.cpp` and `vu1n_table.cpp` |
 | `tools/vu1gen/src/main.cpp` | `vu1gen` |
 | `tools/vu1gen/runtime/vu1n_api.h` | the interface of the translated programs: `Vu1nStatus`, `Vu1nHost` (packet arena, `kick`), `Vu1nProgram`, `vu1nRun` |
-| `tools/vu1gen/runtime/vu1n.h` | what generated code includes: the interface, `kVu1nMxcsr`, `vu1nQwordOffset`; the arithmetic helpers are still to come |
+| `tools/vu1gen/runtime/vu1n.h` | what generated code includes: the interface, `kVu1nMxcsr`, `Vu1nRegs`, the reference arithmetic, memory and ring helpers |
 | `tools/vu1gen/runtime/vu1n_runtime.cpp` | the packet walk of XGKICK, `vu1nRun` with the MXCSR guard, `vu1nFindProgram` |
 | `tools/vu1gen/difftest/captures.*` | reader of `logs/vu1cap/launches_<hash>.bin` |
 | `tools/vu1gen/difftest/oracle.*` | upstream's interpreter on a `PS2Memory` + `GS` fixture, PATH1 packets to a memory callback, the three ways to enter it |
 | `tools/vu1gen/difftest/launch.*` | `LaunchResult`, the comparison of two results, `prepareLaunch` |
 | `tools/vu1gen/difftest/checks.*` | `--decode-check` and `--kick-check` |
 | `tools/vu1gen/difftest/vu1difftest.cpp` | the passes over the captures and the reports |
-| `tools/vu1gen/difftest/no_programs.cpp` | empty `vu1nPrograms()` until the generator emits the table |
+| `tools/vu1gen/difftest/no_programs.cpp` | empty `vu1nPrograms()` for a build without `VU1GEN_ELF` |
 | `tools/vu1gen/tests/` | `vu1n_tests`: decoder, float notation, image list, ELF reader, hash, runtime |
 | `tools/vu1gen/selftest/check_all.sh` | runs every check below in one go (development only) |
 | `tools/vu1gen/selftest/vudis_listing.py` | reference side of the decoder self-test (development only) |
@@ -335,6 +342,92 @@ oracle ends: a program that ends (2 cycles), one that never does (65536 cycles: 
 kick check: 20000 random packets: 17676 sent by both with the same bytes (4448 wrap at 16 KB, 455 of exactly 64 KB, the largest 65536 bytes), 2324 refused by both, 0 different: PASSED
 ```
 
+## The translation (stage 2)
+
+### Building it
+
+The translation is part of the development build when the configure step gets the ELF:
+
+```
+export MKSM_VU1_CMAKE_ARGS="-DVU1GEN_ELF=D:/Projects/Recomps/mksm-ps2-recomp/game/SLES_535.24"
+./tools/vu1gen/devbuild.cmd -configure vu1difftest     # once; later builds keep the cache variable
+```
+
+`vu1gen --elf ... --images config/vu1_images.txt --out <build>/generated-vu1 --report <build>/generated-vu1/report.txt`
+then runs as a build step (whenever `vu1gen`, the configuration or the ELF changes) and writes `vu1n_small.cpp`,
+`vu1n_front.cpp`, `vu1n_game.cpp`, `vu1n_cut.cpp` and `vu1n_table.cpp` there (outside the repository: they quote the
+microcode). `vu1n_programs` compiles them `/fp:precise /bigobj` with `VU1N_MATH_REFERENCE` (generated code refuses to
+compile without it until the fast helpers exist). The analysis takes 0.1 s, compiling the four units about a minute.
+Without `VU1GEN_ELF` the empty table of `difftest/no_programs.cpp` is linked as before.
+
+### How it works
+
+- `vu_flow.cpp` explores every launch start: the MSCAL entries of the configuration with empty pipelines, then,
+  transitively, the continuation of every E bit with the pipelines flushed. A continuation carries the VI register a
+  branch could still read the old value of and the last JALR's return address, so the refusal of a branch reading
+  the VI register written by the pair before counts the E-bit delay slot, as stage 1 asked. The state is the timing
+  state of `vutiming.py` without the producer tags: pc, pending branch, E state, cycles left for every VF lane and
+  VI register, the divider, the EFU queue and its busy time, the MAC and clip entries in flight, "an XGKICK may be
+  active", the link. A pair's stall is calculatePairReadyCycle's; at an XGKICK that may find a transfer active every
+  extra wait up to the longest pending latency is tried.
+- What the clock decides is a count, taken when the pair executes: divisions in flight for a Q read (0 or 1), EFU
+  results in flight for MFP, MAC writers in flight for FMAND / FMEQ / FMOR, clip writers in flight for FCAND / FCEQ /
+  FCOR / FCGET. The emitted code keeps rings (`Vu1nRegs::q`, `p`, `mac`, `clip`: element k is the value k producers
+  ago, pushed by each producer) and each read site reads a constant element. A count that differs between two states
+  at one pair refuses the pair.
+- Refused pairs (DESIGN.md fact 5, all checked during the exploration): reserved instruction, outside the image's own
+  code, D or T bit, OPMULA / OPMSUB with a mask other than xyz, an upper writing VF00 lanes its lower reads, status
+  flag instructions, E bit on a branch or in a delay slot, a branch in a delay slot or in the pair after an E bit, a
+  branch reading a VI register the pair before wrote (delaysNextBranchRead), JR without a known return address, a
+  full EFU queue or flag pipeline. An entry is handled when no launch start at its pc reaches a refused pair. Upper
+  and lower writing the same VF register is supported (the lower's write is dropped, as in the interpreter).
+- Emission (`vu_emit.cpp`): per image one function with a switch on the entry pc (NotHandled before anything is
+  read), a label per pair reached in sequence, branch pairs followed by a copy of their delay slot and a goto (a
+  switch over the known targets for JR / JALR, `UnknownTarget` otherwise), E-bit pairs followed by a copy of the last
+  pair and the end of the launch. Each pair: the upper computed into a temporary from the state before the pair, the
+  lower executed (its VF write dropped for VF00 and when the upper writes the same register), then the upper's
+  result, its MAC flags and its clip value committed. Backward jumps count down `kVu1nLoopBudget`.
+- Reference arithmetic (`vu1n.h`): the interpreter's code lane by lane (normalised operands, float32 under round
+  toward zero, product-sums as two roundings, the binary64 fix-up of `normalizeFmacExactResult`, DIV / SQRT / RSQRT /
+  EFU and FTOI as coded). `std::signbit` is replaced by a bit test: MSVC calls the CRT for it.
+
+### Results (2026-11-11)
+
+`report.txt` (the analysis) against the study's timing table (`tpl_20_common.md` 5.4): equal in every count.
+
+| | front | game | cut |
+|---|---|---|---|
+| launch starts / states explored | 27 / 2,703 | 36 / 3,671 | 49 / 5,537 |
+| reachable pairs (all emitted) | 1,388 | 1,930 | 1,924 |
+| pairs with a fixed stall | 37 | 89 | 105 |
+| Q reads: last division / the one before / both | 51 / 55 / 0 | 46 / 15 / 0 | 72 / 30 / 0 |
+| MFP: last EFU result / the one before | - | - | 9 / 5 |
+| FMAND: 0 / 1 writers in flight | - | - | 1 / 2 |
+| FCAND: 0 writers in flight | - | - | 29 |
+| entries (MSCAL + continuations) / handled | 26 / 26 | 36 / 36 | 42 / 42 |
+
+(`small`: its continuation runs past the 17 own pairs into the shifted front code, so 1 of its 2 entries is refused.)
+
+`vu1difftest --captures ...` with the translation linked: **30,000 launches translated, 30,000 compared, 0
+mismatches** (front 5,314, game 12,520, cut 12,166; every MSCAL and MSCNT entry the captures use; no NotHandled, no
+UnknownTarget). `check_all.sh` passes as before, its `coverage` line now with the translation compared too.
+
+Checked that it can fail: replacing every "the division before" Q read of the cut program by "the last division"
+(31 sites) gave 9,623 mismatches in 12,166 cut launches (first differences in data memory and vf14).
+
+`--bench` (reference arithmetic; the machine is shared, so compare ratios within one run only):
+
+| | oracle us a launch | translation us a launch | speed-up |
+|---|---|---|---|
+| front | 478.7 | 13.1 | 36.5 |
+| game | 200.2 | 77.1 | 2.6 |
+| cut | 217.0 | 93.3 | 2.3 |
+| all | 256.3 | 72.3 | 3.5 |
+
+The game and cut launches cost about 75 ns a pair: the reference helpers inline to about 330 instructions a pair
+(641,849 lines of disassembly for `vu1n_cut.cpp`, a 40 KB stack frame), so a vertex loop does not fit the
+instruction cache. That is what stage 3 replaces.
+
 ## The runtime interface (`runtime/`)
 
 What is decided, and why, where the brief left room:
@@ -363,7 +456,19 @@ What is decided, and why, where the brief left room:
 - `vu1n.h` does not include upstream's `runtime/ps2_vu1.h` (`VU1State` is only declared), so the runtime and its
   tests build without PS2Recomp; generated code includes that header itself, before `vu1n.h`.
 
-## For the next stages
+## Next
+
+1. **Stage 3, fast arithmetic** (DESIGN.md 4.1, default build): SSE helpers behind the same names in `vu1n.h`
+   (MXCSR 0xFFC0, no FMA); the binary64 fix-up of an FMAC lane replaced by a cheap detection of the cases where it
+   matters (a result or product below FLT_MIN or above FLT_MAX, exponent-255 operands), with the exact path only
+   there; VF registers as `__m128` where it pays; MAC computed only by the producers an FMAND can see. Target: zero
+   mismatches on the captures again, every remaining class of difference listed here with its count.
+2. **Synthetic launches** (DESIGN.md section 6): the captures execute 50 / 664 / 795 of the 1,388 / 1,930 / 1,924
+   reachable pairs. Build records from captured ones with randomised lanes and input buffers, feed them through the
+   comparison of `processFile`, report the coverage reached (`--coverage`).
+3. **Glue** (`src/mksm_vu1.cpp` in the main repository, `MKSM_VU1=0|1|verify`), then the game.
+
+## Notes from stage 1 for the next stages
 
 Control flow (port `vucfg.py`), timing exploration (`vutiming.py`), emission, the arithmetic helpers, the translation
 side of the difftest. Things this stage found or fixed that they should know:

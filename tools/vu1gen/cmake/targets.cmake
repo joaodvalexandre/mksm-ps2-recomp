@@ -24,6 +24,8 @@ add_library(vu1gen_core STATIC
     "${VU1GEN_DIR}/src/images.cpp"
     "${VU1GEN_DIR}/src/listing.cpp"
     "${VU1GEN_DIR}/src/vu_decode.cpp"
+    "${VU1GEN_DIR}/src/vu_emit.cpp"
+    "${VU1GEN_DIR}/src/vu_flow.cpp"
 )
 target_include_directories(vu1gen_core PUBLIC "${VU1GEN_DIR}/src")
 vu1gen_target_defaults(vu1gen_core)
@@ -66,11 +68,39 @@ if(TARGET ps2_runtime)
         message(WARNING "vu1difftest: in the Release configuration upstream's VU1 interpreter is compiled /fp:fast. "
                         "It is the reference of the translation only as the quick profile compiles it (RelWithDebInfo, /fp:precise).")
     endif()
-    # The translated programs. vu1gen does not emit them yet, so an empty table stands in; the emission stage
-    # replaces this source by the generated ones (outside the repository, compiled /fp:precise).
-    add_library(vu1n_programs STATIC
-        "${VU1GEN_DIR}/difftest/no_programs.cpp"
-    )
+    # The translated programs. With VU1GEN_ELF (the game's SLES_535.24) vu1gen translates the images of
+    # config/vu1_images.txt into <build>/generated-vu1 (never into the repository: the sources quote the game's
+    # microcode) and they are compiled here, /fp:precise, with the reference arithmetic of runtime/vu1n.h. Without it
+    # an empty table stands in and vu1difftest runs the oracle side only.
+    set(VU1GEN_ELF "" CACHE FILEPATH "The game ELF (SLES_535.24) to translate the VU1 images of; empty: no translation")
+    if(VU1GEN_ELF)
+        set(VU1GEN_GENERATED_DIR "${CMAKE_BINARY_DIR}/generated-vu1")
+        set(VU1GEN_IMAGES_FILE "${VU1GEN_REPO_DIR}/config/vu1_images.txt")
+        file(STRINGS "${VU1GEN_IMAGES_FILE}" VU1GEN_IMAGE_LINES REGEX "^image ")
+        set(VU1GEN_GENERATED_SOURCES "${VU1GEN_GENERATED_DIR}/vu1n_table.cpp")
+        foreach(image_line IN LISTS VU1GEN_IMAGE_LINES)
+            string(REGEX REPLACE "^image ([a-z][a-z0-9_]*).*" "\\1" image_name "${image_line}")
+            list(APPEND VU1GEN_GENERATED_SOURCES "${VU1GEN_GENERATED_DIR}/vu1n_${image_name}.cpp")
+        endforeach()
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${VU1GEN_IMAGES_FILE}")
+        add_custom_command(
+            OUTPUT ${VU1GEN_GENERATED_SOURCES}
+            COMMAND vu1gen --elf "${VU1GEN_ELF}" --images "${VU1GEN_IMAGES_FILE}" --out "${VU1GEN_GENERATED_DIR}"
+                    --report "${VU1GEN_GENERATED_DIR}/report.txt"
+            DEPENDS vu1gen "${VU1GEN_ELF}" "${VU1GEN_IMAGES_FILE}"
+            COMMENT "vu1gen: translating the VU1 images"
+            VERBATIM)
+        add_library(vu1n_programs STATIC ${VU1GEN_GENERATED_SOURCES})
+        target_compile_definitions(vu1n_programs PRIVATE VU1N_MATH_REFERENCE)
+        target_include_directories(vu1n_programs PRIVATE $<TARGET_PROPERTY:ps2_runtime,INTERFACE_INCLUDE_DIRECTORIES>)
+        if(MSVC)
+            target_compile_options(vu1n_programs PRIVATE /fp:precise /bigobj)
+        endif()
+    else()
+        add_library(vu1n_programs STATIC
+            "${VU1GEN_DIR}/difftest/no_programs.cpp"
+        )
+    endif()
     target_link_libraries(vu1n_programs PUBLIC vu1n_runtime)
     vu1gen_target_defaults(vu1n_programs)
 
