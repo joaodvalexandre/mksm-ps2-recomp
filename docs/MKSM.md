@@ -627,11 +627,42 @@ independent of that runtime:
   `DIV` and `MULq`, `FTOI4`, `MAX`/`MINI` clamps), loads and stores, integer loops and `XGKICK`; the gameplay program
   reads no flags at all, the cutscene one uses `CLIP` with `FCAND` (29), `FMAND` (3), the EFU (`ESADD`, `ERLENG`, `MFP`)
   and `JALR`/`JR`.
+- **Audit of the VU0 macro and FPU translation.** A read-only workflow (one auditor for COP2 macro mode, one for
+  COP1, each followed by a verifier told to refute every finding against PCSX2's interpreter, a second source and the
+  hardware rows of ps2autotests) confirmed 22 differences from the hardware, `SQRT.S` among them. Fixed the same day:
+  - `patches/0031-vu0-macro-divider-ftoi-clip-max.patch`. `VDIV`, `VSQRT` and `VRSQRT` computed `fs / ft` with 0 for
+    a zero divisor, `sqrt(max(0, ft))` and `1 / sqrt(ft)` (the numerator ignored, 0 for a zero or negative operand).
+    They now follow the VU divider as the runtime's own VU interpreter does in micro mode (`ps2_vu0_div`,
+    `ps2_vu0_sqrt`, `ps2_vu0_rsqrt`): the largest number for a zero divisor, the root of the magnitude, the invalid
+    and division-by-zero status flags. `VFTOI` saturates positive values to `0x7FFFFFFF` (`cvttps2dq` gives
+    `0x80000000` for both signs). `VCLIPw` compares the bit patterns with |w| (a negative w set every flag). `VMAX` and
+    `VMINI` compare the bit patterns as sign and magnitude (`maxps`/`minps` return their second operand for any
+    pattern the host reads as a NaN, which is what a saturated result is). A new context (a started thread, an
+    interrupt handler's or a callback's) has VF0 = (0, 0, 0, 1) like the main one; it was all zeros, harmless until
+    `VRSQRT` and `VDIV` read their `vf0w` numerator. In this ELF the two `VRSQRT` with another numerator (`0x2B5CC0`,
+    `0x2B5FD0`, sphere push-out loops) and eight of the fourteen `VCLIPw` sit in functions nothing references, so the
+    visible effect is on degenerate inputs (w = 0, a slightly negative `1 - sin^2`, saturated colours).
+  - `patches/0032-fpu-compare-abs.patch`. `C.EQ`, `C.LT` and `C.LE` (4,305 sites) were host compares, false for every
+    pattern the host reads as a NaN. Since upstream clamps results, `x / 0` and an overflow give `0x7FFFFFFF`, such a
+    pattern: `div.s` followed by a range check (about 60 places, `0x151F3C` after `tanf` for one) kept the huge value
+    where the console clamps it, and the 52 `c.eq.s fN, fN` self-tests were false for such a value. The compares now order sign and magnitude
+    with exponent 255 as an ordinary exponent and exponent 0 as zero (`ps2_fcmp_key`; the verifier's model matches
+    all 160 compare rows of ps2autotests). `ABS.S` clears the sign bit only (`fabsf` went through a double in the
+    quick profile and set a mantissa bit of such patterns).
+  - Tests for both in the float semantics and code generator suites; 488 of 489 pass (the one failure, "VU0 macro
+    mappings cover all S1/S2 enums", reads a header by a relative path and fails outside its own folder).
+    **Verified in the game:** the menus and the cutscene run as before (same picture, no new message in the log).
+- **Confirmed by the audit and left as they are** (none is reached by this game in a way that shows, or the fix costs
+  speed for one unit in the last place): the EE and the VU truncate where the host rounds to nearest (ADD, SUB, MUL
+  and int-to-float; the real adder also drops the low bits of the smaller operand, PCSX2's `FPU_ADD_SUB`), so about
+  20 per cent of the sums and half of the products differ by one unit in the last place; a `MADD.S` whose product
+  overflows; an operand with exponent 0 and mantissa bits in ADD/SUB/MUL; `MAX.S`/`MIN.S` (unused); FCR31's fixed
+  bits and flags (`CFC1` unused); `CTC2` to FBRST with a reset bit; the VU0 memory instructions, the R register
+  instructions, `VCALLMSR` and VI0 as a destination (all unused).
 - **Next.** (1) The frame rate in 3D: translate the three VU1 programs ahead of time, from the user's own ELF at build
-  time, with upstream's exact VU1 as the fallback and as the reference the translation is checked against; then
-  profile again (the VIF unpack, the GS submission and the game's own code are next in line). (2) The other
-  VU0 macro differences seen while reading the translator, which a read-only audit is checking against PCSX2's
-  interpreter: `VDIV` by zero gives 0 instead of the largest number, `VSQRT` of a negative number gives 0, `VRSQRT`
-  ignores its numerator (2 of the game's 110 uses have one other than `vf0w`), `VFTOI` does not saturate.
-  (3) Sound: the port of the archived SPU2/libsd engine to upstream's IOP is in progress in a worktree; the user
-  put it after the 3D work.
+  time, with upstream's exact VU1 as the fallback and as the reference the translation is checked against (30,000
+  launches of the cutscene were captured for that); then profile again (the VIF unpack, the GS submission and the
+  game's own code are next in line). (2) Gameplay after the opening cutscene has not been seen since the camera fix:
+  the cutscene takes minutes at this speed and Start does not skip it. (3) Sound: the archived SPU2 and libsd engine
+  is ported to upstream's IOP in a worktree (SPU2 core, libsd by ordinal; unit tests and a harness with the game's
+  own IRX modules pass); the host audio output and the IRX argument fix remain. The user put it after the 3D work.

@@ -1,0 +1,111 @@
+diff --git a/ps2xRuntime/include/ps2_runtime_macros.h b/ps2xRuntime/include/ps2_runtime_macros.h
+index 7ce58b5..f5fa475 100644
+--- a/ps2xRuntime/include/ps2_runtime_macros.h
++++ b/ps2xRuntime/include/ps2_runtime_macros.h
+@@ -963,7 +963,9 @@ inline __m128i ps2_u64_to_epi64_pair(uint64_t value)
+ #define FPU_DIV_S(a, b) ps2_fdiv((float)(a), (float)(b))
+ #define FPU_RSQRT_S(a, b) ps2_frsqrt((float)(a), (float)(b))
+ #define FPU_SQRT_S(a) ps2_fsqrt((float)(a))
+-#define FPU_ABS_S(a) fabsf((float)(a))
++// MKSM: ABS.S clears the sign bit and nothing else (fabsf went through a double in builds that do not inline it,
++// which sets a mantissa bit of a pattern with exponent 255).
++#define FPU_ABS_S(a) std::bit_cast<float>(std::bit_cast<uint32_t>((float)(a)) & 0x7FFFFFFFu)
+ #define FPU_MOV_S(a) ((float)(a))
+ #define FPU_NEG_S(a) (-(float)(a))
+ #define FPU_ROUND_L_S(a) ((int64_t)roundf((float)(a)))
+@@ -989,22 +991,34 @@ static inline int32_t ps2_cvt_w_s(float value)
+ }
+ #define FPU_CVT_W_S(a) ps2_cvt_w_s((float)(a))
+ #define FPU_CVT_L_S(a) ((int64_t)(float)(a))
++// MKSM: the EE compares in its own number format: sign and magnitude, an exponent of 255 is an ordinary exponent
++// (there is no NaN and no infinity, so nothing is ever unordered) and an exponent of 0 is zero (-0 equals +0). A host
++// compare is false for every pattern the host reads as a NaN, 0x7FFFFFFF among them, which is what x/0 and an
++// overflow give. Checked against the 160 compare rows of ps2autotests (tests/cpu/ee_fpu/compare.expected).
++inline int32_t ps2_fcmp_key(float value)
++{
++    const uint32_t bits = std::bit_cast<uint32_t>(value);
++    const int32_t magnitude = static_cast<int32_t>(bits & 0x7FFFFFFFu);
++    if (magnitude < 0x00800000)
++        return 0;
++    return (bits & 0x80000000u) ? -magnitude : magnitude;
++}
+ #define FPU_C_F_S(a, b) (0)
+-#define FPU_C_UN_S(a, b) (isnan((float)(a)) || isnan((float)(b)))
+-#define FPU_C_EQ_S(a, b) ((float)(a) == (float)(b))
+-#define FPU_C_UEQ_S(a, b) ((float)(a) == (float)(b) || isnan((float)(a)) || isnan((float)(b)))
+-#define FPU_C_OLT_S(a, b) ((float)(a) < (float)(b))
+-#define FPU_C_ULT_S(a, b) ((float)(a) < (float)(b) || isnan((float)(a)) || isnan((float)(b)))
+-#define FPU_C_OLE_S(a, b) ((float)(a) <= (float)(b))
+-#define FPU_C_ULE_S(a, b) ((float)(a) <= (float)(b) || isnan((float)(a)) || isnan((float)(b)))
++#define FPU_C_UN_S(a, b) (0)
++#define FPU_C_EQ_S(a, b) (ps2_fcmp_key((float)(a)) == ps2_fcmp_key((float)(b)))
++#define FPU_C_UEQ_S(a, b) FPU_C_EQ_S(a, b)
++#define FPU_C_OLT_S(a, b) (ps2_fcmp_key((float)(a)) < ps2_fcmp_key((float)(b)))
++#define FPU_C_ULT_S(a, b) FPU_C_OLT_S(a, b)
++#define FPU_C_OLE_S(a, b) (ps2_fcmp_key((float)(a)) <= ps2_fcmp_key((float)(b)))
++#define FPU_C_ULE_S(a, b) FPU_C_OLE_S(a, b)
+ #define FPU_C_SF_S(a, b) (0)
+-#define FPU_C_NGLE_S(a, b) (isnan((float)(a)) || isnan((float)(b)))
+-#define FPU_C_SEQ_S(a, b) ((float)(a) == (float)(b))
+-#define FPU_C_NGL_S(a, b) ((float)(a) == (float)(b) || isnan((float)(a)) || isnan((float)(b)))
+-#define FPU_C_LT_S(a, b) ((float)(a) < (float)(b))
+-#define FPU_C_NGE_S(a, b) ((float)(a) < (float)(b) || isnan((float)(a)) || isnan((float)(b)))
+-#define FPU_C_LE_S(a, b) ((float)(a) <= (float)(b))
+-#define FPU_C_NGT_S(a, b) ((float)(a) <= (float)(b) || isnan((float)(a)) || isnan((float)(b)))
++#define FPU_C_NGLE_S(a, b) (0)
++#define FPU_C_SEQ_S(a, b) FPU_C_EQ_S(a, b)
++#define FPU_C_NGL_S(a, b) FPU_C_EQ_S(a, b)
++#define FPU_C_LT_S(a, b) FPU_C_OLT_S(a, b)
++#define FPU_C_NGE_S(a, b) FPU_C_OLT_S(a, b)
++#define FPU_C_LE_S(a, b) FPU_C_OLE_S(a, b)
++#define FPU_C_NGT_S(a, b) FPU_C_OLE_S(a, b)
+ 
+ // QFSRV: Quadword Funnel Shift Right Variable
+ // Concatenates rs || rt (256 bits) and right-shifts by SA bits, taking lower 128 bits.
+diff --git a/ps2xTest/src/ps2_float_semantics_tests.cpp b/ps2xTest/src/ps2_float_semantics_tests.cpp
+index 3abe109..f40e0c4 100644
+--- a/ps2xTest/src/ps2_float_semantics_tests.cpp
++++ b/ps2xTest/src/ps2_float_semantics_tests.cpp
+@@ -379,6 +379,42 @@ void register_ps2_float_semantics_tests()
+             t.Equals(below & 7u, 0u, "and not below it");
+         });
+ 
++        // MKSM: the compares in the PS2's number format (hardware rows of ps2autotests, tests/cpu/ee_fpu/compare):
++        // exponent 255 is an ordinary exponent, exponent 0 is zero. Host compares are false for the patterns the host
++        // reads as NaN, such as the 0x7FFFFFFF that 1/0 gives.
++        tc.Run("FPU compares order sign and magnitude, with no NaN and exponent 0 as zero", [](TestCase &t)
++        {
++            const float one = 1.0f;
++            const float huge = floatOf(0x7FFFFFFFu);
++            t.IsTrue(FPU_C_OLT_S(one, floatOf(0x7F7FFFFFu)), "lt 1, max");
++            t.IsTrue(FPU_C_OLT_S(one, huge), "lt 1, 7fffffff");
++            t.IsTrue(FPU_C_EQ_S(huge, huge), "eq 7fffffff, 7fffffff");
++            t.IsTrue(FPU_C_OLE_S(0.0f, huge), "le 0, 7fffffff");
++            t.IsTrue(FPU_C_EQ_S(0.0f, floatOf(0x00000001u)), "eq 0, 00000001");
++            t.IsFalse(FPU_C_OLT_S(0.0f, floatOf(0x00000001u)), "lt 0, 00000001");
++            t.IsTrue(FPU_C_OLT_S(floatOf(0x7F800000u), floatOf(0x7F800001u)), "lt 7f800000, 7f800001");
++            t.IsTrue(FPU_C_EQ_S(0.0f, floatOf(0x80000000u)), "eq +0, -0");
++            t.IsTrue(FPU_C_OLT_S(floatOf(0xFFFFFFFFu), -1.0f), "lt ffffffff, -1");
++            t.IsTrue(FPU_C_OLT_S(-2.0f, -1.0f), "lt -2, -1");
++            t.IsFalse(FPU_C_OLT_S(2.0f, 1.0f), "lt 2, 1");
++            t.IsTrue(FPU_C_OLE_S(1.0f, 1.0f), "le 1, 1");
++            t.IsFalse(FPU_C_EQ_S(1.0f, 2.0f), "eq 1, 2");
++            // the quotient of a division by zero compares as the largest number
++            const float quotient = FPU_DIV_S(one, 0.0f);
++            t.IsTrue(FPU_C_OLT_S(100.0f, quotient), "lt 100, 1/0");
++            t.IsTrue(FPU_C_EQ_S(quotient, quotient), "eq 1/0, 1/0");
++        });
++
++        // MKSM: ABS.S clears the sign bit and leaves the rest of the pattern (hardware row "abs CF_MAX_EXP: 7f800001").
++        tc.Run("ABS.S only clears the sign bit", [](TestCase &t)
++        {
++            t.Equals(bitsOf(FPU_ABS_S(floatOf(0xFF800001u))), 0x7F800001u, "abs ff800001");
++            t.Equals(bitsOf(FPU_ABS_S(floatOf(0x7F800001u))), 0x7F800001u, "abs 7f800001");
++            t.Equals(bitsOf(FPU_ABS_S(floatOf(0xFFBFFFFFu))), 0x7FBFFFFFu, "abs ffbfffff");
++            t.Equals(bitsOf(FPU_ABS_S(-2.5f)), bitsOf(2.5f), "abs -2.5");
++            t.Equals(bitsOf(FPU_ABS_S(floatOf(0x80000000u))), 0x00000000u, "abs -0");
++        });
++
+         // MKSM: SQRT.S fd, ft: the operand is in the ft field and the fs field is zero (0x460C0044 is
+         // "sqrt.s $f1, $f12" in the game). The translator took fs: every square root was the root of $f0.
+         tc.Run("SQRT.S takes its operand from ft", [](TestCase &t)

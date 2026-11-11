@@ -1,0 +1,425 @@
+diff --git a/ps2xRecomp/src/lib/vu_translation_helpers.cpp b/ps2xRecomp/src/lib/vu_translation_helpers.cpp
+index 509fd07..7b989a0 100644
+--- a/ps2xRecomp/src/lib/vu_translation_helpers.cpp
++++ b/ps2xRecomp/src/lib/vu_translation_helpers.cpp
+@@ -75,21 +75,25 @@ namespace ps2recomp
+         uint8_t fs_reg = inst.rd;
+         uint8_t ft_reg = inst.rt;
+ 
+-        return fmt::format("{{ float fs = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); float ft = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); ctx->vu0_q = (ft != 0.0f) ? (fs / ft) : 0.0f; }}", fs_reg, fs_reg, fsf, ft_reg, ft_reg, ftf);
++        return fmt::format("{{ float fs = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); float ft = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); ps2_vu0_div(ctx, fs, ft); }}", fs_reg, fs_reg, fsf, ft_reg, ft_reg, ftf); // MKSM: x/0 is the largest number, not 0
+     }
+ 
+     std::string CodeGenerator::translateVU_VSQRT(const Instruction &inst)
+     {
+         uint8_t ftf = inst.vectorInfo.ftf;
+         uint8_t ft_reg = inst.rt;
+-        return fmt::format("{{ float ft = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); ctx->vu0_q = sqrtf(std::max(0.0f, ft)); }}", ft_reg, ft_reg, ftf);
++        // MKSM: the root of the magnitude (a negative operand gave 0)
++        return fmt::format("{{ float ft = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); ps2_vu0_sqrt(ctx, ft); }}", ft_reg, ft_reg, ftf);
+     }
+ 
+     std::string CodeGenerator::translateVU_VRSQRT(const Instruction &inst)
+     {
++        uint8_t fsf = inst.vectorInfo.fsf;
+         uint8_t ftf = inst.vectorInfo.ftf;
++        uint8_t fs_reg = inst.rd;
+         uint8_t ft_reg = inst.rt;
+-        return fmt::format("{{ float ft = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); ctx->vu0_q = (ft > 0.0f) ? (1.0f / sqrtf(ft)) : 0.0f; }}", ft_reg, ft_reg, ftf);
++        // MKSM: Q = fs / sqrt(|ft|); the numerator was taken as 1 and a negative or zero operand gave 0
++        return fmt::format("{{ float fs = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); float ft = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); ps2_vu0_rsqrt(ctx, fs, ft); }}", fs_reg, fs_reg, fsf, ft_reg, ft_reg, ftf);
+     }
+ 
+     std::string CodeGenerator::translateVU_VMTIR(const Instruction &inst)
+@@ -236,6 +240,7 @@ namespace ps2recomp
+                            vfd, vfd);
+     }
+ 
++    // MKSM: MAX and MINI (all forms below) compare the bit patterns, as the VU does: ps2_vmax / ps2_vmini.
+     std::string CodeGenerator::translateVU_VMINI_Field(const Instruction &inst)
+     {
+         uint8_t vfd = inst.sa;
+@@ -246,7 +251,7 @@ namespace ps2recomp
+ 
+         std::string shuffle_pattern = fmt::format("_MM_SHUFFLE({},{},{},{})", field, field, field, field);
+ 
+-        return fmt::format("{{ __m128 res = _mm_min_ps(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); "
++        return fmt::format("{{ __m128 res = ps2_vmini(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); "
+                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
+                            vfs, vft, vft, shuffle_pattern,
+@@ -265,7 +270,7 @@ namespace ps2recomp
+ 
+         std::string shuffle_pattern = fmt::format("_MM_SHUFFLE({},{},{},{})", field, field, field, field);
+ 
+-        return fmt::format("{{ __m128 res = _mm_max_ps(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); "
++        return fmt::format("{{ __m128 res = ps2_vmax(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); "
+                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
+                            vfs, vft, vft, shuffle_pattern,
+@@ -326,7 +331,7 @@ namespace ps2recomp
+         uint8_t vfs = inst.rd;
+         uint8_t vft = inst.rt;
+         uint8_t dest_mask = inst.vectorInfo.vectorField;
+-        return fmt::format("{{ __m128 res = _mm_max_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}]); "
++        return fmt::format("{{ __m128 res = ps2_vmax(ctx->vu0_vf[{}], ctx->vu0_vf[{}]); "
+                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
+                            vfs, vft,
+@@ -340,7 +345,7 @@ namespace ps2recomp
+         uint8_t vfd = inst.sa;
+         uint8_t vfs = inst.rd;
+         uint8_t dest_mask = inst.vectorInfo.vectorField;
+-        return fmt::format("{{ __m128 res = _mm_max_ps(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
++        return fmt::format("{{ __m128 res = ps2_vmax(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
+                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
+                            vfs,
+@@ -354,7 +359,7 @@ namespace ps2recomp
+         uint8_t vfd = inst.sa;
+         uint8_t vfs = inst.rd;
+         uint8_t dest_mask = inst.vectorInfo.vectorField;
+-        return fmt::format("{{ __m128 res = _mm_min_ps(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
++        return fmt::format("{{ __m128 res = ps2_vmini(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
+                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
+                            vfs,
+@@ -459,7 +464,7 @@ namespace ps2recomp
+         uint8_t vfs = inst.rd;
+         uint8_t vft = inst.rt;
+         uint8_t dest_mask = inst.vectorInfo.vectorField;
+-        return fmt::format("{{ __m128 res = _mm_min_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}]); "
++        return fmt::format("{{ __m128 res = ps2_vmini(ctx->vu0_vf[{}], ctx->vu0_vf[{}]); "
+                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
+                            vfs, vft,
+@@ -755,7 +760,7 @@ namespace ps2recomp
+ 
+         return fmt::format("{{ __m128 src = ctx->vu0_vf[{}]; "
+                            "src = _mm_mul_ps(src, _mm_set1_ps({})); "
+-                           "__m128i res_i = _mm_cvttps_epi32(src); "
++                           "__m128i res_i = ps2_vu_ftoi(src); " // MKSM: saturates
+                            "__m128 res = _mm_castsi128_ps(res_i); "
+                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
+diff --git a/ps2xRecomp/src/lib/vu_translator.cpp b/ps2xRecomp/src/lib/vu_translator.cpp
+index 474bd02..feac5ca 100644
+--- a/ps2xRecomp/src/lib/vu_translator.cpp
++++ b/ps2xRecomp/src/lib/vu_translator.cpp
+@@ -263,17 +263,11 @@ namespace ps2recomp
+                 }
+                 case VU0_S2_VCLIPw:
+                 {
+-                    uint8_t field = inst.function & 0x3;
+-                    std::string shuffle_pattern = fmt::format("_MM_SHUFFLE({},{},{},{})", field, field, field, field);
+-
+                     return fmt::format(
+-                        "{{ __m128 fs = ctx->vu0_vf[{}]; "
+-                        "__m128 ft = _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {}); "
+-                        "__m128 neg_ft = _mm_xor_ps(ft, _mm_castsi128_ps(_mm_set1_epi32(0x80000000))); "
+-                        "__m128 gt = _mm_cmpgt_ps(fs, ft); "
+-                        "__m128 lt = _mm_cmplt_ps(fs, neg_ft); "
+-                        "uint32_t gt_mask = (uint32_t)_mm_movemask_ps(gt); "
+-                        "uint32_t lt_mask = (uint32_t)_mm_movemask_ps(lt); "
++                        // MKSM: compared as the VU does, on the bit patterns and with |w| (ps2_vu_clip_masks): a
++                        // negative w set every flag of a vertex in front of it
++                        "{{ uint32_t gt_mask = 0u, lt_mask = 0u; "
++                        "ps2_vu_clip_masks(ctx->vu0_vf[{}], ctx->vu0_vf[{}], gt_mask, lt_mask); "
+                         // MKSM: hardware order (VU manual, PCSX2 _vuCLIP): bit 0 = x > +w, bit 1 = x < -w, bit 2 = y > +w,
+                         // bit 3 = y < -w, bit 4 = z > +w, bit 5 = z < -w. With the pairs swapped, a sphere-vs-frustum
+                         // test that reads the "< -w" bits culls every object that is comfortably inside the frustum.
+@@ -281,7 +275,7 @@ namespace ps2recomp
+                         "((gt_mask & 0x2) << 1) | ((lt_mask & 0x2) << 2) | "
+                         "((gt_mask & 0x4) << 2) | ((lt_mask & 0x4) << 3); "
+                         "ctx->vu0_clip_flags = ((ctx->vu0_clip_flags << 6) | (flags & 0x3F)) & 0xFFFFFF; }}",
+-                        inst.rd, inst.rt, inst.rt, shuffle_pattern);
++                        inst.rd, inst.rt);
+                 }
+                 case VU0_S2_VNOP:
+                     return fmt::format("// NOP operation, no action needed for VU0");
+diff --git a/ps2xRuntime/include/ps2_runtime.h b/ps2xRuntime/include/ps2_runtime.h
+index 3789614..51b97a4 100644
+--- a/ps2xRuntime/include/ps2_runtime.h
++++ b/ps2xRuntime/include/ps2_runtime.h
+@@ -150,6 +150,10 @@ struct alignas(16) R5900Context
+ 
+         // Initialize VU0 registers
+         vu0_q = 1.0f; // Q register usually initialized to 1.0
++        // MKSM: VF0 is hardwired to (0, 0, 0, 1) in every context, not only the main thread's: the contexts of started
++        // threads, interrupt handlers and callbacks are built here.
++        vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
++        vu0_r = _mm_castsi128_ps(_mm_set1_epi32(0x3F800000));
+ 
+         // Reset COP0 registers
+         cop0_random = 47; // Start at maximum value
+diff --git a/ps2xRuntime/include/ps2_runtime_macros.h b/ps2xRuntime/include/ps2_runtime_macros.h
+index d65ec10..7ce58b5 100644
+--- a/ps2xRuntime/include/ps2_runtime_macros.h
++++ b/ps2xRuntime/include/ps2_runtime_macros.h
+@@ -369,6 +369,103 @@ inline __m128 ps2_vmul(__m128 a, __m128 b)
+     return ps2_vfinish(a, b, _mm_mul_ps(a, b), Ps2VecOp::Mul);
+ }
+ 
++// MKSM: the VU divider in macro mode, as the VU computes (PCSX2 _vuDIV, _vuSQRT, _vuRSQRT; the runtime's VU
++// interpreter does the same in micro mode). An operand with exponent 0 is zero and one with exponent 255 the largest
++// number; a zero divisor gives the largest number with the sign of fs xor ft (of fs alone for RSQRT); the root is of the
++// magnitude; the result is saturated and flushed. The status register gets the invalid (bit 4: 0/0, a negative
++// radicand) and division by zero (bit 5) flags of this instruction and their sticky copies (bits 10, 11).
++inline float ps2_vu_operand(float value)
++{
++    const uint32_t bits = std::bit_cast<uint32_t>(value);
++    const uint32_t exponent = bits & 0x7F800000u;
++    if (exponent == 0u)
++        return std::bit_cast<float>(bits & 0x80000000u);
++    if (exponent == 0x7F800000u)
++        return std::bit_cast<float>((bits & 0x80000000u) | 0x7F7FFFFFu);
++    return value;
++}
++
++inline void ps2_vu0_set_divide_flags(R5900Context *ctx, uint32_t flags)
++{
++    ctx->vu0_status = static_cast<uint16_t>((ctx->vu0_status & 0xFCFu) | flags | (flags << 6));
++}
++
++inline void ps2_vu0_div(R5900Context *ctx, float fs, float ft)
++{
++    const float numerator = ps2_vu_operand(fs);
++    const float divisor = ps2_vu_operand(ft);
++    if (divisor == 0.0f)
++    {
++        ps2_vu0_set_divide_flags(ctx, numerator == 0.0f ? 0x10u : 0x20u);
++        const uint32_t sign = (std::bit_cast<uint32_t>(numerator) ^ std::bit_cast<uint32_t>(divisor)) & 0x80000000u;
++        ctx->vu0_q = std::bit_cast<float>(sign | 0x7F7FFFFFu);
++        return;
++    }
++    ps2_vu0_set_divide_flags(ctx, 0u);
++    ctx->vu0_q = ps2_vu_operand(numerator / divisor);
++}
++
++inline void ps2_vu0_sqrt(R5900Context *ctx, float ft)
++{
++    const float radicand = ps2_vu_operand(ft);
++    ps2_vu0_set_divide_flags(ctx, radicand < 0.0f ? 0x10u : 0u);
++    ctx->vu0_q = std::sqrt(std::fabs(radicand));
++}
++
++inline void ps2_vu0_rsqrt(R5900Context *ctx, float fs, float ft)
++{
++    const float numerator = ps2_vu_operand(fs);
++    const float radicand = ps2_vu_operand(ft);
++    const float root = std::sqrt(std::fabs(radicand));
++    if (root == 0.0f)
++    {
++        ps2_vu0_set_divide_flags(ctx, numerator == 0.0f ? 0x10u : 0x20u);
++        ctx->vu0_q = std::bit_cast<float>((std::bit_cast<uint32_t>(numerator) & 0x80000000u) | 0x7F7FFFFFu);
++        return;
++    }
++    ps2_vu0_set_divide_flags(ctx, radicand < 0.0f ? 0x10u : 0u);
++    ctx->vu0_q = ps2_vu_operand(numerator / root);
++}
++
++// MKSM: FTOI saturates: cvttps2dq gives 0x80000000 for everything out of range, the VU gives 0x7FFFFFFF for the
++// positive values (patterns of 2^31 and above, exponent 255 included) and 0x80000000 for the negative ones.
++inline __m128i ps2_vu_ftoi(__m128 scaled)
++{
++    const __m128i truncated = _mm_cvttps_epi32(scaled);
++    return _mm_xor_si128(truncated, _mm_cmpgt_epi32(_mm_castps_si128(scaled), _mm_set1_epi32(0x4EFFFFFF)));
++}
++
++// MKSM: the comparisons of CLIP as the VU makes them: on the bit patterns, with |w| (a w with exponent 0 limits like
++// the largest such number). `above` has bit n set when lane n is greater than +|w|, `below` when it is less than -|w|.
++inline void ps2_vu_clip_masks(__m128 fs, __m128 ft, uint32_t &above, uint32_t &below)
++{
++    const __m128i w = _mm_castps_si128(_mm_shuffle_ps(ft, ft, _MM_SHUFFLE(3, 3, 3, 3)));
++    const __m128i limit = _mm_max_epi32(_mm_and_si128(w, _mm_set1_epi32(0x7FFFFFFF)), _mm_set1_epi32(0x007FFFFF));
++    const __m128i bits = _mm_castps_si128(fs);
++    above = static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(_mm_cmpgt_epi32(bits, limit))));
++    below = static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(
++        _mm_cmpgt_epi32(_mm_xor_si128(bits, _mm_set1_epi32(static_cast<int>(0x80000000u))), limit))));
++}
++
++// MKSM: MAX and MINI as the VU computes them (PCSX2 fp_max/fp_min, microVU's integer path): the bit patterns compared
++// as sign and magnitude, so a pattern with exponent 255 is an ordinary large number and -0 is below +0. maxps and minps
++// return their second operand whenever one is such a pattern (a NaN for the host) or both are zeros.
++inline __m128i ps2_vu_order_key(__m128 value) // sign and magnitude to two's complement order
++{
++    const __m128i bits = _mm_castps_si128(value);
++    return _mm_xor_si128(bits, _mm_srli_epi32(_mm_srai_epi32(bits, 31), 1));
++}
++
++inline __m128 ps2_vmax(__m128 a, __m128 b)
++{
++    return _mm_blendv_ps(b, a, _mm_castsi128_ps(_mm_cmpgt_epi32(ps2_vu_order_key(a), ps2_vu_order_key(b))));
++}
++
++inline __m128 ps2_vmini(__m128 a, __m128 b)
++{
++    return _mm_blendv_ps(a, b, _mm_castsi128_ps(_mm_cmpgt_epi32(ps2_vu_order_key(a), ps2_vu_order_key(b))));
++}
++
+ // MKSM: the MAC flags of a VU0 macro arithmetic instruction (ADD, SUB, MUL, MADD, MSUB and their forms, OPMULA,
+ // OPMSUB). `res` is the instruction's result in all four lanes and `field` its destination mask (x = 8, y = 4, z = 2,
+ // w = 1). Zero flags in bits 3..0 and sign flags in bits 7..4, x in the upper bit of each group; the lanes outside the
+diff --git a/ps2xTest/src/code_generator_tests.cpp b/ps2xTest/src/code_generator_tests.cpp
+index 74ca999..0901c3f 100644
+--- a/ps2xTest/src/code_generator_tests.cpp
++++ b/ps2xTest/src/code_generator_tests.cpp
+@@ -1141,6 +1141,54 @@ void register_code_generator_tests()
+                      "bit 4 must be z > +w and bit 5 z < -w");
+             t.IsTrue(out.find("(ctx->vu0_clip_flags << 6)") != std::string::npos,
+                      "the previous results must shift up by 6 bits");
++            t.IsTrue(out.find("ps2_vu_clip_masks(ctx->vu0_vf[8], ctx->vu0_vf[13], gt_mask, lt_mask)") != std::string::npos,
++                     "the comparisons must be the VU's (bit patterns against |w|)");
++        });
++
++        // MKSM: VDIV, VSQRT and VRSQRT go through the VU divider's rules, VRSQRT with its numerator, and VFTOI
++        // saturates (the helpers are tested in the float semantics suite).
++        tc.Run("VU0 macro divider and FTOI use the VU's rules", [](TestCase &t) {
++            R5900Decoder decoder;
++            CodeGenerator gen({}, {});
++
++            const std::string rsqrt = gen.translateInstruction(decoder.decodeInstruction(0x2B5CC0u, 0x4A1F33BEu)); // vrsqrt $Q, $vf6x, $vf31x
++            printGeneratedCode("vrsqrt $Q, $vf6x, $vf31x", rsqrt);
++            t.IsTrue(rsqrt.find("ps2_vu0_rsqrt(ctx, fs, ft)") != std::string::npos, "VRSQRT must divide its numerator by the root");
++            t.IsTrue(rsqrt.find("float fs = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[6], ctx->vu0_vf[6], _MM_SHUFFLE(0,0,0,0)))") != std::string::npos,
++                     "the numerator is fs (vf6x)");
++            t.IsTrue(rsqrt.find("float ft = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[31], ctx->vu0_vf[31], _MM_SHUFFLE(0,0,0,0)))") != std::string::npos,
++                     "the radicand is ft (vf31x)");
++
++            const std::string div = gen.translateInstruction(decoder.decodeInstruction(0x213BC0u, 0x4BEC03BCu)); // vdiv $Q, $vf0w, $vf12w
++            printGeneratedCode("vdiv $Q, $vf0w, $vf12w", div);
++            t.IsTrue(div.find("ps2_vu0_div(ctx, fs, ft)") != std::string::npos, "VDIV must use the VU divider");
++            t.IsTrue(div.find("ctx->vu0_vf[0], ctx->vu0_vf[0], _MM_SHUFFLE(0,0,0,3)") != std::string::npos, "the numerator is vf0w");
++            t.IsTrue(div.find("ctx->vu0_vf[12], ctx->vu0_vf[12], _MM_SHUFFLE(0,0,0,3)") != std::string::npos, "the divisor is vf12w");
++
++            // COP2 CO, ft = vf5, ftf = x: vsqrt $Q, $vf5x
++            const std::string sqrt = gen.translateInstruction(decoder.decodeInstruction(0x1000u, 0x4A0503BDu));
++            printGeneratedCode("vsqrt $Q, $vf5x", sqrt);
++            t.IsTrue(sqrt.find("ps2_vu0_sqrt(ctx, ft)") != std::string::npos, "VSQRT must take the root of the magnitude");
++
++            const std::string ftoi = gen.translateInstruction(decoder.decodeInstruction(0x213BCCu, 0x4BED617Du)); // vftoi4.xyzw $vf13, $vf12
++            t.IsTrue(ftoi.find("ps2_vu_ftoi(src)") != std::string::npos, "VFTOI must saturate");
++
++            const std::string vmax = gen.translateInstruction(decoder.decodeInstruction(0x39D3ECu, 0x4BC0086Bu)); // vmax.xyz $vf1, $vf1, $vf0
++            t.IsTrue(vmax.find("ps2_vmax(ctx->vu0_vf[1], ctx->vu0_vf[0])") != std::string::npos, "VMAX must compare the bit patterns: " + vmax);
++            const std::string vmini = gen.translateInstruction(decoder.decodeInstruction(0x39D3F8u, 0x4BC4086Fu)); // vmini.xyz $vf1, $vf1, $vf4
++            t.IsTrue(vmini.find("ps2_vmini(ctx->vu0_vf[1], ctx->vu0_vf[4])") != std::string::npos, "VMINI must compare the bit patterns: " + vmini);
++            // every other form: broadcast (0x10-0x17) and I (0x1D, 0x1F); COP2 CO, xyz, ft = vf7, fs = vf11, fd = vf3
++            const uint32_t base = (0x12u << 26) | (1u << 25) | (0xEu << 21) | (7u << 16) | (11u << 11) | (3u << 6);
++            for (uint32_t func : {0x10u, 0x13u, 0x1Du})
++            {
++                const std::string out = gen.translateInstruction(decoder.decodeInstruction(0x1000u, base | func));
++                t.IsTrue(out.find("ps2_vmax(") != std::string::npos && out.find("_mm_max_ps") == std::string::npos, "MAX form " + std::to_string(func));
++            }
++            for (uint32_t func : {0x14u, 0x17u, 0x1Fu})
++            {
++                const std::string out = gen.translateInstruction(decoder.decodeInstruction(0x1000u, base | func));
++                t.IsTrue(out.find("ps2_vmini(") != std::string::npos && out.find("_mm_min_ps") == std::string::npos, "MINI form " + std::to_string(func));
++            }
+         });
+ 
+         // MKSM: VF0 is hardwired to (0, 0, 0, 1). Games compare vectors with "vsub.xyzw vf0, a, b" and the MAC flags;
+diff --git a/ps2xTest/src/ps2_float_semantics_tests.cpp b/ps2xTest/src/ps2_float_semantics_tests.cpp
+index d745590..3abe109 100644
+--- a/ps2xTest/src/ps2_float_semantics_tests.cpp
++++ b/ps2xTest/src/ps2_float_semantics_tests.cpp
+@@ -286,6 +286,99 @@ void register_ps2_float_semantics_tests()
+                      "zero set, sign cleared, the sticky bits kept");
+         });
+ 
++        // MKSM: the VU divider in macro mode (PCSX2 _vuDIV, _vuSQRT, _vuRSQRT; the runtime's VU interpreter in micro
++        // mode): the largest number for a zero divisor, the root of the magnitude, the D and I flags.
++        tc.Run("VU0 macro DIV, SQRT and RSQRT follow the VU divider", [](TestCase &t)
++        {
++            R5900Context ctx{};
++            ctx.vu0_status = 0x0001u; // a zero flag that must survive
++
++            ps2_vu0_div(&ctx, 1.0f, 0.0f);
++            t.Equals(bitsOf(ctx.vu0_q), 0x7F7FFFFFu, "1/0 is the largest number");
++            t.Equals(static_cast<uint32_t>(ctx.vu0_status), 0x0821u, "division by zero and its sticky flag");
++            ps2_vu0_div(&ctx, -1.0f, 0.0f);
++            t.Equals(bitsOf(ctx.vu0_q), 0xFF7FFFFFu, "-1/0 is the largest negative number");
++            ps2_vu0_div(&ctx, 0.0f, 0.0f);
++            t.Equals(bitsOf(ctx.vu0_q), 0x7F7FFFFFu, "0/0 is the largest number too");
++            t.Equals(static_cast<uint32_t>(ctx.vu0_status), 0x0C11u, "invalid replaces division by zero, both sticky flags stay");
++            ps2_vu0_div(&ctx, 1.0f, floatOf(0x00000001u));
++            t.Equals(bitsOf(ctx.vu0_q), 0x7F7FFFFFu, "a divisor with exponent 0 is zero");
++            ps2_vu0_div(&ctx, 6.0f, 3.0f);
++            t.Equals(bitsOf(ctx.vu0_q), bitsOf(2.0f), "6/3");
++            t.Equals(static_cast<uint32_t>(ctx.vu0_status), 0x0C01u, "an ordinary division clears the two flags and keeps the sticky ones");
++            ps2_vu0_div(&ctx, floatOf(0x7F000000u), 0.25f);
++            t.Equals(bitsOf(ctx.vu0_q), 0x7F7FFFFFu, "an overflowing quotient saturates");
++
++            ctx.vu0_status = 0u;
++            ps2_vu0_sqrt(&ctx, -4.0f);
++            t.Equals(bitsOf(ctx.vu0_q), bitsOf(2.0f), "the root of the magnitude");
++            t.Equals(static_cast<uint32_t>(ctx.vu0_status), 0x0410u, "a negative radicand is invalid");
++            ps2_vu0_sqrt(&ctx, 9.0f);
++            t.Equals(bitsOf(ctx.vu0_q), bitsOf(3.0f), "sqrt(9)");
++
++            ctx.vu0_status = 0u;
++            ps2_vu0_rsqrt(&ctx, 2.0f, 0.25f);
++            t.Equals(bitsOf(ctx.vu0_q), bitsOf(4.0f), "2 / sqrt(0.25): the numerator counts");
++            ps2_vu0_rsqrt(&ctx, 1.0f, -4.0f);
++            t.Equals(bitsOf(ctx.vu0_q), bitsOf(0.5f), "1 / sqrt(|-4|)");
++            t.Equals(static_cast<uint32_t>(ctx.vu0_status), 0x0410u, "a negative radicand is invalid");
++            ps2_vu0_rsqrt(&ctx, -1.0f, 0.0f);
++            t.Equals(bitsOf(ctx.vu0_q), 0xFF7FFFFFu, "-1 / sqrt(0) is the largest negative number");
++            t.Equals(static_cast<uint32_t>(ctx.vu0_status), 0x0C20u, "division by zero, sticky flags kept");
++        });
++
++        // MKSM: MAX and MINI on the bit patterns (PCSX2 fp_max/fp_min; the real comparator, ps2autotests arithmetic:
++        // "max 7fffffff, 00000000: 7fffffff", "max 00000000, 80000000: 00000000", "min 00000000, 80000000: 80000000").
++        tc.Run("VU MAX and MINI compare sign and magnitude", [](TestCase &t)
++        {
++            const __m128 a = _mm_set_ps(-1.0f, 0.0f, floatOf(0x7FC00000u), 1.0f);
++            const __m128 b = _mm_set_ps(-2.0f, floatOf(0x80000000u), 0.0f, floatOf(0xFFFFFFFFu));
++            const __m128 high = ps2_vmax(a, b);
++            t.Equals(laneBits(high, 0), bitsOf(1.0f), "max(1, 0xFFFFFFFF): the negative pattern is the smaller");
++            t.Equals(laneBits(high, 1), 0x7FC00000u, "max(0x7FC00000, 0): an exponent-255 pattern is a large number");
++            t.Equals(laneBits(high, 2), 0x00000000u, "max(+0, -0) is +0");
++            t.Equals(laneBits(high, 3), bitsOf(-1.0f), "max(-1, -2)");
++            const __m128 low = ps2_vmini(a, b);
++            t.Equals(laneBits(low, 0), 0xFFFFFFFFu, "mini(1, 0xFFFFFFFF)");
++            t.Equals(laneBits(low, 1), 0x00000000u, "mini(0x7FC00000, 0)");
++            t.Equals(laneBits(low, 2), 0x80000000u, "mini(+0, -0) is -0");
++            t.Equals(laneBits(low, 3), bitsOf(-2.0f), "mini(-1, -2)");
++        });
++
++        // MKSM: every context has VF0 hardwired, also the ones built for started threads, handlers and callbacks.
++        tc.Run("a new context has VF0 hardwired to (0, 0, 0, 1)", [](TestCase &t)
++        {
++            const R5900Context ctx{};
++            t.Equals(laneBits(ctx.vu0_vf[0], 0), 0x00000000u, "VF0.x");
++            t.Equals(laneBits(ctx.vu0_vf[0], 1), 0x00000000u, "VF0.y");
++            t.Equals(laneBits(ctx.vu0_vf[0], 2), 0x00000000u, "VF0.z");
++            t.Equals(laneBits(ctx.vu0_vf[0], 3), bitsOf(1.0f), "VF0.w");
++        });
++
++        // MKSM: FTOI saturates and CLIP compares the bit patterns with |w|.
++        tc.Run("VU FTOI saturates and CLIP compares with the magnitude of w", [](TestCase &t)
++        {
++            alignas(16) int32_t out[4];
++            _mm_store_si128(reinterpret_cast<__m128i *>(out),
++                            ps2_vu_ftoi(_mm_set_ps(floatOf(0x7FFFFFFFu), -3.0e9f, 3.0e9f, 5.75f)));
++            t.Equals(out[0], 5, "5.75 truncates to 5");
++            t.Equals(static_cast<uint32_t>(out[1]), 0x7FFFFFFFu, "3e9 saturates to the largest integer");
++            t.Equals(static_cast<uint32_t>(out[2]), 0x80000000u, "-3e9 saturates to the smallest integer");
++            t.Equals(static_cast<uint32_t>(out[3]), 0x7FFFFFFFu, "an exponent-255 pattern is a large positive number");
++
++            uint32_t above = 0u, below = 0u;
++            ps2_vu_clip_masks(_mm_set_ps(0.0f, 0.5f, -3.0f, 2.0f), _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f), above, below);
++            t.Equals(above & 7u, 1u, "x = 2 is above +1");
++            t.Equals(below & 7u, 2u, "y = -3 is below -1");
++            ps2_vu_clip_masks(_mm_set_ps(0.0f, 0.0f, 0.0f, 0.5f), _mm_set_ps(-1.0f, 0.0f, 0.0f, 0.0f), above, below);
++            t.Equals(above & 7u, 0u, "w = -1 limits like +1: 0.5 is not above it");
++            t.Equals(below & 7u, 0u, "and not below it");
++            ps2_vu_clip_masks(_mm_set_ps(0.0f, floatOf(0x7FFFFFFFu), floatOf(0x7FFFFFFFu), floatOf(0x7FFFFFFFu)),
++                              _mm_setzero_ps(), above, below);
++            t.Equals(above & 7u, 7u, "exponent-255 patterns are above a zero w");
++            t.Equals(below & 7u, 0u, "and not below it");
++        });
++
+         // MKSM: SQRT.S fd, ft: the operand is in the ft field and the fs field is zero (0x460C0044 is
+         // "sqrt.s $f1, $f12" in the game). The translator took fs: every square root was the root of $f0.
+         tc.Run("SQRT.S takes its operand from ft", [](TestCase &t)
