@@ -72,12 +72,17 @@ namespace vu1diff
         OracleRun run(OracleMachine &machine, OracleEntry entry, uint32_t startPc, uint32_t top, uint32_t itop,
                       uint8_t *data, Vu1nHost &packets);
 
+        // Called by runStepping after each pair that ran: the pair's address, the VI registers as the pair saw them,
+        // and data memory, in which every store of the earlier pairs has landed.
+        using PairObserver = void (*)(void *context, uint32_t pc, const int32_t *viBefore, const uint8_t *data);
+
         // The same launch as run() with OracleEntry::Execute, one pair at a time: execute() and then resume() with a
         // budget of one cycle a call, until the program ends. Sets executed[pc / 8] for every pair that ran
         // (kCodeBytes / 8 flags, not cleared here) and returns their number in pairs. The interpreter keeps a launch
         // cut by its budget exactly, so the result must be the one of run(): the caller can check that.
         OracleRun runStepping(OracleMachine &machine, uint32_t startPc, uint32_t top, uint32_t itop, uint8_t *data,
-                              Vu1nHost &packets, uint8_t *executed, uint64_t &pairs);
+                              Vu1nHost &packets, uint8_t *executed, uint64_t &pairs, PairObserver observer = nullptr,
+                              void *context = nullptr);
 
     private:
         struct Fixture;

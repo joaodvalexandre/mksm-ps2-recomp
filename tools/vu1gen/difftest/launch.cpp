@@ -140,8 +140,13 @@ namespace vu1diff
             return difference;
         }
 
-        const Vu1nHost &a = expected.packets;
-        const Vu1nHost &b = actual.packets;
+        return comparePackets(expected.packets, actual.packets);
+    }
+
+    Difference comparePackets(const Vu1nHost &a, const Vu1nHost &b)
+    {
+        Difference difference;
+        char text[96];
         if (a.kicks.size() != b.kicks.size())
         {
             difference.any = true;

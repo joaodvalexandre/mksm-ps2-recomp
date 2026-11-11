@@ -31,6 +31,7 @@
 #include "oracle.h"
 
 #include "images.h"
+#include "vu_decode.h"
 #include "vu1n_api.h"
 
 #include <algorithm>
@@ -195,6 +196,9 @@ namespace
         std::vector<uint8_t> executed = std::vector<uint8_t>(kCodeBytes / 8u, uint8_t{0}); // by pair
         uint64_t steppedLaunches = 0;
         uint64_t steppedEqual = 0; // the launch run pair by pair gave the result of the launch run at once
+        uint64_t kicksExecuted = 0; // XGKICKs of the stepped launches
+        uint64_t kicksEqual = 0;    // the packet read whole at the instruction is the packet the interpreter sent
+        uint64_t kickLaunchesDifferent = 0;
     };
 
     // ---- the interpreter as a "translated program": tests the machinery through the real interface ----
@@ -286,6 +290,22 @@ namespace
         return Vu1nStatus::Done;
     }
 
+    // --coverage: what a translated XGKICK will do, done at the moment the stepped oracle executes one. The packet
+    // is read whole from data memory as it is at the instruction.
+    struct KickObserver
+    {
+        std::vector<vu1gen::Pair> pairs; // the image, decoded
+        Vu1nHost host;
+    };
+
+    void observeKick(void *context, uint32_t pc, const int32_t *viBefore, const uint8_t *data)
+    {
+        KickObserver &observer = *static_cast<KickObserver *>(context);
+        const vu1gen::Instr &lower = observer.pairs[pc / 8u].lower;
+        if (lower.kickReg >= 0)
+            observer.host.kick(data, static_cast<uint16_t>(viBefore[lower.kickReg]));
+    }
+
     struct FaultTally
     {
         uint64_t compared = 0;      // faults in compared fields
@@ -327,6 +347,8 @@ namespace
         OracleMachine glue;     // enters every launch with execute(): the oracle of the comparison
         OracleMachine upstream; // MSCAL execute(), MSCNT resume(): what upstream's runtime does
         OracleMachine stepper;  // --coverage: the launch one pair at a time
+        auto kickObserver = std::make_unique<KickObserver>();
+        kickObserver->pairs = vu1gen::decodeProgram(code.data(), code.size());
         auto record = std::make_unique<LaunchRecord>();
         LaunchResult glueResult;
         LaunchResult upstreamResult;
@@ -372,9 +394,10 @@ namespace
                 std::memcpy(&stepper.state(), &rec.state, sizeof(VU1State));
                 std::memcpy(scratch.data.data(), rec.data, kDataBytes);
                 scratch.packets.beginLaunch();
+                kickObserver->host.beginLaunch();
                 uint64_t pairs = 0;
                 const OracleRun stepped = oracle.runStepping(stepper, entryPc, rec.top, rec.itop, scratch.data.data(), scratch.packets,
-                                                             report.executed.data(), pairs);
+                                                             report.executed.data(), pairs, observeKick, kickObserver.get());
                 std::memcpy(&scratch.state, &stepper.state(), sizeof(VU1State));
                 stats.pairs += pairs;
                 ++report.steppedLaunches;
@@ -382,6 +405,31 @@ namespace
                     !compareState(glueResult.state, scratch.state, kFieldFlags))
                 {
                     ++report.steppedEqual;
+                }
+
+                // The packets read whole at each XGKICK against the packets the interpreter transferred, two cycles
+                // a qword, while the program went on.
+                const Vu1nHost &atInstruction = kickObserver->host;
+                const Vu1nHost &sent = glueResult.packets;
+                report.kicksExecuted += atInstruction.kicks.size() + atInstruction.dropped;
+                for (size_t index = 0; index < atInstruction.kicks.size() && index < sent.kicks.size(); ++index)
+                {
+                    if (atInstruction.kicks[index].bytes == sent.kicks[index].bytes &&
+                        std::memcmp(atInstruction.packet(index), sent.packet(index), sent.kicks[index].bytes) == 0)
+                    {
+                        ++report.kicksEqual;
+                    }
+                }
+                const Difference kickDifference = comparePackets(sent, atInstruction);
+                if (kickDifference)
+                {
+                    if (++report.kickLaunchesDifferent <= options.maxReport)
+                    {
+                        std::printf("   XGKICK record %llu (launch %llu) %s: %s: transferred %s, read at the instruction %s\n",
+                                    static_cast<unsigned long long>(position), static_cast<unsigned long long>(rec.index),
+                                    entryName({rec.resume, entryPc}).c_str(), kickDifference.field.c_str(),
+                                    kickDifference.expected.c_str(), kickDifference.actual.c_str());
+                    }
                 }
             }
 
@@ -845,7 +893,11 @@ int main(int argc, char **argv)
                 std::printf(" (%u of the image's %u own pairs)", executedOwn, report.ownPairs);
             std::printf("; run one pair a call, the oracle gives the result of the launch run at once in %llu of %llu launches\n",
                         static_cast<unsigned long long>(report.steppedEqual), static_cast<unsigned long long>(report.steppedLaunches));
-            steppingErrors += report.steppedLaunches - report.steppedEqual;
+            std::printf("   XGKICK: %llu executed; the packet read whole at the instruction is the packet the interpreter transferred "
+                        "for %llu of them (%llu launches differ)\n",
+                        static_cast<unsigned long long>(report.kicksExecuted), static_cast<unsigned long long>(report.kicksEqual),
+                        static_cast<unsigned long long>(report.kickLaunchesDifferent));
+            steppingErrors += report.steppedLaunches - report.steppedEqual + report.kickLaunchesDifferent;
         }
 
         sanityTotal.add(report.sanity);

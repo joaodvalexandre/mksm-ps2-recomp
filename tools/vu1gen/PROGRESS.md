@@ -268,15 +268,23 @@ $B/vu1gen/vu1difftest.exe --captures $CAP --images config/vu1_images.txt --cover
 ```
 
 Runs every launch a second time on the oracle one pair a call (`execute()` then `resume()` with a budget of one
-cycle: `Oracle::runStepping`), which tells which pairs it executes. Result (29 s):
+cycle: `Oracle::runStepping`), which tells which pairs it executes, and lets the tool do at each XGKICK what
+generated code will do: `Vu1nHost::kick` on data memory as it is at the instruction. Result (29 s, exit code 0):
 
 | | front | game | cut |
 |---|---|---|---|
 | distinct pairs executed by the captured launches | 50 | 664 | 795 |
 | launches whose stepped run equals the run at once (state with `mac` and `status`, cycles, data memory, packets) | 5,314 of 5,314 | 12,520 of 12,520 | 12,166 of 12,166 |
+| XGKICKs executed | 696,996 | 24,243 | 9,861 |
+| ... whose packet read whole at the instruction is the packet the interpreter transferred | 696,996 | 24,243 | 9,861 |
 
-50, 664 and 795 are the study's numbers (of 1,388, 1,930 and 1,924 reachable pairs). The same pass is what the
-synthetic launches of the brief need to report the coverage they reach.
+- 50, 664 and 795 are the study's numbers (of 1,388, 1,930 and 1,924 reachable pairs). The same pass is what the
+  synthetic launches of the brief need to report the coverage they reach.
+- **The brief's fact 4 holds on every captured launch**: for all 731,100 XGKICKs the packet copied at the instruction
+  equals, byte for byte, the packet the interpreter read two cycles a qword while the program went on. No store
+  lands in a packet that is still being transferred, and `kick` sizes and copies the game's real packets as the
+  interpreter does. (Checked that it can fail: a wrong qword address at one XGKICK site made 50 of 50 launches
+  differ.) This is data dependent: it has to be repeated on the synthetic launches.
 
 ### vu1difftest --kick-check
 

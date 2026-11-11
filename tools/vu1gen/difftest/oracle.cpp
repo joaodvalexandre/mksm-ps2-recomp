@@ -108,7 +108,7 @@ namespace vu1diff
     }
 
     OracleRun Oracle::runStepping(OracleMachine &machine, uint32_t startPc, uint32_t top, uint32_t itop, uint8_t *data,
-                                  Vu1nHost &packets, uint8_t *executed, uint64_t &pairs)
+                                  Vu1nHost &packets, uint8_t *executed, uint64_t &pairs, PairObserver observer, void *context)
     {
         Fixture &fixture = *m_fixture;
         VU1Interpreter &vu = *machine.vu;
@@ -122,8 +122,13 @@ namespace vu1diff
         uint32_t pc = startPc & kPcMask;
         bool ebit = false;
         bool first = true;
+        int32_t viBefore[16];
         for (;;)
         {
+            // Everything due has been committed when a call returns: the state between two calls is the state the
+            // next pair sees, if it runs in that call.
+            if (observer)
+                std::memcpy(viBefore, state.vi, sizeof(viBefore));
             if (first)
                 vu.execute(code, PS2_VU1_CODE_SIZE, data, PS2_VU1_DATA_SIZE, fixture.gs, &fixture.memory, startPc, top, itop, 1u);
             else
@@ -135,6 +140,8 @@ namespace vu1diff
             {
                 executed[pc / 8u] = 1u;
                 ++pairs;
+                if (observer)
+                    observer(context, pc, viBefore, data);
             }
             const uint64_t cycles = state.cycles - machine.clock;
             const bool stuck = cycles == result.cycles; // the interpreter refuses to go on (it stopped itself)

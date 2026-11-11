@@ -65,6 +65,9 @@ namespace vu1diff
     // 16 KB of data memory, then the packets (count, sizes, bytes). The first difference.
     Difference compareLaunch(const LaunchResult &expected, const LaunchResult &actual);
 
+    // The packets alone: their number, then size and bytes of each, in order.
+    Difference comparePackets(const Vu1nHost &expected, const Vu1nHost &actual);
+
     // What upstream's execute() does to the state before it runs (ps2_vu1_core.cpp). The glue prepares a translated
     // launch the same way, an MSCNT included: on the flushed state every launch starts from it changes nothing an
     // MSCNT can observe, and it is what the interpreter does when the glue enters it at the saved pc.

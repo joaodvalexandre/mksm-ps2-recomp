@@ -711,5 +711,10 @@ commands, the full tables and the notes for the steps that follow.
   That is 246 ns of host time for each executed pair. The captured launches execute 50 distinct pairs of the
   front-end program, 664 of the gameplay program and 795 of the cutscene program (of 1,388, 1,930 and 1,924
   reachable ones): the rest has to be reached by constructed launches before the translation can be trusted there.
+- **A packet can be copied at its XGKICK.** The interpreter transfers a packet two cycles a qword while the program
+  goes on, so a later store could still change it. In the same stepped run the packet was also read whole from data
+  memory at each XGKICK, as translated code will do: for all 731,100 XGKICKs of the captured launches (696,996 in
+  the front end's sprite routine, 24,243 gameplay, 9,861 cutscene) it is byte for byte the packet the interpreter
+  sent.
 - **Next.** Control flow from the entry points, the timing exploration that resolves each Q, P, MAC and clip read,
   emission, the arithmetic helpers, then the comparison of every captured launch with the interpreter.
