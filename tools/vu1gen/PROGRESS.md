@@ -40,6 +40,7 @@ or the game from here.
 | `tools/vu1gen/difftest/vu1difftest.cpp` | the passes over the captures and the reports |
 | `tools/vu1gen/difftest/no_programs.cpp` | empty `vu1nPrograms()` until the generator emits the table |
 | `tools/vu1gen/tests/` | `vu1n_tests`: decoder, float notation, image list, ELF reader, hash, runtime |
+| `tools/vu1gen/selftest/check_all.sh` | runs every check below in one go (development only) |
 | `tools/vu1gen/selftest/vudis_listing.py` | reference side of the decoder self-test (development only) |
 | `tools/vu1gen/selftest/compare_compile_commands.py` | checks that the oracle is compiled with the flags of the game's build (development only) |
 | `tools/vu1gen/cmake/targets.cmake` | the targets; `CMakeLists.txt` makes the folder a project of its own |
@@ -93,6 +94,39 @@ A build from nothing (the tree deleted) with the commands above took 73 s: confi
 
 The folder also configures on its own (no PS2Recomp, no oracle): `cmake -S tools/vu1gen -B <dir> -G Ninja` inside a
 Visual Studio environment gives `vu1gen` and `vu1n_tests`.
+
+## Everything at once
+
+After a build, one script runs every check described below and says PASS or FAIL for each (1 min 45 s to 2 min 15 s;
+`--quick` takes the first 1000 launches of each capture file, 20 s):
+
+```
+export MKSM_VU1_BUILD=D:/Projects/Recomps/mksm-vu1-build
+export MKSM_VU1_ELF=D:/Projects/Recomps/mksm-ps2-recomp/game/SLES_535.24
+export MKSM_VU1_CAPTURES=D:/Projects/Recomps/mksm-ps2-recomp/logs/vu1cap
+export MKSM_VU1_GAME_BUILD=D:/Projects/Recomps/mksm-ps2-recomp/PS2Recomp/out/build-quick
+export MKSM_VU1_STUDY=D:/Projects/Recomps/vu1-study
+bash tools/vu1gen/selftest/check_all.sh [--quick]
+```
+
+Its output on 2026-11-11 (exit code 0; the reports are in `mksm-vu1-build/check/`):
+
+```
+PASS  unit-tests         vu1n_tests: 30 cases, 1069 checks, 0 failed checks in 0 cases
+PASS  images             image cut    ELF 0x4A2370  hash 8A34F4A8F0CE0620  pairs 2048 (own 1932)  reserved 1 (own 0)  MSCAL entries 14  subroutines 1
+PASS  listing            the listings of vu1gen and vudis.py are identical (32780 lines)
+PASS  oracle-flags       ALL SAME
+PASS  decoder            decode check: 97518848 pairs, 0 different: PASSED
+PASS  kick               kick check: 20000 random packets: 17676 sent by both with the same bytes (4448 wrap at 16 KB, 455 of exactly 64 KB, the largest 65536 bytes), 2324 ref
+PASS  captures           sanity 11964 of 11997 consecutive records; MSCNT by execute() = by resume() in 5830 of 5830 and 12112 of 12112 launches
+PASS  self                  all            30000    1232.2    24.37     260.0      30000    30000          0           0        0
+PASS  self-fault            comparison machinery: PASSED
+PASS  coverage              all            30000    1232.2    24.37     260.0          0        0          0       30000        0 |   1036.2
+0 failed, 0 skipped; outputs in D:/Projects/Recomps/mksm-vu1-build/check
+```
+
+Run it again after any change to the decoder, the runtime or the difftest. Once translated programs are linked, the
+`captures` line is where their mismatches show (its exit code is then the comparison's).
 
 ## Tools
 
