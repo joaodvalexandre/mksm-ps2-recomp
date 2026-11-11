@@ -530,7 +530,8 @@ What is decided, and why, where the brief left room:
   pair: `kVu1nEntry`, `kVu1nEntrySnapshot`), `mxcsr`, `run`. `handles()` and `needsSnapshot()` read the flags; an
   address that is not a pair of micro memory is never an entry.
 - `Vu1nProgram::mxcsr` is the MXCSR the program's arithmetic was compiled for: `kVu1nMxcsr` of `vu1n.h`, 0x7F80
-  (round toward zero) with `VU1N_MATH_REFERENCE`, 0xFFC0 (plus flush to zero and denormals are zero) otherwise.
+  (round toward zero) with `VU1N_MATH_REFERENCE`, the same in the default build (the first plan, 0xFFC0 with flush to zero and denormals are zero, was dropped: see
+  "Fast arithmetic and entry functions").
   `vu1nRun` sets it around the launch and puts the caller's value back on every way out, an exception included.
 - `vu1nRun` returns `NotHandled` without touching anything for an entry the program does not handle; otherwise it
   empties the host's lists first.

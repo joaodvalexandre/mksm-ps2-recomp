@@ -303,5 +303,24 @@ TEST_CASE(fast_helpers_on_hand_picked_values)
         CHECK_EQ(madd(0x7F000000u, 0x7F000000u, 0x00000000u), 0xFF7FFFFFu);
         // Exponent-255 operands are 0x7F7FFFFF.
         CHECK_EQ(madd(0x7F800001u, 0x3F800000u, 0x00000000u), 0xFF7FFFFFu);
+
+        // The slow-lane bounds, from the review of the fast arithmetic. A product just below 2^-79 whose float
+        // rounding cancels the accumulator exactly while the binary64 value is -2^-127: the interpreter gives -0
+        // (a bound of 2^-80 would leave this lane on the fast path, with +0).
+        const auto maddAdd = [](uint32_t a, uint32_t b, uint32_t z) {
+            const float s[4] = {f(a), f(a), f(a), f(a)};
+            const float t[4] = {f(b), f(b), f(b), f(b)};
+            const float acc[4] = {f(z), f(z), f(z), f(z)};
+            float fast[4], ref[4];
+            vu1nFmac<kVu1nMadd, 0xF>(s, t, acc, fast);
+            (void)vu1nRefFmac<kVu1nMadd>(0xF, s, t, acc, ref);
+            CHECK_EQ(vu1nBits(fast[0]), vu1nBits(ref[0]));
+            return vu1nBits(ref[0]);
+        };
+        CHECK_EQ(maddAdd(0xABFFFFFFu, 0x2B7FFFFFu, 0x17FFFFFEu), 0x80000000u);
+        CHECK_EQ(madd(0xABFFFFFFu, 0xAB7FFFFFu, 0x17FFFFFEu), 0x80000000u);
+        // A product of 2^130 clamped to FLT_MAX cancels an accumulator of -FLT_MAX in float, but the binary64 value
+        // overflows: 0x7F7FFFFF.
+        CHECK_EQ(maddAdd(0x60000000u, 0x60000000u, 0xFF7FFFFFu), 0x7F7FFFFFu);
     });
 }

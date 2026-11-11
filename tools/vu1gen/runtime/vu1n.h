@@ -421,12 +421,19 @@ VU1N_INLINE uint32_t vu1nClip(const float *s, float w)
 //   so the SSE operation sees the interpreter's operands and rounds as its float code does.
 // - The interpreter then replaces a lane's result from the binary64 value e of the same expression: a zero when e
 //   is 0 or below FLT_MIN, 0x7F7FFFFF when |e| exceeds FLT_MAX. For ADD, SUB and MUL of normalised operands that is
-//   exactly "a result below FLT_MIN becomes the zero of its sign": round toward zero already clamps an overflow to
-//   0x7F7FFFFF, e is 0 exactly when the float result is, and a nonzero result below FLT_MIN has e's sign.
-// - For MADD and MSUB (z + p, p = the product rounded) the same holds except when the product is tiny or huge: e can
-//   be below FLT_MIN while z + p is not only if |a*b| < 2^-79 (otherwise the bits of a*b that p dropped keep e away
-//   from zero, or p is exact), and e can exceed FLT_MAX while z + p does not only when p or the result is in the top
-//   binade. Lanes with a nonzero product below 2^-79 or a product or result at or above 2^127 take the reference.
+//   exactly "a result below FLT_MIN (a denormal or a zero) becomes the zero of its sign": round toward zero already
+//   clamps an overflow to 0x7F7FFFFF; an exact value below FLT_MIN gives a denormal or zero result with the exact
+//   value's sign on one side and the fix-up's zero of that sign on the other; and FLT_MIN <= |e| means the float
+//   result is normal and neither side touches it.
+// - For MADD and MSUB (r = z +- p, p = the float product a*b rounded; e = z +- a*b in binary64) the same holds in
+//   every lane that is not "slow". With a*b = 0 both sides do the same operation on the same values. With
+//   |a*b| >= 2^-79 the exponents of a and b add up to at least -126, so a*b and p are multiples of 2^-126, and a z
+//   that cancels them to below 2^-79 is itself at least 2^-79, a multiple of 2^-102: z +- a*b and z +- p are then
+//   multiples of 2^-126, so neither can be nonzero and below FLT_MIN, and r is a denormal in no case. And e can
+//   exceed FLT_MAX while r does not only when p or r is at or above 2^127 (p below 2^127 is within 2^103 of a*b).
+//   Slow lanes, which take the reference: a nonzero product below 2^-79, or a product or result at or above 2^127.
+//   The bound 2^-79 is tight: MADD of 0xABFFFFFF and 0x2B7FFFFF on 0x17FFFFFE has a product just below it, r = +0
+//   and e = -2^-127, so the interpreter's result is -0 (tests/math_tests.cpp has the case).
 namespace vu1n_detail
 {
     VU1N_INLINE __m128i iv(int32_t value) { return _mm_set1_epi32(value); }
