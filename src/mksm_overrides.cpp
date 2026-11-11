@@ -42,6 +42,8 @@ namespace ps2_stubs
 
 // vu1_runtime.cpp: the VU1 programs translated ahead of time in place of the interpreter (MKSM_VU1).
 void mksmInstallVu1(PS2Runtime &runtime);
+// trace_gs_dump.cpp: records the GIF packets of a range of vertical blanks (MKSM_GS_DUMP).
+void mksmInstallGsDump(PS2Runtime &runtime);
 
 namespace
 {
@@ -1063,6 +1065,7 @@ namespace
     {
         // The VU1 programs translated ahead of time (vu1_runtime.cpp, MKSM_VU1).
         mksmInstallVu1(runtime);
+        mksmInstallGsDump(runtime);
         // The runtime logs through stdout, which is block-buffered when redirected to a file; without this the end
         // of logs/run.log is lost when scripts/run.cmd stops the game.
         std::setvbuf(stdout, nullptr, _IONBF, 0);
