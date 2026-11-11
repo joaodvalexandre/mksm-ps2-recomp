@@ -199,6 +199,10 @@ $common = @('-S', $rec, '-B', $bld, '-G', 'Ninja', '-DPS2X_BUILD_STUDIO=OFF', '-
             # Upstream's very verbose logs cost more than the game: with them on, writing log files took two thirds
             # of the EE thread's time. The regular runtime logs (PS2X_ENABLE_RUNTIME_LOGS) stay on.
             '-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF', '-DPS2X_IOP_BUILD_TESTS=ON') + $parallelGsArgs
+# The VU1 programs translated ahead of time (tools\vu1gen): the hook adds the translator's targets to the runtime's
+# CMakeLists without a patch, and the generated library, translated from the ELF during the build, to the runner.
+$vu1Hook = (Join-Path $RepoRoot 'tools\vu1gen\cmake\ps2recomp.cmake').Replace('\', '/')
+$common += @("-DCMAKE_PROJECT_PS2Runtime_INCLUDE=$vu1Hook", "-DVU1GEN_ELF=$($elf.Replace('\', '/'))")
 if ($Release) {
     Run 'cmake' ($common + @('-DCMAKE_BUILD_TYPE=Release'))
 } else {

@@ -9,7 +9,8 @@ function(vu1gen_target_defaults target)
         CXX_STANDARD_REQUIRED ON
         CXX_EXTENSIONS OFF
         ARCHIVE_OUTPUT_DIRECTORY "${VU1GEN_OUTPUT_DIR}"
-        RUNTIME_OUTPUT_DIRECTORY "${VU1GEN_OUTPUT_DIR}")
+        RUNTIME_OUTPUT_DIRECTORY "${VU1GEN_OUTPUT_DIR}"
+        INTERPROCEDURAL_OPTIMIZATION OFF)
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8)
         # Standard C file functions without the CRT's deprecation warnings.
@@ -137,4 +138,12 @@ if(TARGET ps2_runtime)
             ps2x_stage_ffmpeg_runtime_dlls(${difftest})
         endif()
     endforeach()
+endif()
+
+# Inside the game's build (scripts/build.ps1 passes ps2recomp.cmake and VU1GEN_ELF): the runner links the translated
+# programs, and the override module's vu1_runtime.cpp, compiled in the runner, includes vu1n_api.h. The generated code
+# stays in its own library: no unity build, no precompiled header, no /fp:fast, no whole-program optimization.
+if(TARGET ps2EntryRunner AND TARGET vu1n_programs)
+    target_link_libraries(ps2EntryRunner PRIVATE vu1n_programs vu1n_runtime)
+    target_include_directories(ps2EntryRunner PRIVATE "${VU1GEN_DIR}/runtime")
 endif()
