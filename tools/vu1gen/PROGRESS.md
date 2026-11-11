@@ -19,6 +19,10 @@ or the game from here.
 | `tools/vu1gen/src/images.*` | parser of `config/vu1_images.txt`, ELF segment reader, the image hash |
 | `tools/vu1gen/src/listing.*` | the two text listings of an image (the self-test compares them with `vudis.py`) |
 | `tools/vu1gen/src/main.cpp` | `vu1gen` |
+| `tools/vu1gen/runtime/vu1n_api.h` | the interface of the translated programs: `Vu1nStatus`, `Vu1nHost` (packet arena, `kick`), `Vu1nProgram`, `vu1nRun` |
+| `tools/vu1gen/runtime/vu1n.h` | what generated code includes: the interface, `kVu1nMxcsr`, `vu1nQwordOffset`; the arithmetic helpers are still to come |
+| `tools/vu1gen/runtime/vu1n_runtime.cpp` | the packet walk of XGKICK, `vu1nRun` with the MXCSR guard, `vu1nFindProgram` |
+| `tools/vu1gen/tests/` | `vu1n_tests`: decoder, float notation, image list, ELF reader, hash, runtime |
 | `tools/vu1gen/selftest/vudis_listing.py` | reference side of the decoder self-test (development only) |
 | `tools/vu1gen/cmake/targets.cmake` | the targets; `CMakeLists.txt` makes the folder a project of its own |
 | `tools/vu1gen/cmake/ps2recomp.cmake` | hook that adds the targets to a PS2Recomp build without a patch |
@@ -58,7 +62,7 @@ in `mksm-vu1-build/compile_commands.json` have the same flags and definitions, t
 no `/fp` option, so `/fp:precise`, and no `/arch`); only the paths differ.
 
 The folder also configures on its own (no PS2Recomp, no oracle): `cmake -S tools/vu1gen -B <dir> -G Ninja` inside a
-Visual Studio environment gives `vu1gen`.
+Visual Studio environment gives `vu1gen` and `vu1n_tests`.
 
 ## Tools
 
@@ -103,12 +107,45 @@ and in the place of the end marker (it was written when `vudis.py` still said 19
 are equal). Only two immediates occur in the images (`8388863.0`, `1.0`), so the port of Python's float notation is
 covered by the unit tests rather than by this comparison.
 
-## Next (foundation stage, in this order)
+### vu1n_tests
 
-1. `vu1n_tests`: unit tests of the decoder, the float notation, the configuration parser and the ELF reader.
-2. `runtime/vu1n_api.h`, `runtime/vu1n.h`: status, host (packet arena, kick), program table, `vu1nRun`.
-3. `vu1difftest`: the oracle side (capture reader, replay, sanity of consecutive records, `execute` at the saved pc
-   against `resume`, the comparison function, `--bench`).
+```
+D:/Projects/Recomps/mksm-vu1-build/vu1gen/vu1n_tests.exe [substring of a case name]
+```
+
+Needs no game file. Result (2026-11-11): `vu1n_tests: 30 cases, 1069 checks, 0 failed checks in 0 cases`.
+
+## The runtime interface (`runtime/`)
+
+What is decided, and why, where the brief left room:
+
+- `Vu1nHost::kick(data, qword)` copies the packet at the XGKICK into the host's arena (`kicks` holds offset and size
+  of each, in order). The size comes from the same tag walk as the interpreter's transfer (`progressXgkick`): NLOOP,
+  EOP, FLG and NREG of each tag, PACKED / REGLIST / IMAGE (FLG 3 like IMAGE), tags up to the first EOP, addresses
+  wrapping at 16 KB.
+- Where the interpreter reports an error and sends nothing (a packet that would pass 64 KB, which includes memory
+  without any EOP tag), `kick` records nothing, returns false and counts the XGKICK in `Vu1nHost::dropped`. Generated
+  code goes on (it need not look at the result): the launch still returns `Done`. The interpreter itself stops the
+  launch there, so such a launch is not comparable; `vu1difftest` must put it aside (the oracle's error shows in
+  `ps2_log::runtime_log_next_seq()`).
+- A launch records at most 1 MB of packets (`kVu1nMaxLaunchPacketBytes`; the interpreter cannot send more than 512 KB
+  in its 65536 cycles): a bound for launches that run away. Beyond it `kick` drops too.
+- `Vu1nProgram` is a plain struct the generated table fills: `name`, `image` (16 KB), `entryFlags` (one byte per
+  pair: `kVu1nEntry`, `kVu1nEntrySnapshot`), `mxcsr`, `run`. `handles()` and `needsSnapshot()` read the flags; an
+  address that is not a pair of micro memory is never an entry.
+- `Vu1nProgram::mxcsr` is the MXCSR the program's arithmetic was compiled for: `kVu1nMxcsr` of `vu1n.h`, 0x7F80
+  (round toward zero) with `VU1N_MATH_REFERENCE`, 0xFFC0 (plus flush to zero and denormals are zero) otherwise.
+  `vu1nRun` sets it around the launch and puts the caller's value back on every way out, an exception included.
+- `vu1nRun` returns `NotHandled` without touching anything for an entry the program does not handle; otherwise it
+  empties the host's lists first.
+- `vu1nPrograms()` is defined by the generated table (not written yet); `vu1nFindProgram()` compares all 16 KB.
+- `vu1n.h` does not include upstream's `runtime/ps2_vu1.h` (`VU1State` is only declared), so the runtime and its
+  tests build without PS2Recomp; generated code includes that header itself, before `vu1n.h`.
+
+## Next (foundation stage)
+
+`vu1difftest`: the oracle side (capture reader, replay, sanity of consecutive records, `execute` at the saved pc
+against `resume`, the comparison function, `--bench`).
 
 Then the later stages of the brief: control flow (port of `vucfg.py`), timing exploration (`vutiming.py`), emission,
 the arithmetic helpers, the translation side of `vu1difftest`.

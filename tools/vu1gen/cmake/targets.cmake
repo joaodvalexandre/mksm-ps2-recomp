@@ -31,3 +31,26 @@ add_executable(vu1gen
 )
 target_link_libraries(vu1gen PRIVATE vu1gen_core)
 vu1gen_target_defaults(vu1gen)
+
+# The part of the translated programs' runtime that is not generated (the XGKICK packet walk, the launch wrapper with
+# the MXCSR guard). It refers to vu1nPrograms(), which the generated table defines.
+add_library(vu1n_runtime STATIC
+    "${VU1GEN_DIR}/runtime/vu1n_runtime.cpp"
+)
+target_include_directories(vu1n_runtime PUBLIC "${VU1GEN_DIR}/runtime")
+vu1gen_target_defaults(vu1n_runtime)
+if(MSVC)
+    # Never /fp:fast next to the translated arithmetic, whatever the profile of the build says.
+    target_compile_options(vu1n_runtime PRIVATE /fp:precise)
+endif()
+
+get_filename_component(VU1GEN_REPO_DIR "${VU1GEN_DIR}/../.." ABSOLUTE)
+add_executable(vu1n_tests
+    "${VU1GEN_DIR}/tests/test_main.cpp"
+    "${VU1GEN_DIR}/tests/decode_tests.cpp"
+    "${VU1GEN_DIR}/tests/images_tests.cpp"
+    "${VU1GEN_DIR}/tests/runtime_tests.cpp"
+)
+target_compile_definitions(vu1n_tests PRIVATE "VU1GEN_IMAGES_FILE=\"${VU1GEN_REPO_DIR}/config/vu1_images.txt\"")
+target_link_libraries(vu1n_tests PRIVATE vu1gen_core vu1n_runtime)
+vu1gen_target_defaults(vu1n_tests)
