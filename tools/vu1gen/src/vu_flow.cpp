@@ -20,7 +20,9 @@ namespace vu1gen
         {
             uint32_t pc;
             int32_t pend; // target of the branch executed in the previous pair, -1: none
-            int32_t link; // return address of the last BAL / JALR, -1: none
+            // The return address the last BAL / JALR of this launch left in its link register (linkReg), -1 when
+            // there is none or the register was written since: the only value a JR is followed through.
+            int32_t link;
             uint8_t ebit; // the previous pair had the E bit: this pair is the last
             uint8_t xg;   // an XGKICK transfer may still be active
             uint8_t backupReg; // VI register a branch would read the old value of (delaysNextBranchRead)
@@ -35,7 +37,8 @@ namespace vu1gen
             // With MAC readers in the program: the pcs (+1, 0 = before the launch) of the last flag writers, newest
             // first, so that a read with k writers in flight names the instruction whose flags it sees (macHist[k]).
             uint16_t macHist[kMaxFlagEntries];
-            uint16_t padding; // keeps the struct free of compiler padding: the key is its bytes
+            uint8_t linkReg;  // the VI register that holds link, 0: none
+            uint8_t padding;  // keeps the struct free of compiler padding: the key is its bytes
         };
         static_assert(sizeof(TState) == 200u, "TState must have no padding");
 
@@ -50,7 +53,7 @@ namespace vu1gen
             std::memset(&s, 0, sizeof(s));
             s.pc = start.pc;
             s.pend = -1;
-            s.link = start.link;
+            s.link = -1;
             s.backupReg = start.backupReg;
             return s;
         }
@@ -300,9 +303,12 @@ namespace vu1gen
                         flow.clipClass.insert(s.nclip);
                     if (lo.branch && s.backupReg != 0u && (lo.viRead & (1u << s.backupReg)) != 0u)
                         addRefusal(flow, "branch reads a VI register the pair before it wrote");
+                    // A JR is followed only through the register the last BAL / JALR of this launch linked, while
+                    // nothing else has written it: the register then holds exactly that return address.
+                    const bool jrKnown = lo.op == Op::Jr && s.link >= 0 && s.linkReg != 0u && lo.jumpReg == s.linkReg;
                     if (lo.op == Op::Jr)
                     {
-                        if (s.link < 0)
+                        if (!jrKnown)
                             addRefusal(flow, "JR without a known return address");
                         else
                             flow.jrTargets.insert(static_cast<uint32_t>(s.link));
@@ -387,7 +393,17 @@ namespace vu1gen
                     if (lo.pipeline == Pipeline::Xgkick)
                         n.xg = 1u;
                     if (lo.op == Op::Bal || lo.op == Op::Jalr)
-                        n.link = static_cast<int32_t>((s.pc + 16u) & kPcMask);
+                    {
+                        // The link goes to VI[linkReg]; a link to VI00 is not kept anywhere.
+                        n.linkReg = lo.linkReg > 0 ? static_cast<uint8_t>(lo.linkReg) : uint8_t{0};
+                        n.link = n.linkReg != 0u ? static_cast<int32_t>((s.pc + 16u) & kPcMask) : -1;
+                    }
+                    else if (n.linkReg != 0u && (lo.viWrite & (1u << n.linkReg)) != 0u)
+                    {
+                        // Something else wrote the link register: the return address is no longer known.
+                        n.linkReg = 0u;
+                        n.link = -1;
+                    }
 
                     // ---- the next pair, and the branch this one starts
                     const uint32_t next = s.pend >= 0 ? static_cast<uint32_t>(s.pend) : ((s.pc + 8u) & kPcMask);
@@ -399,7 +415,7 @@ namespace vu1gen
                             targets.push_back(static_cast<int32_t>(branchTarget(pair)));
                         else if (lo.op == Op::Jr)
                         {
-                            if (s.link >= 0)
+                            if (jrKnown)
                                 targets.push_back(s.link);
                         }
                         else if (lo.op == Op::Jalr)
@@ -428,7 +444,6 @@ namespace vu1gen
                             LaunchStart cont;
                             cont.pc = m.pc;
                             cont.backupReg = m.backupReg;
-                            cont.link = m.link;
                             continuations.insert(cont);
                             launch.ends.insert(m.pc);
                             continue;

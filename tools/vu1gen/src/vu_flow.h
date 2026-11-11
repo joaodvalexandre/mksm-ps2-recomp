@@ -64,12 +64,11 @@ namespace vu1gen
 
     // One launch start: an entry pc and what a launch from it inherits. The state after an E bit carries the VI
     // register a branch may still read the old value of (counted as written by the pair before, which is the
-    // conservative reading) and the return address of the last JALR.
+    // conservative reading). A return address is not inherited: a JR must follow a BAL / JALR of its own launch.
     struct LaunchStart
     {
         uint32_t pc = 0;
         uint8_t backupReg = 0;
-        int32_t link = -1;
         bool mscal = false;
 
         bool operator<(const LaunchStart &other) const
@@ -78,8 +77,6 @@ namespace vu1gen
                 return pc < other.pc;
             if (backupReg != other.backupReg)
                 return backupReg < other.backupReg;
-            if (link != other.link)
-                return link < other.link;
             return mscal < other.mscal;
         }
     };
