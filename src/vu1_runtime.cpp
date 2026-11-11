@@ -244,6 +244,8 @@ namespace
         r = s;
     }
 
+    void verifySampled(const Vu1nProgram &program, bool mscal, uint32_t entryPc, uint32_t top, uint32_t itop);
+
     // ---- MKSM_VU1=1 ----
 
     void launch(bool mscal, uint32_t startPc, uint32_t top, uint32_t itop)
