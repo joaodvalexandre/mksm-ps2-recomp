@@ -149,8 +149,11 @@ independent of that runtime:
   trace showed `ChangeThreadPriority(1, 24)`, then `(1, 1)`, then `(1, 0)`. `patches/0004-thread-priority.patch`
   now also returns the previous priority (test extended).
 - **Call tracer.** `MKSM_TRACE_CALLS=0xADDR,...` (up to 32 functions) logs the first eight calls of each with the
-  argument registers and the caller, and a count summary every 300 calls of the first one; it replaces the
-  functions in the runtime's dispatch table, so it sees every caller.
+  argument registers and the caller, and a count summary every 3000 calls of the first one (`MKSM_TRACE_SUMMARY=<n>`
+  for another interval); it replaces the functions in the runtime's dispatch table, so it sees every caller. With
+  each summary come the six busiest callers of every traced function since the previous summary (`[mksm-calls]
+  callers of 0xADDR: 0xRA xCOUNT ...`, the return addresses: the loop that calls it), the watched memory
+  (`MKSM_TRACE_WATCH`), the threads (`[mksm-threads] at call <n>`) and the display registers (`[mksm-gs]`).
 - **Hang 4: the EE clock falls behind the host clock.** With the priority fixed, the loader progressed (ten
   reads, the worker jobs ran in bursts) and then stalled again in the same polling loop, with the game's vsync
   counter (`0x534470`) frozen at 18 and the vsync callback never invoked (`MKSM_TRACE_CALLS` on `0x26F2A0`,
@@ -542,6 +545,13 @@ independent of that runtime:
 - **Still wrong.** After the difficulty select the stage loads (the loading screen and its bar now show right) and
   the game then stops presenting (the stall of 2026-11-05): the display stays on the 16-bit loading frame at FBP 0,
   which the stage's textures overwrite, so the GPU backend shows VRAM garbage where the CPU backend showed black.
+  `MKSM_TRACE_THREADS_EVERY=5` (override module, diagnostic: from a host thread, the EE threads, the IOP's progress and
+  diagnostics, the display registers): from about 15 s after the difficulty select the IOP executes nothing at all
+  (`[mksm-iop] instructions +0`, the cycle count frozen; 44-45 M instructions per 5 s before), while the EE main thread
+  stays Running at `0x47FFB8`, the return of the `ChangeThreadPriority` syscall wrapper (`0x47FFB0`, syscall 0x29): a
+  yield loop, while every IOP thread waits. A sound wait was the first suspect (the IOP has no SPU2) and it was
+  wrong: the CPU backend gets past this point (0.6 fps, the stage's letterboxed opening shot at 330 s), so the stall
+  belongs to the GPU path. It was the VIF1 stream going out of step, see 2026-11-11.
 - **PAL's 50 Hz** (`patches/0027-pal-vblank-rate.patch`, test "the vertical blank comes at the video mode's rate"). The
   EE scheduler gave every game NTSC's 60 Hz vertical blank; this PAL game's vblank-paced logic would have run a fifth
   too fast at full speed. The period now follows SMODE1: 20 ms for PAL.
@@ -555,3 +565,73 @@ independent of that runtime:
   `cmake\ParallelGS.cmake` pins, with only Granite, volk and the Vulkan headers (216 MB; FetchContent would clone every
   nested submodule, 1.4 GB per build tree, some paths beyond MAX_PATH), and hands it to FetchContent. The library builds
   in about 12 s.
+
+## 2026-11-11 — the 3D stage: VIF1 DIRECT data, VU0 macro flags, SQRT.S, and where the time goes
+
+- **The stage froze on the GPU backend: PATH2 out of step** (`patches/0028-vif1-direct-data.patch`). A temporary trace
+  in the GPU backend (the register writes no game sends, with the GIF path and tag they came in) showed PATH2 packets
+  of 189,104 and 276,976 bytes whose "GIF tags" were pixel data (`B1E2FB7F271D41BD B7D2DDE212D2DB34`), then
+  paraLLEl-GS executing them (`Unexpected Z format: 15`, `Unrecognized FIFO readback PSM: 21`) until the game stopped
+  presenting. A second trace in the VIF1 interpreter (commands cut by the end of a transfer, unknown VIF codes) found
+  the cause in upstream's image continuation: after a `DIRECT` whose GIF IMAGE packet is not finished, the interpreter
+  sent the next qwords of the VIF stream to PATH2 as that image's data, without looking for a VIF code. That dates
+  from before the DMA tag's upper half was transferred (TTE); now that it is, the game's texture upload (a `CNT` tag
+  with `DIRECT`, the GS set-up and the IMAGE tag, then a `REF` tag to the pixels with `NOP` and `DIRECT n` in its upper
+  half) had those two codes sent as the image's first 8 bytes and the image's last 8 bytes read as VIF codes: random
+  commands, among them `DIRECT`s of thousands of qwords. With the patch the qwords after a complete `DIRECT` are VIF
+  codes again; only a `DIRECT` cut by the end of a transfer continues in the next one (`m_vif1PendingDirectQwc`), sent
+  as it is to a GS that keeps each path's state and with an IMAGE tag of its own to the CPU frontend. Tests: "VIF1
+  DIRECT cut by the end of a transfer continues in the next one", "VIF1 DMA texture upload with the IMAGE tag in one
+  DIRECT and the pixels in the next", "stateful GIF paths get VIF1 DIRECT data as it is"; upstream's two tests that
+  fed raw image qwords after a complete `DIRECT` now put the `DIRECT` code the hardware needs before them. Four of
+  these five tests fail without the patch. **Verified in the game:** the scripted run reaches the first level's opening cutscene on
+  the GPU backend, with none of the errors above.
+- **Then a call through a null pointer, 280 frames into the cutscene: VF0 and the MAC flags**
+  (`patches/0029-vu0-macro-vf0-flags.patch`; a recompiler patch, the build regenerates the game's code). `[guest-branch:missing-target]
+  kind=IndirectCall op=JALR source=0x20a5dc target=0x0`: `sub_0020A590` grows a Havok `hkArray` through the memory
+  manager at `*0x5B2310` (`0xB0A880`), whose vtable pointer (+0x20) read `0xFFFFFFFF`. `MKSM_TRACE_CALLS=0x3A2E08,
+  0x20A590` with `MKSM_TRACE_WATCH=*0x5B2310:16` showed that object moved up by one word between two summaries, and 2,000
+  pair insertions in a row from one caller (`0x3A06A8`, in `sub_0039FC90`, the broad phase's AABB update). That routine
+  quantizes each AABB with `vmax.xyz vf, vf, vf0`, `vmini`, `vftoi0` and then moves the endpoint down its sorted axis
+  while `value < previous`; the array starts with a sentinel of value 0, so a negative value never stops and every
+  4-byte endpoint (and everything below the array) moves up one slot. The value was negative because VF0 was not
+  (0, 0, 0, 1): Havok compares vectors with `vsub.xyzw vf0, a, b`, four `vnop`s and `cfc2 $t, $vi17` (the MAC flags;
+  26 functions in `0x38D000-0x3D6000`), and the recompiler (a) wrote the difference into VF0, hardwired on the
+  machine, and (b) never set the MAC or status flags in macro mode, so every such comparison read a constant. The
+  patch restores VF0 after any macro instruction that names it as its destination (`LQC2` into it is dropped) and sets
+  the flags of the arithmetic instructions (ADD, SUB, MUL, MADD, MSUB with their broadcast, Q, I and ACC forms,
+  OPMULA, OPMSUB) from the whole result: zero and sign per lane in the hardware's layout, the lanes outside the
+  destination mask clear, status zero/sign and their sticky bits; overflow and underflow stay clear because the
+  results are already saturated. The update is left out where the next arithmetic instruction overwrites the flags
+  before anything can read them (a straight line with no `cfc2` from `$vi16`/`$vi17`, no micro program, no branch):
+  1,195 of the game's 6,318 macro arithmetic instructions keep it. Tests in the code generator and float semantics
+  suites (VF0, both function tables instruction by instruction, the liveness rule, the flag layout). **Verified in
+  the game:** no null call; the cutscene ends and the level's HUD ("EXP: 0", "LIU KANG", the bars) appears.
+- **The camera was wrong: SQRT.S took the wrong register** (`patches/0030-fpu-sqrt-operand.patch`). With the two
+  fixes above the level drew, but from inside the scenery and without the characters.
+  On the EE `SQRT.S fd, ft` has its operand in the ft field (`COP1 | S | ft | 00000 | fd | 000100`); the translator read
+  fs, as on other MIPS processors. All 90 `SQRT.S` of the game have fs = 0 (46 are `sqrt.s $fN, $f12`), so 75 of
+  them returned the root of `$f0`: every length and distance outside the 15 lucky ones. Test "SQRT.S takes its
+  operand from ft". **Verified in the game:** the opening cutscene shows the "Goro's Lair" title over the courtyard
+  and then Liu Kang, Kung Lao and Raiden framed as the scene intends.
+- **Where the time goes in 3D.** The cutscene runs at 2-8 fps. `MKSM_PROFILE=host` there: 81 per cent of the game
+  thread inside `VU1Interpreter::run` (`commitReadyPipelines` alone 27-29 per cent, then the pair scheduling, the
+  operand normalisation and the exact FMAC results), about 7.5 per cent in the IOP, the rest in the game's code, the
+  GS submission and the scheduler. A temporary counter around the VU1 launches (not in a patch) measured 2,200-2,800
+  launches and 3.3-4.2 million VU1 cycles a second, 180-200 ns of host time a cycle: upstream's VU1 is a cycle-exact
+  model of the pipelines (register writes queued with their latencies, per-lane scalar arithmetic with operand and
+  result normalisation), far from the 20 million cycles a second 60 fps would need here.
+- **The game's VU1 code.** Three programs, each a whole 16 KB image in the ELF uploaded to VU1 address 0: `0x49BB70`
+  (front end, 1,392 pairs before the next one starts), `0x49E6F0` (gameplay, 1,936), `0x4A2370` (the cutscenes', 1,937);
+  the 330-pair VU0 program is the VIF packet at `0x49A9D0`. They are transforms (`MULA`/`MADDA`/`MADD` by broadcast,
+  `DIV` and `MULq`, `FTOI4`, `MAX`/`MINI` clamps), loads and stores, integer loops and `XGKICK`; the gameplay program
+  reads no flags at all, the cutscene one uses `CLIP` with `FCAND` (29), `FMAND` (3), the EFU (`ESADD`, `ERLENG`, `MFP`)
+  and `JALR`/`JR`.
+- **Next.** (1) The frame rate in 3D: translate the three VU1 programs ahead of time, from the user's own ELF at build
+  time, with upstream's exact VU1 as the fallback and as the reference the translation is checked against; then
+  profile again (the VIF unpack, the GS submission and the game's own code are next in line). (2) The other
+  VU0 macro differences seen while reading the translator, which a read-only audit is checking against PCSX2's
+  interpreter: `VDIV` by zero gives 0 instead of the largest number, `VSQRT` of a negative number gives 0, `VRSQRT`
+  ignores its numerator (2 of the game's 110 uses have one other than `vf0w`), `VFTOI` does not saturate.
+  (3) Sound: the port of the archived SPU2/libsd engine to upstream's IOP is in progress in a worktree; the user
+  put it after the 3D work.

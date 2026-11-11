@@ -1,0 +1,36 @@
+diff --git a/ps2xRecomp/src/lib/fpu_translator.cpp b/ps2xRecomp/src/lib/fpu_translator.cpp
+index 435db3a..379ffce 100644
+--- a/ps2xRecomp/src/lib/fpu_translator.cpp
++++ b/ps2xRecomp/src/lib/fpu_translator.cpp
+@@ -58,7 +58,9 @@ namespace ps2recomp
+                                    "ctx->f[{}] = FPU_DIV_S(ctx->f[{}], ctx->f[{}]); }}",
+                                    ft, fd, fs, ft);
+             case COP1_S_SQRT:
+-                return fmt::format("ctx->f[{}] = FPU_SQRT_S(ctx->f[{}]);", fd, fs);
++                // MKSM: the EE's SQRT.S takes its operand from ft (COP1 | S | ft | 00000 | fd | SQRT), not from fs as
++                // on other MIPS processors: with fs every square root was the root of $f0.
++                return fmt::format("ctx->f[{}] = FPU_SQRT_S(ctx->f[{}]);", fd, ft);
+             case COP1_S_ABS:
+                 return fmt::format("ctx->f[{}] = FPU_ABS_S(ctx->f[{}]);", fd, fs);
+             case COP1_S_MOV:
+diff --git a/ps2xTest/src/ps2_float_semantics_tests.cpp b/ps2xTest/src/ps2_float_semantics_tests.cpp
+index fce046d..d745590 100644
+--- a/ps2xTest/src/ps2_float_semantics_tests.cpp
++++ b/ps2xTest/src/ps2_float_semantics_tests.cpp
+@@ -286,6 +286,16 @@ void register_ps2_float_semantics_tests()
+                      "zero set, sign cleared, the sticky bits kept");
+         });
+ 
++        // MKSM: SQRT.S fd, ft: the operand is in the ft field and the fs field is zero (0x460C0044 is
++        // "sqrt.s $f1, $f12" in the game). The translator took fs: every square root was the root of $f0.
++        tc.Run("SQRT.S takes its operand from ft", [](TestCase &t)
++        {
++            CodeGenerator gen({}, {});
++            const std::string root = gen.translateInstruction(makeCop1S(COP1_S_SQRT, 1, 0, 12));
++            t.IsTrue(root.find("ctx->f[1] = FPU_SQRT_S(ctx->f[12])") != std::string::npos,
++                     "SQRT.S should write sqrt(ft) to fd but got: " + root);
++        });
++
+         tc.Run("DIV.S and RSQRT.S translate to the PS2 semantics helpers", [](TestCase &t)
+         {
+             CodeGenerator gen({}, {});

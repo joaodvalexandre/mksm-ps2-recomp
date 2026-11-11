@@ -1,0 +1,342 @@
+diff --git a/ps2xRecomp/include/ps2recomp/code_generator.h b/ps2xRecomp/include/ps2recomp/code_generator.h
+index 1bdf0f6..4c9154c 100644
+--- a/ps2xRecomp/include/ps2recomp/code_generator.h
++++ b/ps2xRecomp/include/ps2recomp/code_generator.h
+@@ -69,6 +69,9 @@ namespace ps2recomp
+         const std::vector<Section>& m_sections;
+         BootstrapInfo m_bootstrapInfo;
+         bool m_emitInstructionComments = true;
++        // MKSM: set by the function emitter while it translates a VU0 macro arithmetic instruction whose flags cannot
++        // be read (vu0FlagsDeadAfter); the flag update is then left out.
++        bool m_vu0FlagsDead = false;
+         RecompilerReporter *m_reporter = nullptr;
+         std::string m_currentFunctionName;
+ 
+@@ -77,6 +80,8 @@ namespace ps2recomp
+         std::string emitUnhandledInstruction(const Instruction &inst, const std::string &message);
+         std::string translateMMIInstruction(const Instruction &inst);
+         std::string translateVUInstruction(const Instruction &inst);
++        static bool vu0MacroSetsFlags(const Instruction &inst);                                           // MKSM
++        static bool vu0FlagsDeadAfter(const std::vector<Instruction> &instructions, size_t index); // MKSM
+         std::string translateFPUInstruction(const Instruction &inst);
+         std::string translateCOP0Instruction(const Instruction &inst);
+         std::string translateRegimmInstruction(const Instruction &inst);
+diff --git a/ps2xRecomp/src/lib/code_generator.cpp b/ps2xRecomp/src/lib/code_generator.cpp
+index 68b0984..58154f9 100644
+--- a/ps2xRecomp/src/lib/code_generator.cpp
++++ b/ps2xRecomp/src/lib/code_generator.cpp
+@@ -258,9 +258,77 @@ namespace ps2recomp
+         return MmiTranslator(*this).translate(inst);
+     }
+ 
++    // MKSM: the VU0 macro instructions that set the MAC and status flags: the arithmetic ones (ADD, SUB, MUL, MADD and
++    // MSUB with their broadcast, Q, I and ACC forms, OPMULA and OPMSUB). The two function tables share their layout.
++    bool CodeGenerator::vu0MacroSetsFlags(const Instruction &inst)
++    {
++        if (inst.opcode != OPCODE_COP2 || inst.rs < COP2_CO)
++            return false;
++        uint32_t func = inst.function & 0x3Fu;
++        if (func >= 0x3Cu) // Special2 table
++            func = (((inst.raw >> 6) & 0x1Fu) << 2) | (inst.raw & 0x3u);
++        return func <= 0x0Fu || (func >= 0x18u && func <= 0x1Cu) || func == 0x1Eu ||
++               (func >= 0x20u && func <= 0x2Au) || (func >= 0x2Cu && func <= 0x2Eu);
++    }
++
++    // MKSM: true when nothing can read the flags the VU0 macro instruction at `index` sets: the instructions after it
++    // run in a straight line up to another one that sets them, with no reader in between (CFC2 from the status or the
++    // MAC register, a VU0 micro program). Anything that leaves the straight line keeps the flags. The sticky status
++    // bits of the instructions left out are not accumulated.
++    bool CodeGenerator::vu0FlagsDeadAfter(const std::vector<Instruction> &instructions, size_t index)
++    {
++        for (size_t next = index + 1; next < instructions.size(); ++next)
++        {
++            const Instruction &inst = instructions[next];
++            if (inst.address != instructions[next - 1].address + 4u)
++                return false;
++            if (inst.hasDelaySlot || inst.isBranch || inst.isJump || inst.isCall || inst.isReturn)
++                return false;
++            if (inst.opcode == OPCODE_COP0 ||
++                (inst.opcode == OPCODE_SPECIAL && (inst.function == SPECIAL_SYSCALL || inst.function == SPECIAL_BREAK)))
++                return false;
++            if (inst.opcode != OPCODE_COP2)
++                continue;
++            if (vu0MacroSetsFlags(inst))
++                return true;
++            if (inst.rs == COP2_BC)
++                return false;
++            if (inst.rs == COP2_CFC2 && (inst.rd == VU0_CR_STATUS || inst.rd == VU0_CR_MAC))
++                return false;
++            if (inst.rs >= COP2_CO)
++            {
++                const uint32_t func = inst.function & 0x3Fu;
++                if (func == VU0_S1_VCALLMS || func == VU0_S1_VCALLMSR)
++                    return false;
++            }
++        }
++        return false;
++    }
++
+     std::string CodeGenerator::translateVUInstruction(const Instruction &inst)
+     {
+-        return VuTranslator(*this).translate(inst);
++        std::string code = VuTranslator(*this).translate(inst);
++
++        // MKSM: the arithmetic instructions set the MAC and status flags from their whole result (`res` in the
++        // translators' blocks), also in the lanes and for the destinations they do not write. Games compare vectors
++        // with them: "vsub vf0, a, b" and CFC2 from vi17 four instructions later.
++        if (!m_vu0FlagsDead && vu0MacroSetsFlags(inst))
++        {
++            const size_t blockEnd = code.rfind('}');
++            if (blockEnd != std::string::npos && code.find("__m128 res = ") != std::string::npos)
++            {
++                code.insert(blockEnd, fmt::format("PS2_VU0_FMAC_FLAGS(ctx, res, 0x{:X}); ",
++                                                  static_cast<uint32_t>(inst.vectorInfo.vectorField) & 0xFu));
++            }
++        }
++
++        // MKSM: VF0 is hardwired to (0, 0, 0, 1). An instruction that names it as its destination leaves it as it is;
++        // the generated write put the result in it and every later use of VF0 as the constant read that result.
++        if (code.find("ctx->vu0_vf[0] = ") != std::string::npos)
++        {
++            code = "{ " + code + " ctx->vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f); }";
++        }
++        return code;
+     }
+ 
+     CodeGenerator::AnalysisResult CodeGenerator::collectInternalBranchTargets(
+diff --git a/ps2xRecomp/src/lib/function_emitter.cpp b/ps2xRecomp/src/lib/function_emitter.cpp
+index 3192e90..1ff9296 100644
+--- a/ps2xRecomp/src/lib/function_emitter.cpp
++++ b/ps2xRecomp/src/lib/function_emitter.cpp
+@@ -203,7 +203,11 @@ namespace ps2recomp
+                     ss << "    ctx->pc = 0x" << std::hex << inst.address << "u;\n"
+                        << std::dec;
+                     const MemoryAccessHint memoryHint = resolveMemoryAccessHint(inst, constantRegisters);
++                    // MKSM: no flag update for a VU0 macro instruction whose flags the next one overwrites unread
++                    cg.m_vu0FlagsDead = CodeGenerator::vu0MacroSetsFlags(inst) &&
++                                        CodeGenerator::vu0FlagsDeadAfter(instructions, i);
+                     ss << "    " << cg.translateInstruction(inst, memoryHint);
++                    cg.m_vu0FlagsDead = false;
+                     if (inst.isMmio)
+                     {
+                         ss << " // MMIO: 0x" << std::hex << inst.mmioAddress << std::dec;
+diff --git a/ps2xRecomp/src/lib/instruction_translator.cpp b/ps2xRecomp/src/lib/instruction_translator.cpp
+index 7684097..4a53f29 100644
+--- a/ps2xRecomp/src/lib/instruction_translator.cpp
++++ b/ps2xRecomp/src/lib/instruction_translator.cpp
+@@ -211,6 +211,8 @@ namespace ps2recomp
+                 inst.rt,
+                 genWrite(32, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate), "bits"));
+         case OPCODE_LDC2:
++            if (inst.rt == 0) // MKSM: VF0 is hardwired to (0, 0, 0, 1)
++                return "// LQC2 into VF0 ignored";
+             return fmt::format("ctx->vu0_vf[{}] = _mm_castsi128_ps({});", inst.rt, genRead(128, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate)));
+         case OPCODE_SDC2:
+             return genWrite(128, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate), fmt::format("_mm_castps_si128(ctx->vu0_vf[{}])", inst.rt)) + ";";
+diff --git a/ps2xRuntime/include/ps2_runtime_macros.h b/ps2xRuntime/include/ps2_runtime_macros.h
+index 68f3f1c..d65ec10 100644
+--- a/ps2xRuntime/include/ps2_runtime_macros.h
++++ b/ps2xRuntime/include/ps2_runtime_macros.h
+@@ -369,6 +369,31 @@ inline __m128 ps2_vmul(__m128 a, __m128 b)
+     return ps2_vfinish(a, b, _mm_mul_ps(a, b), Ps2VecOp::Mul);
+ }
+ 
++// MKSM: the MAC flags of a VU0 macro arithmetic instruction (ADD, SUB, MUL, MADD, MSUB and their forms, OPMULA,
++// OPMSUB). `res` is the instruction's result in all four lanes and `field` its destination mask (x = 8, y = 4, z = 2,
++// w = 1). Zero flags in bits 3..0 and sign flags in bits 7..4, x in the upper bit of each group; the lanes outside the
++// mask are clear. A zero keeps its sign flag. The results are already saturated and flushed (ps2_vfinish), so the
++// underflow and overflow flags (bits 11..8, 15..12) stay clear.
++inline uint32_t ps2_vu0_mac_flags(__m128 res, uint32_t field)
++{
++    // _mm_movemask_ps has x in bit 0; the flags have x in bit 3
++    static constexpr uint8_t kReversed[16] = {0x0, 0x8, 0x4, 0xC, 0x2, 0xA, 0x6, 0xE, 0x1, 0x9, 0x5, 0xD, 0x3, 0xB, 0x7, 0xF};
++    const uint32_t sign = kReversed[_mm_movemask_ps(res) & 15] & field;
++    const uint32_t zero = kReversed[_mm_movemask_ps(_mm_cmpeq_ps(res, _mm_setzero_ps())) & 15] & field;
++    return (sign << 4) | zero;
++}
++
++// MKSM: sets the MAC flags and the status flags of such an instruction: zero and sign in status bits 0 and 1, and their
++// sticky copies in bits 6 and 7. The other status bits (invalid, division by zero and the sticky ones) are kept.
++#define PS2_VU0_FMAC_FLAGS(ctx, res, field)                                                              \
++    do                                                                                                   \
++    {                                                                                                    \
++        const uint32_t ps2_mac_ = ps2_vu0_mac_flags((res), (field));                                     \
++        const uint32_t ps2_cur_ = ((ps2_mac_ & 0x0Fu) ? 1u : 0u) | ((ps2_mac_ & 0xF0u) ? 2u : 0u);      \
++        (ctx)->vu0_mac_flags = ps2_mac_;                                                                 \
++        (ctx)->vu0_status = static_cast<uint16_t>(((ctx)->vu0_status & 0xFF0u) | ps2_cur_ | (ps2_cur_ << 6)); \
++    } while (0)
++
+ // PS2 VU (Vector Unit) operations
+ #define PS2_VADD(a, b) ps2_vadd((__m128)(a), (__m128)(b))
+ #define PS2_VSUB(a, b) ps2_vsub((__m128)(a), (__m128)(b))
+diff --git a/ps2xTest/src/code_generator_tests.cpp b/ps2xTest/src/code_generator_tests.cpp
+index 1e8c2a3..74ca999 100644
+--- a/ps2xTest/src/code_generator_tests.cpp
++++ b/ps2xTest/src/code_generator_tests.cpp
+@@ -1143,6 +1143,124 @@ void register_code_generator_tests()
+                      "the previous results must shift up by 6 bits");
+         });
+ 
++        // MKSM: VF0 is hardwired to (0, 0, 0, 1). Games compare vectors with "vsub.xyzw vf0, a, b" and the MAC flags;
++        // the generated write left the difference in VF0 for every later use of the constant.
++        tc.Run("VU0 macro instructions leave VF0 hardwired", [](TestCase &t) {
++            R5900Decoder decoder;
++            CodeGenerator gen({}, {});
++            const std::string restore = "ctx->vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);";
++
++            const std::string vsub = gen.translateInstruction(decoder.decodeInstruction(0x3A48C0u, 0x4BE3082Cu)); // vsub.xyzw $vf0, $vf1, $vf3
++            printGeneratedCode("vsub.xyzw $vf0, $vf1, $vf3", vsub);
++            const size_t write = vsub.find("ctx->vu0_vf[0] = PS2_VBLEND");
++            t.IsTrue(write != std::string::npos, "the translator still computes the result");
++            t.IsTrue(vsub.find(restore, write + 1) != std::string::npos, "VF0 must be the constant again after the instruction");
++
++            const std::string vadd = gen.translateInstruction(decoder.decodeInstruction(0x39FD34u, 0x4BC60868u)); // vadd.xyz $vf1, $vf1, $vf6
++            t.IsTrue(vadd.find("ctx->vu0_vf[0]") == std::string::npos, "another destination must not touch VF0");
++
++            Instruction qmtc2{};
++            qmtc2.opcode = OPCODE_COP2;
++            qmtc2.rs = COP2_QMTC2;
++            qmtc2.rt = 4;
++            qmtc2.rd = 0;
++            const std::string moved = gen.translateInstruction(qmtc2);
++            t.IsTrue(moved.find(restore) != std::string::npos, "QMTC2 into VF0 must leave the constant");
++
++            const std::string lqc2 = gen.translateInstruction(decoder.decodeInstruction(0x1000u, 0xD8800010u)); // lqc2 $vf0, 0x10($a0)
++            t.IsTrue(lqc2.find("ctx->vu0_vf[0] =") == std::string::npos, "LQC2 into VF0 must not write it");
++            const std::string lqc2vf1 = gen.translateInstruction(decoder.decodeInstruction(0x1000u, 0xD8810010u)); // lqc2 $vf1, 0x10($a0)
++            t.IsTrue(lqc2vf1.find("ctx->vu0_vf[1] =") != std::string::npos, "LQC2 into another register still loads");
++        });
++
++        // MKSM: ADD, SUB, MUL, MADD, MSUB (broadcast, Q, I and ACC forms), OPMULA and OPMSUB set the MAC and status
++        // flags; nothing else does. They were never set: CFC2 from vi17 read a constant.
++        tc.Run("VU0 macro arithmetic sets the MAC and status flags", [](TestCase &t) {
++            R5900Decoder decoder;
++            CodeGenerator gen({}, {});
++            const auto setsFlags = [](uint32_t func)
++            {
++                return func <= 0x0Fu || (func >= 0x18u && func <= 0x1Cu) || func == 0x1Eu ||
++                       (func >= 0x20u && func <= 0x2Au) || (func >= 0x2Cu && func <= 0x2Eu);
++            };
++            // COP2 CO, destination mask xyz (0xE), ft = vf7, fs = vf11, fd = vf3
++            const uint32_t base = (0x12u << 26) | (1u << 25) | (0xEu << 21) | (7u << 16) | (11u << 11);
++            uint32_t checked = 0;
++            for (uint32_t func = 0; func < 0x30u; ++func) // Special1: the function field
++            {
++                const Instruction inst = decoder.decodeInstruction(0x1000u, base | (3u << 6) | func);
++                const std::string out = gen.translateInstruction(inst);
++                const bool flags = out.find("PS2_VU0_FMAC_FLAGS(ctx, res, 0xE);") != std::string::npos;
++                t.Equals(CodeGenerator::vu0MacroSetsFlags(inst), setsFlags(func), "Special1 classification of function " + std::to_string(func));
++                t.Equals(flags, setsFlags(func), "Special1 flag update of function " + std::to_string(func) + ": " + out);
++                ++checked;
++            }
++            for (uint32_t func = 0; func < 0x44u; ++func) // Special2: bits 10..6 and 1..0
++            {
++                const Instruction inst = decoder.decodeInstruction(0x1000u, base | ((func >> 2) << 6) | 0x3Cu | (func & 3u));
++                const std::string out = gen.translateInstruction(inst);
++                const bool flags = out.find("PS2_VU0_FMAC_FLAGS(ctx, res, 0xE);") != std::string::npos;
++                t.Equals(CodeGenerator::vu0MacroSetsFlags(inst), setsFlags(func), "Special2 classification of function " + std::to_string(func));
++                t.Equals(flags, setsFlags(func), "Special2 flag update of function " + std::to_string(func) + ": " + out);
++                ++checked;
++            }
++            t.Equals(checked, 0x30u + 0x44u, "every function of both tables is checked");
++
++            // the flags come from the whole result, before VF0 is restored
++            const std::string vsub = gen.translateInstruction(decoder.decodeInstruction(0x3A48C0u, 0x4BE3082Cu)); // vsub.xyzw $vf0, $vf1, $vf3
++            const size_t flagsAt = vsub.find("PS2_VU0_FMAC_FLAGS(ctx, res, 0xF);");
++            t.IsTrue(flagsAt != std::string::npos, "vsub.xyzw sets the flags of the four lanes");
++            t.IsTrue(vsub.find("ctx->vu0_vf[0] = _mm_set_ps", flagsAt) != std::string::npos, "the flags are set before VF0 is restored");
++
++            gen.m_vu0FlagsDead = true;
++            const std::string dead = gen.translateInstruction(decoder.decodeInstruction(0x39FD34u, 0x4BC60868u)); // vadd.xyz $vf1, $vf1, $vf6
++            gen.m_vu0FlagsDead = false;
++            t.IsTrue(dead.find("PS2_VU0_FMAC_FLAGS") == std::string::npos, "no flag update when the flags cannot be read");
++        });
++
++        // MKSM: the flag update is left out only where the next arithmetic instruction overwrites the flags before
++        // anything can read them.
++        tc.Run("VU0 macro flags are kept wherever they can be read", [](TestCase &t) {
++            R5900Decoder decoder;
++            const uint32_t vadd = 0x4BC60868u;  // vadd.xyz $vf1, $vf1, $vf6
++            const uint32_t vsub = 0x4BE3082Cu;  // vsub.xyzw $vf0, $vf1, $vf3
++            const uint32_t vmax = 0x4BC0086Bu;  // vmax.xyz $vf1, $vf1, $vf0
++            const uint32_t vnop = 0x4A0002FFu;
++            const uint32_t cfc2mac = 0x48438800u;    // cfc2 $v1, $vi17
++            const uint32_t cfc2status = 0x48438000u; // cfc2 $v1, $vi16
++            const uint32_t cfc2clip = 0x48439000u;   // cfc2 $v1, $vi18
++            const uint32_t vcallms = 0x4A000038u;    // vcallms 0
++            const uint32_t addiu = 0x24A50058u;      // addiu $a1, $a1, 0x58
++            const uint32_t beq = 0x10000002u;        // b +2
++            const uint32_t jr = 0x03E00008u;         // jr $ra
++            const uint32_t syscall = 0x0000000Cu;
++            const auto dead = [&](std::initializer_list<uint32_t> words)
++            {
++                std::vector<Instruction> instructions;
++                uint32_t address = 0x1000u;
++                for (uint32_t word : words)
++                {
++                    instructions.push_back(decoder.decodeInstruction(address, word));
++                    address += 4u;
++                }
++                return CodeGenerator::vu0FlagsDeadAfter(instructions, 0);
++            };
++            t.IsTrue(dead({vadd, vsub}), "overwritten by the next arithmetic instruction");
++            t.IsTrue(dead({vadd, addiu, vmax, vnop, cfc2clip, vsub, cfc2mac}), "instructions that neither set nor read the flags do not matter");
++            t.IsFalse(dead({vsub, vnop, vnop, vnop, vnop, cfc2mac, vadd}), "read by CFC2 from the MAC register");
++            t.IsFalse(dead({vsub, cfc2status, vadd}), "read by CFC2 from the status register");
++            t.IsFalse(dead({vsub, vcallms, vadd}), "a micro program can read them");
++            t.IsFalse(dead({vsub}), "the end of the function keeps them");
++            t.IsFalse(dead({vsub, jr, vnop, vadd}), "a return keeps them");
++            t.IsFalse(dead({vsub, beq, vnop, vadd}), "a branch keeps them");
++            t.IsFalse(dead({vsub, syscall, vadd}), "a syscall keeps them");
++
++            std::vector<Instruction> gap;
++            gap.push_back(decoder.decodeInstruction(0x1000u, vsub));
++            gap.push_back(decoder.decodeInstruction(0x1010u, vadd));
++            t.IsFalse(CodeGenerator::vu0FlagsDeadAfter(gap, 0), "instructions that do not follow each other keep them");
++        });
++
+         tc.Run("VU special control registers use hardware indices", [](TestCase& t)
+             {
+                 CodeGenerator gen({}, {});
+diff --git a/ps2xTest/src/ps2_float_semantics_tests.cpp b/ps2xTest/src/ps2_float_semantics_tests.cpp
+index 08cdeee..fce046d 100644
+--- a/ps2xTest/src/ps2_float_semantics_tests.cpp
++++ b/ps2xTest/src/ps2_float_semantics_tests.cpp
+@@ -255,6 +255,37 @@ void register_ps2_float_semantics_tests()
+             t.Equals(laneBits(flushed, 3), bitsOf(0.5f), "lane 3: 1 * 0.5 should be 0.5");
+         });
+ 
++        // MKSM: the MAC flags of a VU0 macro arithmetic result, as the hardware has them: zero flags in bits 3..0 and
++        // sign flags in bits 7..4, x in the upper bit of each group, w in the lower; lanes outside the mask clear.
++        tc.Run("VU0 macro MAC and status flags follow the hardware layout", [](TestCase &t)
++        {
++            const __m128 res = _mm_set_ps(-0.0f, 2.0f, 0.0f, -1.0f); // x = -1, y = 0, z = 2, w = -0
++            t.Equals(ps2_vu0_mac_flags(res, 0xFu), 0x95u, "x negative, y zero, w a negative zero");
++            t.Equals(ps2_vu0_mac_flags(res, 0xEu), 0x84u, "w outside the mask");
++            t.Equals(ps2_vu0_mac_flags(res, 0x2u), 0x00u, "z alone: neither zero nor negative");
++            t.Equals(ps2_vu0_mac_flags(res, 0x0u), 0x00u, "no lane");
++
++            // "a <= b" as games test it: (sign | zero) of a - b
++            const __m128 a = _mm_set_ps(4.0f, 3.0f, 2.0f, 1.0f);
++            const __m128 b = _mm_set_ps(4.0f, 2.0f, 3.0f, 5.0f);
++            const uint32_t mac = ps2_vu0_mac_flags(PS2_VSUB(a, b), 0xFu);
++            t.Equals(((mac >> 4) | mac) & 0xFu, 0xDu, "x < x', y < y', z > z', w == w'");
++
++            struct
++            {
++                uint16_t vu0_status;
++                uint32_t vu0_mac_flags;
++            } ctx{0x0C30u | 0x0040u, 0xFFFFu}; // invalid, division by zero and their sticky bits, sticky zero
++            PS2_VU0_FMAC_FLAGS(&ctx, _mm_set_ps(1.0f, 1.0f, 1.0f, -1.0f), 0xFu);
++            t.Equals(ctx.vu0_mac_flags, 0x80u, "the MAC flags are replaced");
++            t.Equals(static_cast<uint32_t>(ctx.vu0_status), 0x0C30u | 0x0040u | 0x0002u | 0x0080u,
++                     "sign and sticky sign set, zero cleared, the other bits kept");
++            PS2_VU0_FMAC_FLAGS(&ctx, _mm_setzero_ps(), 0x8u);
++            t.Equals(ctx.vu0_mac_flags, 0x08u, "x zero");
++            t.Equals(static_cast<uint32_t>(ctx.vu0_status), 0x0C30u | 0x0040u | 0x0080u | 0x0001u,
++                     "zero set, sign cleared, the sticky bits kept");
++        });
++
+         tc.Run("DIV.S and RSQRT.S translate to the PS2 semantics helpers", [](TestCase &t)
+         {
+             CodeGenerator gen({}, {});

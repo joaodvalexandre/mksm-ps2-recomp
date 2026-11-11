@@ -320,10 +320,23 @@ namespace
         std::fprintf(stderr, "\n");
     }
 
-    void printThreads(PS2Runtime *runtime, uint32_t stamp)
+    // The display registers, for the call summaries and the thread watch ([mksm-gs]).
+    void printGsDisplay(PS2Runtime *runtime)
+    {
+        const GSRegisters &gs = runtime->memory().gs();
+        std::fprintf(stderr,
+                     "[mksm-gs] pmode=0x%llX smode2=0x%llX dispfb1=0x%llX display1=0x%llX dispfb2=0x%llX display2=0x%llX bgcolor=0x%llX\n",
+                     static_cast<unsigned long long>(gs.pmode), static_cast<unsigned long long>(gs.smode2),
+                     static_cast<unsigned long long>(gs.dispfb1), static_cast<unsigned long long>(gs.display1),
+                     static_cast<unsigned long long>(gs.dispfb2), static_cast<unsigned long long>(gs.display2),
+                     static_cast<unsigned long long>(gs.bgcolor));
+    }
+
+    // `unit` says what `stamp` counts: "call" (calls of the first traced function) or "second" (since the start).
+    void printThreads(PS2Runtime *runtime, const char *unit, uint32_t stamp)
     {
         const EeKernelSnapshot snapshot = runtime->eeScheduler().snapshot();
-        std::fprintf(stderr, "[mksm-threads] at %u:", stamp);
+        std::fprintf(stderr, "[mksm-threads] at %s %u:", unit, stamp);
         for (const EeThreadSnapshot &thread : snapshot.threads)
         {
             std::fprintf(stderr, " [id=%d st=%d wait=%d/%d pc=0x%08X prio=%d wake=%u]", thread.id,
@@ -334,7 +347,8 @@ namespace
         const uint8_t *rdram = runtime->memory().getRDRAM();
         for (const EeThreadSnapshot &thread : snapshot.threads)
         {
-            if (thread.status == EeThreadStatus::Waiting || thread.status == EeThreadStatus::Ready)
+            if (thread.status == EeThreadStatus::Waiting || thread.status == EeThreadStatus::Ready ||
+                thread.status == EeThreadStatus::Running)
             {
                 std::fprintf(stderr, "[mksm-threads]   id=%d", thread.id);
                 printGuestBacktrace(rdram, thread.ra, thread.sp);
@@ -343,9 +357,10 @@ namespace
     }
 
     // MKSM_TRACE_CALLS=0xADDR,0xADDR,...: counts the calls of up to 32 guest functions and logs the first eight of
-    // each with the argument registers and the caller; then a summary of the counts every 300 calls of the first
-    // traced function. A traced function is entered again when it resumes after a blocking stub (pc != address),
-    // those entries are counted separately.
+    // each with the argument registers and the caller; then a summary of the counts every 3000 calls of the first
+    // traced function (MKSM_TRACE_SUMMARY=<n>), with the busiest callers of each since the previous summary. A traced
+    // function is entered again when it resumes after a blocking stub (pc != address), those entries are counted
+    // separately.
     constexpr size_t kMaxTracedCalls = 32;
     struct TracedCall
     {
@@ -354,6 +369,7 @@ namespace
         uint32_t calls = 0;
         uint32_t resumes = 0;
         uint64_t nanos = 0; // host time spent inside (inclusive; calls that block do not return and are not timed)
+        std::unordered_map<uint32_t, uint32_t> callers; // return addresses since the last summary
     };
     TracedCall g_tracedCalls[kMaxTracedCalls];
     size_t g_tracedCallCount = 0;
@@ -371,6 +387,7 @@ namespace
         else
         {
             ++entry.calls;
+            ++entry.callers[getRegU32(ctx, 31)];
             if (entry.calls <= 8u && g_traceStrings)
             {
                 // MKSM_TRACE_STRINGS=1: the bytes at a0, for calls that take a string or a small structure.
@@ -410,14 +427,21 @@ namespace
                 }
                 std::fprintf(stderr, "\n");
                 printWatches(rdram);
-                printThreads(runtime, entry.calls);
-                const GSRegisters &gs = runtime->memory().gs();
-                std::fprintf(stderr,
-                             "[mksm-gs] pmode=0x%llX smode2=0x%llX dispfb1=0x%llX display1=0x%llX dispfb2=0x%llX display2=0x%llX bgcolor=0x%llX\n",
-                             static_cast<unsigned long long>(gs.pmode), static_cast<unsigned long long>(gs.smode2),
-                             static_cast<unsigned long long>(gs.dispfb1), static_cast<unsigned long long>(gs.display1),
-                             static_cast<unsigned long long>(gs.dispfb2), static_cast<unsigned long long>(gs.display2),
-                             static_cast<unsigned long long>(gs.bgcolor));
+                // the busiest callers of each traced function since the last summary: the loop that calls it
+                for (size_t i = 0; i < g_tracedCallCount; ++i)
+                {
+                    TracedCall &traced = g_tracedCalls[i];
+                    std::vector<std::pair<uint32_t, uint32_t>> ranked(traced.callers.begin(), traced.callers.end());
+                    std::sort(ranked.begin(), ranked.end(),
+                              [](const auto &a, const auto &b) { return a.second > b.second; });
+                    std::fprintf(stderr, "[mksm-calls] callers of 0x%X:", traced.address);
+                    for (size_t k = 0; k < ranked.size() && k < 6u; ++k)
+                        std::fprintf(stderr, " 0x%08X x%u", ranked[k].first, ranked[k].second);
+                    std::fprintf(stderr, "\n");
+                    traced.callers.clear();
+                }
+                printThreads(runtime, "call", entry.calls);
+                printGsDisplay(runtime);
             }
         }
         const auto start = std::chrono::steady_clock::now();
@@ -992,6 +1016,41 @@ namespace
         std::fprintf(stderr, "[mksm-display] tracing the display registers\n");
     }
 
+    // MKSM_TRACE_THREADS_EVERY=<s>: every <s> seconds, from a host thread, the EE threads ([mksm-threads], as the call
+    // summaries print them), the IOP's progress and diagnostics ([mksm-iop]) and the display registers ([mksm-gs]):
+    // what every side waits for when the game stops presenting.
+    void threadWatchLoop(PS2Runtime *runtime, double every)
+    {
+        const auto start = std::chrono::steady_clock::now();
+        uint64_t lastInstructions = 0;
+        size_t lastDiagnostics = 0;
+        while (true)
+        {
+            std::this_thread::sleep_for(std::chrono::duration<double>(every));
+            const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            printThreads(runtime, "second", static_cast<uint32_t>(seconds));
+            const ps2x::iop::DebugSnapshot iop = runtime->iopDebugSnapshot();
+            std::fprintf(stderr, "[mksm-iop] t=%.0fs instructions +%llu, cycles %llu, threads %u, rpc servers %u, modules %u\n",
+                         seconds, static_cast<unsigned long long>(iop.emulatorInstructions - lastInstructions),
+                         static_cast<unsigned long long>(iop.emulatorCycles), iop.emulatorThreads, iop.emulatorRpcServers,
+                         iop.emulatorLoadedModules);
+            lastInstructions = iop.emulatorInstructions;
+            for (size_t i = lastDiagnostics; i < iop.diagnostics.size(); ++i)
+                std::fprintf(stderr, "[mksm-iop]   %s\n", iop.diagnostics[i].c_str());
+            lastDiagnostics = iop.diagnostics.size();
+            printGsDisplay(runtime);
+        }
+    }
+
+    void startThreadWatch(PS2Runtime &runtime)
+    {
+        const char *every = std::getenv("MKSM_TRACE_THREADS_EVERY");
+        if (!every || std::atof(every) <= 0.0)
+            return;
+        std::thread(threadWatchLoop, &runtime, std::atof(every)).detach();
+        std::fprintf(stderr, "[mksm-threads] watching the threads every %s s\n", every);
+    }
+
     void applyMksmOverrides(PS2Runtime &runtime)
     {
         // The runtime logs through stdout, which is block-buffered when redirected to a file; without this the end
@@ -1014,6 +1073,7 @@ namespace
         startProfiler(runtime);
         startPadScript();
         startDisplayTrace(runtime);
+        startThreadWatch(runtime);
         std::fprintf(stderr, "[mksm] overrides applied: Mortal Kombat: Shaolin Monks (SLES-53524)\n");
     }
 }
