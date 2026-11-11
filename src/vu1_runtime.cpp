@@ -52,6 +52,7 @@ namespace
         uint64_t unknownTarget = 0; // given back at an indirect jump, then interpreted
         uint64_t verified = 0;
         uint64_t differences = 0;
+        uint64_t droppedKicks = 0;  // XGKICKs of translated launches whose packet passes 64 KB (corrupt data)
     };
 
     struct Vu1Glue
@@ -238,6 +239,15 @@ namespace
             return;
         }
         submit(memory, g_vu1.host);
+        if (g_vu1.host.dropped != 0u)
+        {
+            // The interpreter reports an error for such a packet and stops the launch where the transfer reaches
+            // 64 KB; the translated launch ran to its end without the packet. Only corrupt data gets here.
+            if (g_vu1.stats.droppedKicks == 0u)
+                std::fprintf(stderr, "[mksm-vu1] %s 0x%04X: an XGKICK packet passes 64 KB and was not sent (reported once)\n",
+                             program->name, entryPc);
+            g_vu1.stats.droppedKicks += g_vu1.host.dropped;
+        }
         context.vu0_vpu_stat &= ~0x0600u; // the translated programs have no D or T bit
         g_vu1.interpreterStale = true;
         ++g_vu1.stats.translated;

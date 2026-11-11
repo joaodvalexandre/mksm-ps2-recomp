@@ -289,8 +289,12 @@ namespace vu1gen
                     if (lo.readsMac)
                     {
                         flow.macClass.insert(s.nmac);
-                        if (m_trackMac && s.nmac < kMaxFlagEntries && s.macHist[s.nmac] != 0u)
+                        // The flags it sees are those of the writer k writers back, k = writers in flight. A writer
+                        // from before the launch is refused: a translated launch does not keep VU1State::mac.
+                        if (s.nmac < kMaxFlagEntries && s.macHist[s.nmac] != 0u)
                             m_program.flow[(s.macHist[s.nmac] - 1u) / 8u].macNeeded = true;
+                        else
+                            addRefusal(flow, "MAC flags read from before the launch");
                     }
                     if (lo.readsClip)
                         flow.clipClass.insert(s.nclip);
