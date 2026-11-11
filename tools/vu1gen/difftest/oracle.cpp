@@ -107,6 +107,59 @@ namespace vu1diff
         return result;
     }
 
+    OracleRun Oracle::runStepping(OracleMachine &machine, uint32_t startPc, uint32_t top, uint32_t itop, uint8_t *data,
+                                  Vu1nHost &packets, uint8_t *executed, uint64_t &pairs)
+    {
+        Fixture &fixture = *m_fixture;
+        VU1Interpreter &vu = *machine.vu;
+        VU1State &state = vu.state();
+        uint8_t *code = fixture.memory.getVU1Code();
+        fixture.sink = &packets;
+        const uint64_t errorsBefore = ps2_log::runtime_log_next_seq();
+
+        OracleRun result;
+        pairs = 0;
+        uint32_t pc = startPc & kPcMask;
+        bool ebit = false;
+        bool first = true;
+        for (;;)
+        {
+            if (first)
+                vu.execute(code, PS2_VU1_CODE_SIZE, data, PS2_VU1_DATA_SIZE, fixture.gs, &fixture.memory, startPc, top, itop, 1u);
+            else
+                vu.resume(code, PS2_VU1_CODE_SIZE, data, PS2_VU1_DATA_SIZE, fixture.gs, &fixture.memory, top, itop, 1u);
+            first = false;
+
+            // A call either waits one cycle (the pair is stalled) or runs the pair at pc, which always moves pc.
+            if (state.pc != pc)
+            {
+                executed[pc / 8u] = 1u;
+                ++pairs;
+            }
+            const uint64_t cycles = state.cycles - machine.clock;
+            const bool stuck = cycles == result.cycles; // the interpreter refuses to go on (it stopped itself)
+            result.cycles = cycles;
+            if (stuck || ps2_log::runtime_log_next_seq() != errorsBefore)
+            {
+                result.end = OracleEnd::Error;
+                break;
+            }
+            // The pair after the E bit ends the program: the interpreter flushes and clears ebit.
+            if (ebit && !state.ebit)
+                break;
+            if (result.cycles >= kCycleBudget)
+            {
+                result.end = OracleEnd::Budget;
+                break;
+            }
+            pc = state.pc;
+            ebit = state.ebit;
+        }
+        fixture.sink = nullptr;
+        machine.clock = state.cycles;
+        return result;
+    }
+
     uint64_t ticksNow()
     {
         return __rdtsc();

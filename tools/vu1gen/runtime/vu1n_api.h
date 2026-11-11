@@ -3,8 +3,10 @@
 //
 // The unit is a launch: one MSCAL or MSCNT, from an entry pc to the end of the pair after the next E bit. A launch
 // is translated or interpreted as a whole. Before a launch the caller identifies the program by the content of the
-// 16 KB micro memory and prepares VU1State as upstream's callbacks do (pc, TOP, ITOP, the D/T enables, VF00);
-// after a launch that returned Done it submits the recorded PATH1 packets, in order, under its own MXCSR.
+// 16 KB micro memory and prepares VU1State as upstream's execute() does on entry, for an MSCNT too (its entry pc is
+// state.pc): pc set, ebit, haltAfterDelaySlot, stoppedByD/T and the pending branch cleared, TOP, ITOP, VF00; the D/T
+// enables come from FBRST as in upstream's callbacks. After a launch that returned Done it submits the recorded
+// PATH1 packets, in order, under its own MXCSR.
 #ifndef MKSM_VU1N_API_H
 #define MKSM_VU1N_API_H
 

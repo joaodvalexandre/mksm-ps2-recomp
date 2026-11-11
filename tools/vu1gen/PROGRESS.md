@@ -18,7 +18,7 @@ or the game from here.
 | `config/vu1_images.txt` and its parser | done |
 | decoder and usage tables | done; equal to `vudis.py` on the four images and to the interpreter's own decoder on 97.5 million pairs |
 | runtime interface (`vu1n_api.h`, `vu1n.h`, `vu1n_runtime.cpp`) | done as far as the interface goes; `kick` equal to the interpreter's transfer on 20,000 random packets |
-| `vu1difftest`, oracle side | done: 30,000 captured launches replayed; sanity, `execute` against `resume`, comparison machinery, bench |
+| `vu1difftest`, oracle side | done: 30,000 captured launches replayed; sanity, `execute` against `resume`, comparison machinery, bench, pair coverage |
 | control flow, timing exploration, emission, arithmetic helpers, translation side of `vu1difftest`, synthetic launches | not started |
 
 ## Layout
@@ -174,7 +174,7 @@ Needs no game file. Result: `vu1n_tests: 30 cases, 1069 checks, 0 failed checks 
 
 ```
 $B/vu1gen/vu1difftest.exe --captures $CAP --images config/vu1_images.txt
-        [--only game] [--limit n] [--self | --self-fault n] [--bench] [--repeat n] [--max-report n]
+        [--only game] [--limit n] [--self | --self-fault n] [--bench] [--repeat n] [--coverage] [--max-report n]
 ```
 
 For every record of every `launches_<hash>.bin` (30,000 launches: 5,314 front, 12,520 game, 12,166 cut; the header of
@@ -230,35 +230,53 @@ another session, and the numbers follow its load: the table is the first of two 
 and one run during a build was up to 4 times slower on the short launches. Compare the oracle and a translation
 within one run.
 
-| image, entry | launches | cycles a launch | kicks a launch | qwords a launch | us a launch | ns a cycle |
-|---|---|---|---|---|---|---|
-| front `MSCAL 0000` | 5,314 | 1,612.6 | 131.16 | 655.8 | 489.0 | 303.3 |
-| game `MSCAL 0000` / `06F0` / `0E50` | 1,362 / 1,852 / 1,225 | 23 / 25 / 22 | 0 | 0 | 5.04 / 5.32 / 4.80 | 219 / 213 / 218 |
-| game `MSCNT 00A8` | 1,350 | 1,427.3 | 3 | 302.9 | 277.0 | 194.1 |
-| game `MSCNT 06D8` | 2,432 | 1,673.9 | 3 | 355.3 | 322.8 | 192.9 |
-| game `MSCNT 07A8` | 1,867 | 1,584.7 | 3 | 283.3 | 325.8 | 205.6 |
-| game `MSCNT 0E38` | 1,176 | 1,715.0 | 3 | 306.4 | 352.8 | 205.7 |
-| game `MSCNT 0EF0` | 1,219 | 1,186.1 | 3 | 185.3 | 239.5 | 201.9 |
-| game `MSCNT 14C0` | 37 | 1,409.5 | 3 | 219.6 | 283.3 | 201.0 |
-| game, all | 12,520 | 1,004.5 | 1.94 | 191.4 | 200.3 | 199.4 |
-| cut `MSCAL 04A0` / `0790` / `0B40` / `0EF0` / `36F0` | 39 / 214 / 1,625 / 408 / 19 | 10 / 14 / 15 / 19 / 18 | 0 | 0 | 3.11 / 3.81 / 3.77 / 4.41 / 4.30 | 311 / 272 / 251 / 232 / 239 |
-| cut `MSCNT 04E8` | 51 | 1,306.8 | 1 | 191.4 | 183.6 | 140.5 |
-| cut `MSCNT 0778` | 89 | 1,332.8 | 1 | 159.5 | 179.4 | 134.6 |
-| cut `MSCNT 07F8` | 207 | 923.0 | 1 | 122.2 | 152.5 | 165.2 |
-| cut `MSCNT 0B28` | 552 | 1,413.7 | 1 | 163.1 | 221.1 | 156.4 |
-| cut `MSCNT 0BA8` | 1,623 | 1,482.3 | 1 | 186.6 | 226.0 | 152.5 |
-| cut `MSCNT 0ED8` | 3,075 | 1,425.2 | 1 | 183.5 | 219.5 | 154.0 |
-| cut `MSCNT 0F78` | 352 | 1,774.2 | 1 | 204.7 | 297.6 | 167.7 |
-| cut `MSCNT 1298` | 3,802 | 1,829.5 | 1 | 215.0 | 308.0 | 168.3 |
-| cut `MSCNT 36D8` | 1 | 1,517.0 | 1 | 148.0 | 266.3 | 175.6 |
-| cut `MSCNT 3778` | 17 | 2,317.1 | 1 | 196.4 | 419.8 | 181.2 |
-| cut `MSCNT 3C50` | 92 | 2,366.7 | 1 | 199.7 | 425.7 | 179.9 |
-| cut, all | 12,166 | 1,300.3 | 0.81 | 157.6 | 209.7 | 161.3 |
-| all images | 30,000 | 1,232.2 | 24.37 | 260.0 | 255.3 | 207.2 |
+| image, entry | launches | pairs a launch | cycles a launch | kicks a launch | qwords a launch | us a launch | ns a cycle |
+|---|---|---|---|---|---|---|---|
+| front `MSCAL 0000` | 5,314 | 1,611.6 | 1,612.6 | 131.16 | 655.8 | 489.0 | 303.3 |
+| game `MSCAL 0000` / `06F0` / `0E50` | 1,362 / 1,852 / 1,225 | 21 / 23 / 20 | 23 / 25 / 22 | 0 | 0 | 5.04 / 5.32 / 4.80 | 219 / 213 / 218 |
+| game `MSCNT 00A8` | 1,350 | 1,214.4 | 1,427.3 | 3 | 302.9 | 277.0 | 194.1 |
+| game `MSCNT 06D8` | 2,432 | 1,426.1 | 1,673.9 | 3 | 355.3 | 322.8 | 192.9 |
+| game `MSCNT 07A8` | 1,867 | 1,381.9 | 1,584.7 | 3 | 283.3 | 325.8 | 205.6 |
+| game `MSCNT 0E38` | 1,176 | 1,496.8 | 1,715.0 | 3 | 306.4 | 352.8 | 205.7 |
+| game `MSCNT 0EF0` | 1,219 | 1,041.5 | 1,186.1 | 3 | 185.3 | 239.5 | 201.9 |
+| game `MSCNT 14C0` | 37 | 1,242.1 | 1,409.5 | 3 | 219.6 | 283.3 | 201.0 |
+| game, all | 12,520 | 867.3 | 1,004.5 | 1.94 | 191.4 | 200.3 | 199.4 |
+| cut `MSCAL 04A0` / `0790` / `0B40` / `0EF0` / `36F0` | 39 / 214 / 1,625 / 408 / 19 | 9 / 13 / 13 / 17 / 17 | 10 / 14 / 15 / 19 / 18 | 0 | 0 | 3.11 / 3.81 / 3.77 / 4.41 / 4.30 | 311 / 272 / 251 / 232 / 239 |
+| cut `MSCNT 04E8` | 51 | 816.6 | 1,306.8 | 1 | 191.4 | 183.6 | 140.5 |
+| cut `MSCNT 0778` | 89 | 826.0 | 1,332.8 | 1 | 159.5 | 179.4 | 134.6 |
+| cut `MSCNT 07F8` | 207 | 646.3 | 923.0 | 1 | 122.2 | 152.5 | 165.2 |
+| cut `MSCNT 0B28` | 552 | 964.9 | 1,413.7 | 1 | 163.1 | 221.1 | 156.4 |
+| cut `MSCNT 0BA8` | 1,623 | 1,061.3 | 1,482.3 | 1 | 186.6 | 226.0 | 152.5 |
+| cut `MSCNT 0ED8` | 3,075 | 1,025.7 | 1,425.2 | 1 | 183.5 | 219.5 | 154.0 |
+| cut `MSCNT 0F78` | 352 | 1,342.9 | 1,774.2 | 1 | 204.7 | 297.6 | 167.7 |
+| cut `MSCNT 1298` | 3,802 | 1,391.2 | 1,829.5 | 1 | 215.0 | 308.0 | 168.3 |
+| cut `MSCNT 36D8` | 1 | 1,204.0 | 1,517.0 | 1 | 148.0 | 266.3 | 175.6 |
+| cut `MSCNT 3778` | 17 | 1,881.8 | 2,317.1 | 1 | 196.4 | 419.8 | 181.2 |
+| cut `MSCNT 3C50` | 92 | 1,920.7 | 2,366.7 | 1 | 199.7 | 425.7 | 179.9 |
+| cut, all | 12,166 | 958.5 | 1,300.3 | 0.81 | 157.6 | 209.7 | 161.3 |
+| all images | 30,000 | 1,036.2 | 1,232.2 | 24.37 | 260.0 | 255.3 | 207.2 |
 
 The cycles of a launch include its stalls and the flush of the XGKICK transfer (2 cycles a qword), so "ns a cycle"
-is not the cost of an executed pair. With a translated program linked, the same table gets the translation's time
-and the ratio.
+is not the cost of an executed pair: the pairs a launch executes are in the second column (from `--coverage`,
+below), and the oracle costs 246 ns for each of them on average (255.3 us for 1,036.2 pairs). With a translated
+program linked, the same table gets the translation's time and the ratio.
+
+### vu1difftest --coverage: the pairs the captures execute
+
+```
+$B/vu1gen/vu1difftest.exe --captures $CAP --images config/vu1_images.txt --coverage
+```
+
+Runs every launch a second time on the oracle one pair a call (`execute()` then `resume()` with a budget of one
+cycle: `Oracle::runStepping`), which tells which pairs it executes. Result (29 s):
+
+| | front | game | cut |
+|---|---|---|---|
+| distinct pairs executed by the captured launches | 50 | 664 | 795 |
+| launches whose stepped run equals the run at once (state with `mac` and `status`, cycles, data memory, packets) | 5,314 of 5,314 | 12,520 of 12,520 | 12,166 of 12,166 |
+
+50, 664 and 795 are the study's numbers (of 1,388, 1,930 and 1,924 reachable pairs). The same pass is what the
+synthetic launches of the brief need to report the coverage they reach.
 
 ### vu1difftest --kick-check
 
@@ -335,9 +353,11 @@ side of the difftest. Things this stage found or fixed that they should know:
   (`OracleEnd::Budget`: counted, not compared). The brief asks for a pair limit in the translation; no status was
   added for it. A possibility: return `Done` with `state.pc` at the pair it stopped before, which is not an entry, so
   the next MSCNT goes to the interpreter.
-- **Synthetic launches and pair coverage** (brief, section 6) are not started. `vu1difftest` processes one
-  `LaunchRecord` at a time (`processFile`); a generator of synthetic records can feed the same code (the sanity and
-  `resume()` passes only make sense for captured sequences).
+- **Synthetic launches** (brief, section 6) are not started. `vu1difftest` processes one `LaunchRecord` at a time
+  (`processFile`); a generator of synthetic records can feed the same code (the sanity and `resume()` passes only
+  make sense for captured sequences), and `--coverage` already tells which pairs a launch executes: 50, 664 and 795
+  distinct pairs for the captures, so 1,338, 1,266 and 1,129 reachable pairs of the three programs still wait for a
+  launch that runs them.
 - **Benchmarks need an idle machine** (see above).
 - The hash of an image is not standard FNV-1a (see `imageHash`).
 - `vudis.py` in the study folder says 1932 own pairs for the cut image; the study's `raw_listing_cut.txt` still shows

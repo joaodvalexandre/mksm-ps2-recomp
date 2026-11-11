@@ -1,7 +1,7 @@
 // vu1difftest: upstream's VU1 interpreter (the oracle) against the translated programs on captured launches.
 //
 //   vu1difftest --captures <folder> [--images <config/vu1_images.txt>] [--only <text>] [--limit <n>]
-//               [--self | --self-fault <n>] [--bench] [--repeat <n>] [--max-report <n>]
+//               [--self | --self-fault <n>] [--bench] [--repeat <n>] [--coverage] [--max-report <n>]
 //   vu1difftest --kick-check [<n>]
 //   vu1difftest --decode-check [<n>] [--captures <folder>]
 //
@@ -17,7 +17,10 @@
 // machinery. --self-fault damages one result in every n-th launch on top of that; the run succeeds when exactly
 // the damaged launches are reported, each with the damaged field.
 // --bench measures the host time of every launch (best of --repeat runs, 3 by default).
-// --kick-check compares Vu1nHost::kick with the interpreter's XGKICK transfer on n random packets.
+// --coverage runs every launch a second time on the oracle one pair a call: it reports the pairs a launch executes,
+// the distinct pairs the captures reach, and that the stepped launch gives the result of the launch run at once.
+// --kick-check compares Vu1nHost::kick with the interpreter's XGKICK transfer on n random packets, after checking
+// that the harness tells apart a launch that ended, one that ran out of cycles and one stopped by an error.
 // --decode-check compares vu1gen's decoder with the interpreter's own on every encoding class, on n random pairs
 // and on the code files of the captures.
 //
@@ -52,6 +55,7 @@ namespace
         bool self = false;
         uint32_t selfFault = 0;
         bool bench = false;
+        bool coverage = false;
         uint32_t repeat = 3;
         uint32_t maxReport = 10;
         bool kickCheck = false;
@@ -83,6 +87,7 @@ namespace
         uint64_t cycles = 0;
         uint64_t packets = 0; // PATH1 packets of the oracle
         uint64_t packetBytes = 0;
+        uint64_t pairs = 0; // executed pairs (--coverage)
         uint64_t oracleBudget = 0;
         uint64_t oracleError = 0;
         uint64_t translated = 0;    // the translation ran the launch to its end
@@ -100,6 +105,7 @@ namespace
             cycles += other.cycles;
             packets += other.packets;
             packetBytes += other.packetBytes;
+            pairs += other.pairs;
             oracleBudget += other.oracleBudget;
             oracleError += other.oracleError;
             translated += other.translated;
@@ -184,6 +190,11 @@ namespace
         uint64_t snapshotErrors = 0;  // UnknownTarget from an entry that does not ask for a snapshot
         uint64_t reportedMismatches = 0;
         FieldCounts mismatchFields;   // the first field that differs, over the mismatches of the translation
+        // --coverage
+        uint32_t ownPairs = 0; // of the image, when the image list names it
+        std::vector<uint8_t> executed = std::vector<uint8_t>(kCodeBytes / 8u, uint8_t{0}); // by pair
+        uint64_t steppedLaunches = 0;
+        uint64_t steppedEqual = 0; // the launch run pair by pair gave the result of the launch run at once
     };
 
     // ---- the interpreter as a "translated program": tests the machinery through the real interface ----
@@ -315,6 +326,7 @@ namespace
 
         OracleMachine glue;     // enters every launch with execute(): the oracle of the comparison
         OracleMachine upstream; // MSCAL execute(), MSCNT resume(): what upstream's runtime does
+        OracleMachine stepper;  // --coverage: the launch one pair at a time
         auto record = std::make_unique<LaunchRecord>();
         LaunchResult glueResult;
         LaunchResult upstreamResult;
@@ -353,6 +365,25 @@ namespace
             stats.packetBytes += glueResult.packets.arena.size();
             stats.oracleBudget += glueRun.end == OracleEnd::Budget ? 1u : 0u;
             stats.oracleError += glueRun.end == OracleEnd::Error ? 1u : 0u;
+
+            // Which pairs the launch executes: the oracle again, one pair a call. It must give the same result.
+            if (options.coverage)
+            {
+                std::memcpy(&stepper.state(), &rec.state, sizeof(VU1State));
+                std::memcpy(scratch.data.data(), rec.data, kDataBytes);
+                scratch.packets.beginLaunch();
+                uint64_t pairs = 0;
+                const OracleRun stepped = oracle.runStepping(stepper, entryPc, rec.top, rec.itop, scratch.data.data(), scratch.packets,
+                                                             report.executed.data(), pairs);
+                std::memcpy(&scratch.state, &stepper.state(), sizeof(VU1State));
+                stats.pairs += pairs;
+                ++report.steppedLaunches;
+                if (stepped.end == glueRun.end && stepped.cycles == glueRun.cycles && !compareLaunch(glueResult, scratch) &&
+                    !compareState(glueResult.state, scratch.state, kFieldFlags))
+                {
+                    ++report.steppedEqual;
+                }
+            }
 
             // Sanity of the harness: this record's input is the state the previous launch left, when no other
             // launch came between them.
@@ -581,6 +612,8 @@ namespace
     {
         std::printf("   %-11s %8s %9s %8s %9s %10s %8s %10s %11s %8s", "entry", "launches", "cycles/l.", "kicks/l.", "qwords/l.", "translated",
                     "compared", "mismatches", "not handled", "unk.tgt.");
+        if (options.coverage)
+            std::printf(" | %8s", "pairs/l.");
         if (options.bench)
             std::printf(" | %12s %8s %13s %8s %8s", "oracle us/l.", "ns/cycle", "transl. us/l.", "ns/cycle", "speed-up");
         std::printf("\n");
@@ -594,6 +627,8 @@ namespace
                     static_cast<double>(stats.packetBytes) / 16.0 / launches, static_cast<unsigned long long>(stats.translated),
                     static_cast<unsigned long long>(stats.compared), static_cast<unsigned long long>(stats.mismatches),
                     static_cast<unsigned long long>(stats.notHandled), static_cast<unsigned long long>(stats.unknownTarget));
+        if (options.coverage)
+            std::printf(" | %8.1f", static_cast<double>(stats.pairs) / launches);
         if (options.bench)
         {
             const double oracleNs = static_cast<double>(stats.oracleTicks) * nanosecondsPerTick();
@@ -634,7 +669,7 @@ namespace
     {
         std::fprintf(stderr,
                      "usage: vu1difftest --captures <folder> [--images <config/vu1_images.txt>] [--only <text>] [--limit <n>]\n"
-                     "                   [--self | --self-fault <n>] [--bench] [--repeat <n>] [--max-report <n>]\n"
+                     "                   [--self | --self-fault <n>] [--bench] [--repeat <n>] [--coverage] [--max-report <n>]\n"
                      "       vu1difftest --kick-check [<n>]\n"
                      "       vu1difftest --decode-check [<n>] [--captures <folder>]\n");
         return 2;
@@ -670,6 +705,8 @@ int main(int argc, char **argv)
         }
         else if (argument == "--bench")
             options.bench = true;
+        else if (argument == "--coverage")
+            options.coverage = true;
         else if (argument == "--repeat" && isNumber(value))
             options.repeat = std::max(1u, static_cast<uint32_t>(std::strtoul(argv[++index], nullptr, 10)));
         else if (argument == "--max-report" && isNumber(value))
@@ -762,6 +799,7 @@ int main(int argc, char **argv)
     ResumeStats afterResetTotal;
     EntryStats grandTotal;
     uint64_t snapshotErrors = 0;
+    uint64_t steppingErrors = 0;
     for (const std::filesystem::path &path : files)
     {
         const std::string fileName = path.filename().string();
@@ -775,6 +813,7 @@ int main(int argc, char **argv)
 
         std::printf("\n== %s ==\n", name.c_str());
         ImageReport report;
+        report.ownPairs = image ? image->ownPairs : 0u;
         if (!processFile(options, oracle, path, name, options.self ? &self : nullptr, faults, report, error))
         {
             std::fprintf(stderr, "vu1difftest: %s: %s\n", fileName.c_str(), error.c_str());
@@ -792,6 +831,22 @@ int main(int argc, char **argv)
         if (report.snapshotErrors != 0u)
             std::printf("   ERROR: %llu launches ended with UnknownTarget from an entry that asks for no snapshot\n",
                         static_cast<unsigned long long>(report.snapshotErrors));
+        if (options.coverage)
+        {
+            uint32_t executed = 0;
+            uint32_t executedOwn = 0;
+            for (uint32_t pair = 0; pair < report.executed.size(); ++pair)
+            {
+                executed += report.executed[pair];
+                executedOwn += pair < report.ownPairs ? report.executed[pair] : 0u;
+            }
+            std::printf("   coverage: %u distinct pairs executed", executed);
+            if (report.ownPairs != 0u)
+                std::printf(" (%u of the image's %u own pairs)", executedOwn, report.ownPairs);
+            std::printf("; run one pair a call, the oracle gives the result of the launch run at once in %llu of %llu launches\n",
+                        static_cast<unsigned long long>(report.steppedEqual), static_cast<unsigned long long>(report.steppedLaunches));
+            steppingErrors += report.steppedLaunches - report.steppedEqual;
+        }
 
         sanityTotal.add(report.sanity);
         trueResumeTotal.add(report.trueResume);
@@ -822,5 +877,5 @@ int main(int argc, char **argv)
         std::printf("   comparison machinery: %s\n", passed ? "PASSED" : "FAILED");
         return passed ? 0 : 1;
     }
-    return grandTotal.mismatches == 0u && snapshotErrors == 0u ? 0 : 1;
+    return grandTotal.mismatches == 0u && snapshotErrors == 0u && steppingErrors == 0u ? 0 : 1;
 }

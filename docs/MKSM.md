@@ -705,5 +705,11 @@ commands, the full tables and the notes for the steps that follow.
   489 us (1,613 cycles, 131 packets a launch). Gameplay MSCNT: 240-353 us (192-206 ns a cycle, three packets a
   launch). Cutscene MSCNT: 152-426 us (135-181 ns a cycle, one packet). The init launches (MSCAL, 10-25 cycles):
   3-5 us. The same measurement during another build was up to four times slower on the short launches.
+- **What a launch executes.** Stepped one pair a call (which gives the same result as the launch run at once, in all
+  30,000 launches), the interpreter executes 1,036 pairs a launch on average (gameplay MSCNT 1,040-1,500, cutscene
+  MSCNT 650-1,920, front end 1,612): the rest of the 1,232 cycles are stalls and the flush of the XGKICK transfer.
+  That is 246 ns of host time for each executed pair. The captured launches execute 50 distinct pairs of the
+  front-end program, 664 of the gameplay program and 795 of the cutscene program (of 1,388, 1,930 and 1,924
+  reachable ones): the rest has to be reached by constructed launches before the translation can be trusted there.
 - **Next.** Control flow from the entry points, the timing exploration that resolves each Q, P, MAC and clip read,
   emission, the arithmetic helpers, then the comparison of every captured launch with the interpreter.
