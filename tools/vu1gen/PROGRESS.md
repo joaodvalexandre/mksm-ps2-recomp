@@ -358,6 +358,13 @@ side of the difftest. Things this stage found or fixed that they should know:
   make sense for captured sequences), and `--coverage` already tells which pairs a launch executes: 50, 664 and 795
   distinct pairs for the captures, so 1,338, 1,266 and 1,129 reachable pairs of the three programs still wait for a
   launch that runs them.
+- **Only the quick profile gives the oracle.** A configure-only test of the hook with `-DCMAKE_BUILD_TYPE=Release`
+  (and `-DPS2X_ENABLE_LTO=OFF`, as `scripts/build.ps1 -Release` passes) showed the interpreter's sources with
+  `/GL /Oi /Gy /Gw /GF /Zc:inline /fp:fast /arch:AVX2 /GS- /Qspectre-`: `/fp:fast` as the studies said, and `/GL`
+  still there (it comes from `INTERPROCEDURAL_OPTIMIZATION_RELEASE` in upstream's `ReleaseMode.cmake`, not from
+  the option patch 0002 added). `targets.cmake` warns when `vu1difftest` is configured in a Release tree; the
+  targets of this folder get no `/fp:fast` there (`vu1n_runtime`: `/O2 /Ob2 /DNDEBUG /fp:precise`). Generated code
+  must get the same treatment when it joins the game's build: its own library, `/fp:precise`, no `/GL`.
 - **Benchmarks need an idle machine** (see above).
 - The hash of an image is not standard FNV-1a (see `imageHash`).
 - `vudis.py` in the study folder says 1932 own pairs for the cut image; the study's `raw_listing_cut.txt` still shows

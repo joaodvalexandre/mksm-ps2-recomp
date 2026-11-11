@@ -60,6 +60,12 @@ vu1gen_target_defaults(vu1n_tests)
 # Inside a PS2Recomp build: the differential test. ps2_runtime holds upstream's VU1 interpreter, compiled with the
 # flags of the build tree's profile; it is the oracle.
 if(TARGET ps2_runtime)
+    if(CMAKE_BUILD_TYPE STREQUAL "Release")
+        # ps2xRuntime/cmake/ReleaseMode.cmake compiles the runtime /fp:fast /arch:AVX2 in this configuration: the
+        # compiler may then fuse and reorder the interpreter's arithmetic.
+        message(WARNING "vu1difftest: in the Release configuration upstream's VU1 interpreter is compiled /fp:fast. "
+                        "It is the reference of the translation only as the quick profile compiles it (RelWithDebInfo, /fp:precise).")
+    endif()
     # The translated programs. vu1gen does not emit them yet, so an empty table stands in; the emission stage
     # replaces this source by the generated ones (outside the repository, compiled /fp:precise).
     add_library(vu1n_programs STATIC
