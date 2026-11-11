@@ -599,6 +599,11 @@ namespace
         return found;
     }
 
+    // How many functions a report lists: enough for the leaf list to add up to most of the samples, so that the
+    // time can be split by subsystem (the game's code, the IOP, the GS, the scheduler).
+    constexpr size_t kHostProfileLeafEntries = 70;
+    constexpr size_t kHostProfileInclusiveEntries = 60;
+
     void hostProfilerLoop()
     {
         HANDLE process = GetCurrentProcess();
@@ -679,11 +684,11 @@ namespace
             std::vector<std::pair<std::string, HostSample>> sorted(bySymbol.begin(), bySymbol.end());
             std::sort(sorted.begin(), sorted.end(), [](const auto &a, const auto &b) { return a.second.leaf > b.second.leaf; });
             std::fprintf(stderr, "[mksm-hostprof] %llu samples, by leaf:", static_cast<unsigned long long>(total));
-            for (size_t i = 0; i < sorted.size() && i < 14; ++i)
+            for (size_t i = 0; i < sorted.size() && i < kHostProfileLeafEntries; ++i)
                 std::fprintf(stderr, " %s=%.1f%%", sorted[i].first.c_str(), 100.0 * sorted[i].second.leaf / total);
             std::sort(sorted.begin(), sorted.end(), [](const auto &a, const auto &b) { return a.second.inclusive > b.second.inclusive; });
             std::fprintf(stderr, "\n[mksm-hostprof] by inclusive:");
-            for (size_t i = 0; i < sorted.size() && i < 24; ++i)
+            for (size_t i = 0; i < sorted.size() && i < kHostProfileInclusiveEntries; ++i)
                 std::fprintf(stderr, " %s=%.1f%%", sorted[i].first.c_str(), 100.0 * sorted[i].second.inclusive / total);
             std::fprintf(stderr, "\n");
             samples.clear();
