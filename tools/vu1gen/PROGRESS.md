@@ -17,8 +17,8 @@ or the game from here.
 | development build (own tree, oracle compiled as in the quick profile) | works |
 | `config/vu1_images.txt` and its parser | done |
 | decoder and usage tables | done; equal to `vudis.py` on the four images and to the interpreter's own decoder on 97.5 million pairs |
-| runtime interface (`vu1n_api.h`, `vu1n.h`, `vu1n_runtime.cpp`) | done as far as the interface goes; `kick` equal to the interpreter's transfer on 20,000 random packets |
-| `vu1difftest`, oracle side | done: 30,000 captured launches replayed; sanity, `execute` against `resume`, comparison machinery, bench, pair coverage |
+| runtime interface (`vu1n_api.h`, `vu1n.h`, `vu1n_runtime.cpp`) | done as far as the interface goes; `kick` equal to the interpreter's transfer on 20,000 random packets and on the 731,100 XGKICKs of the captures |
+| `vu1difftest`, oracle side | done: 30,000 captured launches replayed; sanity, `execute` against `resume`, comparison machinery, bench, pair coverage, packets read at the XGKICK |
 | control flow, timing exploration, emission, arithmetic helpers, translation side of `vu1difftest`, synthetic launches | not started |
 
 ## Layout
@@ -369,8 +369,8 @@ side of the difftest. Things this stage found or fixed that they should know:
 - **Only the quick profile gives the oracle.** A configure-only test of the hook with `-DCMAKE_BUILD_TYPE=Release`
   (and `-DPS2X_ENABLE_LTO=OFF`, as `scripts/build.ps1 -Release` passes) showed the interpreter's sources with
   `/GL /Oi /Gy /Gw /GF /Zc:inline /fp:fast /arch:AVX2 /GS- /Qspectre-`: `/fp:fast` as the studies said, and `/GL`
-  still there (it comes from `INTERPROCEDURAL_OPTIMIZATION_RELEASE` in upstream's `ReleaseMode.cmake`, not from
-  the option patch 0002 added). `targets.cmake` warns when `vu1difftest` is configured in a Release tree; the
+  still there although the option of patch 0002 is off (not traced further; upstream's `ReleaseMode.cmake` also
+  sets `INTERPROCEDURAL_OPTIMIZATION_RELEASE`, which makes CMake add it). `targets.cmake` warns when `vu1difftest` is configured in a Release tree; the
   targets of this folder get no `/fp:fast` there (`vu1n_runtime`: `/O2 /Ob2 /DNDEBUG /fp:precise`). Generated code
   must get the same treatment when it joins the game's build: its own library, `/fp:precise`, no `/GL`.
 - **Benchmarks need an idle machine** (see above).
