@@ -1,0 +1,45 @@
+# The VU1 programs of SLES_535.24 (Mortal Kombat: Shaolin Monks, PAL) for tools/vu1gen: addresses only, no game data.
+#
+# The game uploads VU1 code with one routine (EE 0x23E0A0) that always sends 16 KB (2048 pairs) from the address it is
+# given to micro address 0. An image is therefore a program's own code followed by whatever comes next in the ELF, and
+# the translated code is selected at run time by comparing the whole micro memory with these images.
+#
+#   image <name> <ELF address>   starts an image; the name becomes part of the generated function's name
+#   hash <16 hex digits>         of the 16 KB (64-bit FNV-1a with the offset basis 1469598103934665603, the hash the
+#                                launch captures are named by); vu1gen refuses an ELF whose image has another hash
+#   pairs <n>                    pairs of the image's own code
+#   mscal <address> ...          MSCAL entry points: byte addresses in micro memory (pair index times 8)
+#   subroutine <address> ...     targets of the indirect jumps (JALR); any other target is left to the interpreter
+#
+# MSCNT entry points are not listed: an MSCNT continues after the delay slot of the last E bit executed, so the
+# generator finds them (one per reachable E bit).
+
+# A 17-pair routine (EE 0x22B2D8 uploads it) followed by the front-end program shifted by 0x90 bytes.
+image small 0x49BAE0
+  hash F6DCE9B3599C989A
+  pairs 17
+  mscal 0x0000
+
+# Front end. 0x0000..0x1430 are addresses the EE code builds; the last four are routine starts nothing else reaches.
+image front 0x49BB70
+  hash 61FEBE6F1C6A31CC
+  pairs 1392
+  mscal 0x0000 0x01A0 0x0A30 0x0F60 0x1430
+  mscal 0x1960 0x1CD0 0x2140 0x2600
+
+# Gameplay. All twelve are addresses the EE code builds.
+image game 0x49E6F0
+  hash 65ACC9AE7D1E0A07
+  pairs 1936
+  mscal 0x0000 0x06F0 0x0E50 0x14D0 0x1830 0x1CD0
+  mscal 0x21F0 0x2500 0x2A20 0x2FF0 0x3280 0x36B0
+
+# Cutscenes. 0x12B0, 0x2B60 and 0x2E80 are routine starts nothing else reaches; the others were launched in a capture
+# or are addresses the EE code builds. 0x30E0 is the routine the seven "JALR vi15, vi14" call (vi14 is a word of VU
+# data memory: 0, and then the call is skipped, or 0x61C) and that returns with "JR vi15".
+image cut 0x4A2370
+  hash 8A34F4A8F0CE0620
+  pairs 1932
+  mscal 0x0000 0x04A0 0x0790 0x0B40 0x0EF0 0x12B0 0x17E0
+  mscal 0x1BC0 0x2230 0x2520 0x2B60 0x2E80 0x3210 0x36F0
+  subroutine 0x30E0
