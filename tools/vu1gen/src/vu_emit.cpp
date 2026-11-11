@@ -2,6 +2,9 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
+#include <map>
+#include <set>
 #include <stdexcept>
 
 namespace vu1gen
@@ -66,48 +69,66 @@ namespace vu1gen
                 }
                 o += "\n};\n\n";
 
-                o += format("Vu1nStatus vu1n_run_%s(VU1State &state, uint8_t *data, Vu1nHost &host, uint32_t entryPc)\n{\n",
-                            m_name.c_str());
-                o += "    (void)data;\n    (void)host;\n";
-                o += "    switch (entryPc)\n    {\n";
+                // One function per handled entry, with the pairs a launch from it can reach: the routines only
+                // meet at the end of a launch, and one function per image is more than the compiler optimises well.
                 bool anyEntry = false;
                 for (const auto &[pc, entry] : m_program.entries)
                 {
                     if (!entry.handled)
                         continue;
                     anyEntry = true;
-                    o += format("    case 0x%04Xu: break;\n", pc);
+                    emitEntryFunction(pc);
                 }
-                o += "    default: return Vu1nStatus::NotHandled;\n    }\n";
+
+                o += format("Vu1nStatus vu1n_run_%s(VU1State &state, uint8_t *data, Vu1nHost &host, uint32_t entryPc)\n{\n",
+                            m_name.c_str());
                 if (!anyEntry)
-                {
-                    o += "}\n";
-                    return o;
-                }
-                o += "    Vu1nRegs R;\n    vu1nEnter(R, state);\n    uint32_t budget = kVu1nLoopBudget;\n";
+                    o += "    (void)state;\n    (void)data;\n    (void)host;\n";
                 o += "    switch (entryPc)\n    {\n";
                 for (const auto &[pc, entry] : m_program.entries)
                 {
                     if (entry.handled)
-                        o += format("    case 0x%04Xu: goto L_%04X;\n", pc, pc);
+                        o += format("    case 0x%04Xu: return vu1n_%s_%04X(state, data, host);\n", pc, m_name.c_str(), pc);
                 }
-                o += "    default: return Vu1nStatus::NotHandled;\n    }\n";
+                o += "    default: return Vu1nStatus::NotHandled;\n    }\n}\n";
+                return o;
+            }
 
-                // Pairs reached in sequence, in address order.
-                std::vector<uint32_t> labels;
-                for (uint32_t pc : m_program.emitPcs)
+            void emitEntryFunction(uint32_t entryPc)
+            {
+                std::string &o = m_out;
+                m_scopePcs.clear();
+                m_scopeContexts.clear();
+                for (const LaunchFlow &launch : m_program.launches)
                 {
-                    if (m_program.emitContexts[pc / 8u] & kContextNormal)
+                    if (launch.start.pc != entryPc)
+                        continue;
+                    m_scopePcs.insert(launch.pcs.begin(), launch.pcs.end());
+                    for (const auto &[pc, context] : launch.contexts)
+                        m_scopeContexts[pc] |= context;
+                }
+                o += format("static Vu1nStatus vu1n_%s_%04X(VU1State &state, uint8_t *data, Vu1nHost &host)\n{\n",
+                            m_name.c_str(), entryPc);
+                o += "    (void)data;\n    (void)host;\n";
+                o += "    Vu1nRegs R;\n    vu1nEnter(R, state);\n    uint32_t budget = kVu1nLoopBudget;\n    (void)budget;\n";
+                // Pairs reached in sequence, in address order; a jump to the entry first when it is not the lowest.
+                std::vector<uint32_t> labels;
+                for (uint32_t pc : m_scopePcs)
+                {
+                    if (hasLabel(pc))
                         labels.push_back(pc);
                 }
+                if (!hasLabel(entryPc))
+                    throw std::runtime_error(format("entry 0x%04X has no label", entryPc));
+                if (labels.front() != entryPc)
+                    o += format("    goto L_%04X;\n", entryPc);
                 for (size_t index = 0; index < labels.size(); ++index)
                 {
                     const uint32_t pc = labels[index];
                     const int64_t nextLabel = index + 1u < labels.size() ? static_cast<int64_t>(labels[index + 1u]) : -1;
                     emitNormal(pc, nextLabel);
                 }
-                o += "}\n";
-                return o;
+                o += "}\n\n";
             }
 
         private:
@@ -116,13 +137,16 @@ namespace vu1gen
             std::string m_name;
             bool m_keepsMac = false;
             std::string m_out;
+            std::set<uint32_t> m_scopePcs;               // the pairs of the entry function being emitted
+            std::map<uint32_t, uint8_t> m_scopeContexts; // how its launches reach them
 
             const Pair &pairAt(uint32_t pc) const { return m_program.pairs[(pc & kPcMask) / 8u]; }
 
             bool hasLabel(uint32_t pc) const
             {
                 pc &= kPcMask;
-                return m_program.emitPcs.count(pc) != 0u && (m_program.emitContexts[pc / 8u] & kContextNormal) != 0u;
+                const auto found = m_scopeContexts.find(pc);
+                return found != m_scopeContexts.end() && (found->second & kContextNormal) != 0u;
             }
 
             std::string leave(uint32_t pc) const
@@ -230,6 +254,18 @@ namespace vu1gen
                 }
             }
 
+            // The upper's scalar second operand (a broadcast lane, Q or I).
+            std::string upperScalar(const Instr &up, const PairFlow &flow) const
+            {
+                switch (up.operand)
+                {
+                case Operand::Broadcast: return format("R.vf[%u][%u]", up.ft, up.bc);
+                case Operand::Q: return format("R.q[%u]", flow.q());
+                case Operand::I: return "R.i";
+                default: throw std::runtime_error("upper scalar operand");
+                }
+            }
+
             // One pair in a scope of its own (a branch and its delay slot share the enclosing block).
             void emitPair(uint32_t pc, int outer)
             {
@@ -256,7 +292,6 @@ namespace vu1gen
                 uint32_t target = 0;
                 bool pushMac = false;
                 bool pushClip = false;
-                const std::string dest = format("0x%Xu", up.dest);
                 if (up.op == Op::Clip)
                 {
                     line(indent, format("const uint32_t uclip = vu1nClip(R.vf[%u], R.vf[%u][3]);", up.fs, up.ft));
@@ -265,42 +300,46 @@ namespace vu1gen
                 else if (up.dest != 0u && !up.nop)
                 {
                     const char *fop = fmacOp(up.op);
+                    const bool scalar = up.operand == Operand::Broadcast || up.operand == Operand::Q || up.operand == Operand::I;
+                    const std::string second = scalar ? upperScalar(up, flow) : vf(up.ft);
+                    const unsigned d = up.dest;
+                    // MAC flags are pushed by every flag writer when the program reads them, but only the writers a
+                    // FMAND / FMEQ / FMOR can see compute them (with the reference, which returns them).
+                    const bool writesMac = (fop || up.op == Op::Opmula || up.op == Op::Opmsub) && m_keepsMac && up.writesMacStatus;
+                    const bool exactMac = writesMac && flow.macNeeded;
                     std::string call;
-                    bool flags = false;
-                    if (fop)
-                    {
-                        call = format("vu1nFmac<%s>(%s, R.vf[%u], %s, R.acc, u.v)", fop, dest.c_str(), up.fs,
+                    if (exactMac && fop)
+                        call = format("const uint32_t umac = vu1nRefFmac<%s>(0x%Xu, R.vf[%u], %s, R.acc, u.v);", fop, d, up.fs,
                                       upperOperand(up, flow).c_str());
-                        flags = true;
-                    }
+                    else if (exactMac)
+                        call = format("const uint32_t umac = vu1nRefOpm<%s>(0x%Xu, R.vf[%u], R.vf[%u], R.acc, u.v);",
+                                      up.op == Op::Opmsub ? "true" : "false", d, up.fs, up.ft);
+                    else if (fop)
+                        call = format("vu1nFmac%s<%s, 0x%X>(R.vf[%u], %s, R.acc, u.v);", scalar ? "S" : "", fop, d, up.fs,
+                                      second.c_str());
                     else if (up.op == Op::Opmula || up.op == Op::Opmsub)
-                    {
-                        call = format("vu1nOpm<%s>(%s, R.vf[%u], R.vf[%u], R.acc, u.v)",
-                                      up.op == Op::Opmsub ? "true" : "false", dest.c_str(), up.fs, up.ft);
-                        flags = true;
-                    }
+                        call = format("vu1nOpmFast<%s, 0x%X>(R.vf[%u], R.vf[%u], R.acc, u.v);",
+                                      up.op == Op::Opmsub ? "true" : "false", d, up.fs, up.ft);
                     else if (up.op == Op::Max || up.op == Op::Mini)
-                        call = format("vu1nMinMax<%s>(%s, R.vf[%u], %s, u.v)", up.op == Op::Max ? "true" : "false",
-                                      dest.c_str(), up.fs, upperOperand(up, flow).c_str());
+                        call = format("vu1nMinMax%s<%s, 0x%X>(R.vf[%u], %s, u.v);", scalar ? "S" : "",
+                                      up.op == Op::Max ? "true" : "false", d, up.fs, second.c_str());
                     else if (up.op == Op::Abs)
-                        call = format("vu1nAbs(%s, R.vf[%u], u.v)", dest.c_str(), up.fs);
+                        call = format("vu1nAbs<0x%X>(R.vf[%u], u.v);", d, up.fs);
                     else if (up.op == Op::Itof)
-                        call = format("vu1nItof<%u>(%s, R.vf[%u], u.v)", up.fixedPoint, dest.c_str(), up.fs);
+                        call = format("vu1nItof<%u, 0x%X>(R.vf[%u], u.v);", up.fixedPoint, d, up.fs);
                     else if (up.op == Op::Ftoi)
-                        call = format("vu1nFtoi<%u>(%s, R.vf[%u], u.v)", up.fixedPoint, dest.c_str(), up.fs);
+                        call = format("vu1nFtoi<%u, 0x%X>(R.vf[%u], u.v);", up.fixedPoint, d, up.fs);
                     else
                         throw std::runtime_error(format("upper instruction at 0x%04X not emitted", pc));
 
-                    line(indent, "Vu1nVec u{};");
-                    if (flags && m_keepsMac && up.writesMacStatus)
+                    line(indent, "Vu1nVec u;");
+                    line(indent, call);
+                    if (writesMac)
                     {
-                        line(indent, "const uint32_t umac = " + call + ";");
                         pushMac = true;
+                        if (!exactMac)
+                            line(indent, "constexpr uint32_t umac = 0u; // no FMAND sees these flags");
                     }
-                    else if (flags)
-                        line(indent, "(void)" + call + ";");
-                    else
-                        line(indent, call + ";");
 
                     if (up.toAcc)
                         commit = Commit::Acc;
@@ -327,9 +366,9 @@ namespace vu1gen
 
                 // ---- 3. the upper's results
                 if (commit == Commit::Vf)
-                    line(indent, format("vu1nApply(R.vf[%u], u.v, %s);", target, dest.c_str()));
+                    line(indent, format("vu1nCommit<0x%X>(R.vf[%u], u.v);", up.dest, target));
                 else if (commit == Commit::Acc)
-                    line(indent, format("vu1nApply(R.acc, u.v, %s);", dest.c_str()));
+                    line(indent, format("vu1nCommit<0x%X>(R.acc, u.v);", up.dest));
                 if (pushMac)
                     line(indent, format("vu1nPush<%u>(R.mac, umac);", m_program.macDepth));
                 if (pushClip)

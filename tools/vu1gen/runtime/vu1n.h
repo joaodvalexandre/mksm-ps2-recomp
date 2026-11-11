@@ -8,11 +8,12 @@
 //   VU1N_MATH_REFERENCE  scalar, lane by lane, written straight from upstream's interpreter (ps2_vu1_upper.cpp,
 //                        ps2_vu1_lower.cpp, ps2_vu1_core.cpp): operands normalised (exponent 0 -> signed zero,
 //                        exponent 255 -> signed 0x7F7FFFFF), float32 operations rounded toward zero, a product-sum as
-//                        two rounded operations, the result fixed up from the same expression in binary64. Needs round
-//                        toward zero only (kVu1nMxcsr below).
-//   default              SSE without FMA, under round toward zero + flush to zero + denormals are zero, with
-//                        explicit code for what those modes do not give. NOT WRITTEN YET (the next stage, PROGRESS.md):
-//                        generated code (VU1N_GENERATED) must be compiled with VU1N_MATH_REFERENCE until then.
+//                        two rounded operations, the result fixed up from the same expression in binary64. These are
+//                        the vu1nRef* functions.
+//   default              SSE4.1 for the upper instructions (see "the public names of the upper helpers"), exact by
+//                        construction, with the reference taking the rare lanes it must; the lower instructions are
+//                        the same scalar code in both.
+// Both run under kVu1nMxcsr.
 //
 // Rules for a translation unit with generated arithmetic: compiled /fp:precise (never /fp:fast), no contraction of
 // a multiply and an add, no arithmetic on two literals (the compiler would fold it under the default rounding), and
@@ -28,16 +29,14 @@
 #include <cstring>
 #include <limits>
 
-#if defined(VU1N_GENERATED) && !defined(VU1N_MATH_REFERENCE)
-#error "vu1n.h: only the reference arithmetic exists so far; compile the generated code with VU1N_MATH_REFERENCE"
-#endif
+#include <smmintrin.h> // SSE4.1, which the runtime already requires
 
-// MXCSR during a launch, exceptions masked. The table vu1gen generates stores it in Vu1nProgram::mxcsr.
-#if defined(VU1N_MATH_REFERENCE)
-constexpr uint32_t kVu1nMxcsr = 0x7F80u; // round toward zero; denormals as IEEE, which is the interpreter's environment
-#else
-constexpr uint32_t kVu1nMxcsr = 0xFFC0u; // round toward zero, flush to zero, denormals are zero
-#endif
+// MXCSR during a launch, exceptions masked: round toward zero, denormals as IEEE (no flush to zero, no denormals
+// are zero), which is the interpreter's own environment. Both implementations use it: with the operands normalised
+// explicitly, the SSE operations then round exactly as the interpreter's float code does, and only the binary64
+// fix-up of a result needs handling (see the fast helpers). The table vu1gen generates stores it in
+// Vu1nProgram::mxcsr.
+constexpr uint32_t kVu1nMxcsr = 0x7F80u;
 
 #if defined(_MSC_VER)
 #define VU1N_INLINE __forceinline
@@ -236,7 +235,7 @@ enum : int
 // ADD, SUB, MUL, MADD, MSUB in every form: t is the second operand per lane (a broadcast, Q or I is passed splatted).
 // Writes the destination lanes of out and returns the MAC flags.
 template <int Op>
-VU1N_INLINE uint32_t vu1nFmac(uint8_t dest, const float *s, const float *t, const float *acc, float *out)
+VU1N_INLINE uint32_t vu1nRefFmac(uint8_t dest, const float *s, const float *t, const float *acc, float *out)
 {
     uint32_t mac = 0u;
     for (uint32_t component = 0; component < 4u; ++component)
@@ -286,7 +285,7 @@ VU1N_INLINE uint32_t vu1nFmac(uint8_t dest, const float *s, const float *t, cons
 
 // OPMULA (Sub false) and OPMSUB (Sub true): lane c of the product is s[(1,2,0)[c]] * t[(2,0,1)[c]]; lane w is 0.
 template <bool Sub>
-VU1N_INLINE uint32_t vu1nOpm(uint8_t dest, const float *s, const float *t, const float *acc, float *out)
+VU1N_INLINE uint32_t vu1nRefOpm(uint8_t dest, const float *s, const float *t, const float *acc, float *out)
 {
     static constexpr uint32_t kLeft[3] = {1u, 2u, 0u};
     static constexpr uint32_t kRight[3] = {2u, 0u, 1u};
@@ -329,7 +328,7 @@ VU1N_INLINE uint32_t vu1nOpm(uint8_t dest, const float *s, const float *t, const
 
 // MAX (Max true) and MINI: the normalised operands compared as floats, no flags.
 template <bool Max>
-VU1N_INLINE void vu1nMinMax(uint8_t dest, const float *s, const float *t, float *out)
+VU1N_INLINE void vu1nRefMinMax(uint8_t dest, const float *s, const float *t, float *out)
 {
     for (uint32_t component = 0; component < 4u; ++component)
     {
@@ -344,7 +343,7 @@ VU1N_INLINE void vu1nMinMax(uint8_t dest, const float *s, const float *t, float 
     }
 }
 
-VU1N_INLINE void vu1nAbs(uint8_t dest, const float *s, float *out)
+VU1N_INLINE void vu1nRefAbs(uint8_t dest, const float *s, float *out)
 {
     for (uint32_t component = 0; component < 4u; ++component)
     {
@@ -355,7 +354,7 @@ VU1N_INLINE void vu1nAbs(uint8_t dest, const float *s, float *out)
 
 // ITOF0/4/12/15: the raw word as int32, converted (rounded toward zero), then divided.
 template <int Fraction>
-VU1N_INLINE void vu1nItof(uint8_t dest, const float *s, float *out)
+VU1N_INLINE void vu1nRefItof(uint8_t dest, const float *s, float *out)
 {
     for (uint32_t component = 0; component < 4u; ++component)
     {
@@ -375,7 +374,7 @@ VU1N_INLINE void vu1nItof(uint8_t dest, const float *s, float *out)
 
 // FTOI0/4/12/15 (vuFloatToInt): the normalised operand times the scale in binary64, saturated, truncated.
 template <int Fraction>
-VU1N_INLINE void vu1nFtoi(uint8_t dest, const float *s, float *out)
+VU1N_INLINE void vu1nRefFtoi(uint8_t dest, const float *s, float *out)
 {
     constexpr float kScale = Fraction == 0 ? 1.0f : (Fraction == 4 ? 16.0f : (Fraction == 12 ? 4096.0f : 32768.0f));
     for (uint32_t component = 0; component < 4u; ++component)
@@ -410,6 +409,241 @@ VU1N_INLINE uint32_t vu1nClip(const float *s, float w)
     }
     return flags;
 }
+
+// ---- the public names of the upper helpers -------------------------------------------------------------------
+//
+// Dest is the instruction's lane mask (x = 8, y = 4, z = 2, w = 1). out receives every lane of the result (only the
+// destination lanes are meaningful); vu1nCommit<Dest> writes them to the register. The "S" forms take a scalar
+// second operand (a broadcast lane, Q or I).
+//
+// Fast forms (default build), under kVu1nMxcsr (round toward zero, denormals as IEEE):
+// - Operands are normalised with integer operations (exponent 0 -> signed zero, exponent 255 -> signed 0x7F7FFFFF),
+//   so the SSE operation sees the interpreter's operands and rounds as its float code does.
+// - The interpreter then replaces a lane's result from the binary64 value e of the same expression: a zero when e
+//   is 0 or below FLT_MIN, 0x7F7FFFFF when |e| exceeds FLT_MAX. For ADD, SUB and MUL of normalised operands that is
+//   exactly "a result below FLT_MIN becomes the zero of its sign": round toward zero already clamps an overflow to
+//   0x7F7FFFFF, e is 0 exactly when the float result is, and a nonzero result below FLT_MIN has e's sign.
+// - For MADD and MSUB (z + p, p = the product rounded) the same holds except when the product is tiny or huge: e can
+//   be below FLT_MIN while z + p is not only if |a*b| < 2^-79 (otherwise the bits of a*b that p dropped keep e away
+//   from zero, or p is exact), and e can exceed FLT_MAX while z + p does not only when p or the result is in the top
+//   binade. Lanes with a nonzero product below 2^-79 or a product or result at or above 2^127 take the reference.
+namespace vu1n_detail
+{
+    VU1N_INLINE __m128i iv(int32_t value) { return _mm_set1_epi32(value); }
+
+    // normalizeOperand on four lanes.
+    VU1N_INLINE __m128 normalize(__m128 value)
+    {
+        const __m128i bits = _mm_castps_si128(value);
+        const __m128i sign = _mm_and_si128(bits, iv(static_cast<int32_t>(0x80000000u)));
+        __m128i magnitude = _mm_and_si128(bits, iv(0x7FFFFFFF));
+        magnitude = _mm_min_epi32(magnitude, iv(0x7F7FFFFF));
+        magnitude = _mm_and_si128(magnitude, _mm_cmpgt_epi32(magnitude, iv(0x007FFFFF)));
+        return _mm_castsi128_ps(_mm_or_si128(magnitude, sign));
+    }
+
+    // A result below FLT_MIN (a denormal or a zero) becomes the zero of its sign.
+    VU1N_INLINE __m128 flushTiny(__m128 value)
+    {
+        const __m128i bits = _mm_castps_si128(value);
+        const __m128i normal = _mm_cmpgt_epi32(_mm_and_si128(bits, iv(0x7FFFFFFF)), iv(0x007FFFFF));
+        return _mm_castsi128_ps(_mm_and_si128(bits, _mm_or_si128(normal, iv(static_cast<int32_t>(0x80000000u)))));
+    }
+
+    // Lane i of an SSE register is component i: x is bit 0 of a blend or movemask, and bit 3 of a VU lane mask.
+    constexpr int laneBits(int dest)
+    {
+        return ((dest >> 3) & 1) | (((dest >> 2) & 1) << 1) | (((dest >> 1) & 1) << 2) | ((dest & 1) << 3);
+    }
+
+    // The lanes of a product-sum the binary64 fix-up may change (see above).
+    VU1N_INLINE int productSumSlowLanes(__m128 a, __m128 b, __m128 p, __m128 r)
+    {
+        const __m128 magnitudeMask = _mm_castsi128_ps(iv(0x7FFFFFFF));
+        const __m128 zero = _mm_setzero_ps();
+        const __m128 pMagnitude = _mm_and_ps(p, magnitudeMask);
+        const __m128 rMagnitude = _mm_and_ps(r, magnitudeMask);
+        const __m128 tiny = _mm_and_ps(_mm_cmplt_ps(pMagnitude, _mm_castsi128_ps(iv(0x18000000))), // 2^-79
+                                       _mm_and_ps(_mm_cmpneq_ps(a, zero), _mm_cmpneq_ps(b, zero)));
+        const __m128 top = _mm_castsi128_ps(iv(0x7F000000)); // 2^127
+        const __m128 huge = _mm_or_ps(_mm_cmpge_ps(pMagnitude, top), _mm_cmpge_ps(rMagnitude, top));
+        return _mm_movemask_ps(_mm_or_ps(tiny, huge));
+    }
+
+    template <int Op, int Dest>
+    VU1N_INLINE void fmac(const float *s, __m128 t, const float *acc, float *out)
+    {
+        const __m128 a = normalize(_mm_loadu_ps(s));
+        const __m128 b = normalize(t);
+        __m128 r;
+        if constexpr (Op == kVu1nAdd)
+            r = _mm_add_ps(a, b);
+        else if constexpr (Op == kVu1nSub)
+            r = _mm_sub_ps(a, b);
+        else if constexpr (Op == kVu1nMul)
+            r = _mm_mul_ps(a, b);
+        else
+        {
+            const __m128 z = normalize(_mm_loadu_ps(acc));
+            const __m128 p = _mm_mul_ps(a, b);
+            r = Op == kVu1nMadd ? _mm_add_ps(z, p) : _mm_sub_ps(z, p);
+            if (productSumSlowLanes(a, b, p, r) & laneBits(Dest)) [[unlikely]]
+            {
+                alignas(16) float tv[4];
+                _mm_store_ps(tv, t);
+                (void)vu1nRefFmac<Op>(static_cast<uint8_t>(Dest), s, tv, acc, out);
+                return;
+            }
+        }
+        _mm_storeu_ps(out, flushTiny(r));
+    }
+
+    template <bool Max, int Dest>
+    VU1N_INLINE void minMax(const float *s, __m128 t, float *out)
+    {
+        const __m128 a = normalize(_mm_loadu_ps(s));
+        const __m128 b = normalize(t);
+        // MAXPS / MINPS return the second operand unless the first compares greater / less: vs > vt ? vs : vt.
+        _mm_storeu_ps(out, Max ? _mm_max_ps(a, b) : _mm_min_ps(a, b));
+    }
+}
+
+template <int Dest>
+VU1N_INLINE void vu1nCommit(float *dst, const float *src)
+{
+    if constexpr (Dest == 0xF)
+        std::memcpy(dst, src, 16u);
+    else
+    {
+        const __m128 value = _mm_blend_ps(_mm_loadu_ps(dst), _mm_loadu_ps(src), vu1n_detail::laneBits(Dest));
+        _mm_storeu_ps(dst, value);
+    }
+}
+
+#if defined(VU1N_MATH_REFERENCE)
+
+template <int Op, int Dest>
+VU1N_INLINE void vu1nFmac(const float *s, const float *t, const float *acc, float *out)
+{
+    (void)vu1nRefFmac<Op>(static_cast<uint8_t>(Dest), s, t, acc, out);
+}
+template <int Op, int Dest>
+VU1N_INLINE void vu1nFmacS(const float *s, float t, const float *acc, float *out)
+{
+    (void)vu1nRefFmac<Op>(static_cast<uint8_t>(Dest), s, vu1nSplat(t).v, acc, out);
+}
+template <bool Sub, int Dest>
+VU1N_INLINE void vu1nOpmFast(const float *s, const float *t, const float *acc, float *out)
+{
+    (void)vu1nRefOpm<Sub>(static_cast<uint8_t>(Dest), s, t, acc, out);
+}
+template <bool Max, int Dest>
+VU1N_INLINE void vu1nMinMax(const float *s, const float *t, float *out)
+{
+    vu1nRefMinMax<Max>(static_cast<uint8_t>(Dest), s, t, out);
+}
+template <bool Max, int Dest>
+VU1N_INLINE void vu1nMinMaxS(const float *s, float t, float *out)
+{
+    vu1nRefMinMax<Max>(static_cast<uint8_t>(Dest), s, vu1nSplat(t).v, out);
+}
+template <int Dest>
+VU1N_INLINE void vu1nAbs(const float *s, float *out)
+{
+    vu1nRefAbs(static_cast<uint8_t>(Dest), s, out);
+}
+template <int Fraction, int Dest>
+VU1N_INLINE void vu1nItof(const float *s, float *out)
+{
+    vu1nRefItof<Fraction>(static_cast<uint8_t>(Dest), s, out);
+}
+template <int Fraction, int Dest>
+VU1N_INLINE void vu1nFtoi(const float *s, float *out)
+{
+    vu1nRefFtoi<Fraction>(static_cast<uint8_t>(Dest), s, out);
+}
+
+#else
+
+template <int Op, int Dest>
+VU1N_INLINE void vu1nFmac(const float *s, const float *t, const float *acc, float *out)
+{
+    vu1n_detail::fmac<Op, Dest>(s, _mm_loadu_ps(t), acc, out);
+}
+template <int Op, int Dest>
+VU1N_INLINE void vu1nFmacS(const float *s, float t, const float *acc, float *out)
+{
+    vu1n_detail::fmac<Op, Dest>(s, _mm_set1_ps(t), acc, out);
+}
+// OPMULA / OPMSUB with the xyz mask (vu1gen refuses any other): the product-sum of the permuted operands.
+template <bool Sub, int Dest>
+VU1N_INLINE void vu1nOpmFast(const float *s, const float *t, const float *acc, float *out)
+{
+    static_assert((Dest & 1) == 0, "OPMULA / OPMSUB with the w lane are refused by vu1gen");
+    const __m128 sv = _mm_loadu_ps(s);
+    const __m128 tv = _mm_loadu_ps(t);
+    alignas(16) float sp[4];
+    _mm_store_ps(sp, _mm_shuffle_ps(sv, sv, _MM_SHUFFLE(3, 0, 2, 1))); // (y, z, x, w)
+    const __m128 tp = _mm_shuffle_ps(tv, tv, _MM_SHUFFLE(3, 1, 0, 2)); // (z, x, y, w)
+    if constexpr (Sub)
+    {
+        const __m128 a = vu1n_detail::normalize(_mm_load_ps(sp));
+        const __m128 b = vu1n_detail::normalize(tp);
+        const __m128 z = vu1n_detail::normalize(_mm_loadu_ps(acc));
+        const __m128 p = _mm_mul_ps(a, b);
+        const __m128 r = _mm_sub_ps(z, p);
+        if (vu1n_detail::productSumSlowLanes(a, b, p, r) & vu1n_detail::laneBits(Dest)) [[unlikely]]
+        {
+            (void)vu1nRefOpm<true>(static_cast<uint8_t>(Dest), s, t, acc, out);
+            return;
+        }
+        _mm_storeu_ps(out, vu1n_detail::flushTiny(r));
+    }
+    else
+        vu1n_detail::fmac<kVu1nMul, Dest>(sp, tp, acc, out);
+}
+template <bool Max, int Dest>
+VU1N_INLINE void vu1nMinMax(const float *s, const float *t, float *out)
+{
+    vu1n_detail::minMax<Max, Dest>(s, _mm_loadu_ps(t), out);
+}
+template <bool Max, int Dest>
+VU1N_INLINE void vu1nMinMaxS(const float *s, float t, float *out)
+{
+    vu1n_detail::minMax<Max, Dest>(s, _mm_set1_ps(t), out);
+}
+template <int Dest>
+VU1N_INLINE void vu1nAbs(const float *s, float *out)
+{
+    const __m128 value = vu1n_detail::normalize(_mm_loadu_ps(s));
+    _mm_storeu_ps(out, _mm_and_ps(value, _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF))));
+}
+// ITOF: the conversion rounds under kVu1nMxcsr as the interpreter's cast does; the division by a power of two is
+// exact (no result is below 2^-15), so it is a multiplication.
+template <int Fraction, int Dest>
+VU1N_INLINE void vu1nItof(const float *s, float *out)
+{
+    __m128 value = _mm_cvtepi32_ps(_mm_loadu_si128(reinterpret_cast<const __m128i *>(s)));
+    if constexpr (Fraction != 0)
+        value = _mm_mul_ps(value, _mm_set1_ps(1.0f / static_cast<float>(1 << Fraction)));
+    _mm_storeu_ps(out, value);
+}
+// FTOI: the float product by a power of two equals the binary64 one wherever the truncation can tell (an overflow
+// clamps to FLT_MAX, past both limits); CVTTPS2DQ gives 0x80000000 out of range, which the interpreter's
+// saturation matches below -2^31 and which is replaced by 0x7FFFFFFF from 2^31 up.
+template <int Fraction, int Dest>
+VU1N_INLINE void vu1nFtoi(const float *s, float *out)
+{
+    __m128 value = vu1n_detail::normalize(_mm_loadu_ps(s));
+    if constexpr (Fraction != 0)
+        value = _mm_mul_ps(value, _mm_set1_ps(static_cast<float>(1 << Fraction)));
+    __m128i converted = _mm_cvttps_epi32(value);
+    const __m128 high = _mm_cmpge_ps(value, _mm_set1_ps(2147483648.0f));
+    converted = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(converted), _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF)), high));
+    _mm_storeu_si128(reinterpret_cast<__m128i *>(out), converted);
+}
+
+#endif
 
 VU1N_INLINE Vu1nVec vu1nMr32(const float *s)
 {

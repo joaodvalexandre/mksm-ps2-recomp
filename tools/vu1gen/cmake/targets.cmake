@@ -53,6 +53,7 @@ add_executable(vu1n_tests
     "${VU1GEN_DIR}/tests/test_main.cpp"
     "${VU1GEN_DIR}/tests/decode_tests.cpp"
     "${VU1GEN_DIR}/tests/images_tests.cpp"
+    "${VU1GEN_DIR}/tests/math_tests.cpp"
     "${VU1GEN_DIR}/tests/runtime_tests.cpp"
 )
 target_compile_definitions(vu1n_tests PRIVATE "VU1GEN_IMAGES_FILE=\"${VU1GEN_REPO_DIR}/config/vu1_images.txt\"")
@@ -70,8 +71,9 @@ if(TARGET ps2_runtime)
     endif()
     # The translated programs. With VU1GEN_ELF (the game's SLES_535.24) vu1gen translates the images of
     # config/vu1_images.txt into <build>/generated-vu1 (never into the repository: the sources quote the game's
-    # microcode) and they are compiled here, /fp:precise, with the reference arithmetic of runtime/vu1n.h. Without it
-    # an empty table stands in and vu1difftest runs the oracle side only.
+    # microcode) and they are compiled here, /fp:precise: vu1n_programs with the fast arithmetic of runtime/vu1n.h,
+    # vu1n_programs_ref with the reference one (VU1N_MATH_REFERENCE), linked into vu1difftest_ref. Without it an empty
+    # table stands in and vu1difftest runs the oracle side only.
     set(VU1GEN_ELF "" CACHE FILEPATH "The game ELF (SLES_535.24) to translate the VU1 images of; empty: no translation")
     if(VU1GEN_ELF)
         set(VU1GEN_GENERATED_DIR "${CMAKE_BINARY_DIR}/generated-vu1")
@@ -90,34 +92,48 @@ if(TARGET ps2_runtime)
             DEPENDS vu1gen "${VU1GEN_ELF}" "${VU1GEN_IMAGES_FILE}"
             COMMENT "vu1gen: translating the VU1 images"
             VERBATIM)
-        add_library(vu1n_programs STATIC ${VU1GEN_GENERATED_SOURCES})
-        target_compile_definitions(vu1n_programs PRIVATE VU1N_MATH_REFERENCE)
-        target_include_directories(vu1n_programs PRIVATE $<TARGET_PROPERTY:ps2_runtime,INTERFACE_INCLUDE_DIRECTORIES>)
-        if(MSVC)
-            target_compile_options(vu1n_programs PRIVATE /fp:precise /bigobj)
-        endif()
+        foreach(programs_target vu1n_programs vu1n_programs_ref)
+            add_library(${programs_target} STATIC ${VU1GEN_GENERATED_SOURCES})
+            target_include_directories(${programs_target} PRIVATE $<TARGET_PROPERTY:ps2_runtime,INTERFACE_INCLUDE_DIRECTORIES>)
+            if(MSVC)
+                target_compile_options(${programs_target} PRIVATE /fp:precise /bigobj)
+            endif()
+            target_link_libraries(${programs_target} PUBLIC vu1n_runtime)
+            vu1gen_target_defaults(${programs_target})
+        endforeach()
+        target_compile_definitions(vu1n_programs_ref PRIVATE VU1N_MATH_REFERENCE)
     else()
         add_library(vu1n_programs STATIC
             "${VU1GEN_DIR}/difftest/no_programs.cpp"
         )
+        target_link_libraries(vu1n_programs PUBLIC vu1n_runtime)
+        vu1gen_target_defaults(vu1n_programs)
     endif()
-    target_link_libraries(vu1n_programs PUBLIC vu1n_runtime)
-    vu1gen_target_defaults(vu1n_programs)
 
-    add_executable(vu1difftest
-        "${VU1GEN_DIR}/difftest/captures.cpp"
-        "${VU1GEN_DIR}/difftest/checks.cpp"
-        "${VU1GEN_DIR}/difftest/launch.cpp"
-        "${VU1GEN_DIR}/difftest/oracle.cpp"
-        "${VU1GEN_DIR}/difftest/vu1difftest.cpp"
-    )
-    target_link_libraries(vu1difftest PRIVATE vu1gen_core vu1n_programs vu1n_runtime ps2_runtime)
-    vu1gen_target_defaults(vu1difftest)
-    if(MSVC)
-        # As upstream's ps2x_tests: the interpreter's objects are large.
-        target_link_options(vu1difftest PRIVATE "/STACK:8388608")
+    set(VU1GEN_DIFFTESTS vu1difftest)
+    if(TARGET vu1n_programs_ref)
+        list(APPEND VU1GEN_DIFFTESTS vu1difftest_ref)
     endif()
-    if(COMMAND ps2x_stage_ffmpeg_runtime_dlls)
-        ps2x_stage_ffmpeg_runtime_dlls(vu1difftest)
-    endif()
+    foreach(difftest IN LISTS VU1GEN_DIFFTESTS)
+        add_executable(${difftest}
+            "${VU1GEN_DIR}/difftest/captures.cpp"
+            "${VU1GEN_DIR}/difftest/checks.cpp"
+            "${VU1GEN_DIR}/difftest/launch.cpp"
+            "${VU1GEN_DIR}/difftest/oracle.cpp"
+            "${VU1GEN_DIR}/difftest/vu1difftest.cpp"
+        )
+        if(difftest STREQUAL "vu1difftest_ref")
+            target_link_libraries(${difftest} PRIVATE vu1gen_core vu1n_programs_ref vu1n_runtime ps2_runtime)
+        else()
+            target_link_libraries(${difftest} PRIVATE vu1gen_core vu1n_programs vu1n_runtime ps2_runtime)
+        endif()
+        vu1gen_target_defaults(${difftest})
+        if(MSVC)
+            # As upstream's ps2x_tests: the interpreter's objects are large.
+            target_link_options(${difftest} PRIVATE "/STACK:8388608")
+        endif()
+        if(COMMAND ps2x_stage_ffmpeg_runtime_dlls)
+            ps2x_stage_ffmpeg_runtime_dlls(${difftest})
+        endif()
+    endforeach()
 endif()

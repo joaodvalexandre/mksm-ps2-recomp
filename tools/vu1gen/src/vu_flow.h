@@ -48,6 +48,7 @@ namespace vu1gen
         std::set<uint8_t> clipClass;    // FCEQ / FCAND / FCOR / FCGET: clip writers in flight
         std::set<uint8_t> stall;        // cycles the pair waits before it issues (with the XGKICK wait)
         std::set<uint32_t> jrTargets;   // JR: the return addresses it can see
+        bool macNeeded = false;         // a flag writer whose MAC flags some FMAND / FMEQ / FMOR can see
         std::vector<std::string> refusals;
 
         bool refused() const

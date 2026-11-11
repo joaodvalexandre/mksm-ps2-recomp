@@ -10,7 +10,7 @@ captures: they go to the build tree); the main repository tree `D:/Projects/Reco
 PS2Recomp tree `D:/Projects/Recomps/ps2recomp-pgs` are read only; never run `scripts/build.cmd`, `scripts/run.cmd`
 or the game from here.
 
-## State (2026-11-11, evening): stage 2 done, the translation equals the interpreter on every captured launch
+## State (2026-11-11, night): stages 2 and 3 done: exact on every captured launch, 83 times the interpreter's speed
 
 | Piece | State |
 |---|---|
@@ -22,7 +22,7 @@ or the game from here.
 | control flow and timing exploration (`src/vu_flow.*`, port of `vutiming.py`) | done; its counts equal the study's timing table (below) |
 | emitter (`src/vu_emit.*`) and reference arithmetic (`runtime/vu1n.h`, `VU1N_MATH_REFERENCE`) | done: **30,000 of 30,000 captured launches translated and compared, 0 mismatches**; every entry of the three programs handled |
 | build integration (`VU1GEN_ELF`: vu1gen runs in the build, the generated library is linked into `vu1difftest`) | done |
-| fast SSE arithmetic (stage 3) | not started: the reference build is only 3.5 times faster than the interpreter (below) |
+| fast SSE arithmetic (stage 3, `vu1n.h` default build) and one function per entry | done: 0 mismatches on the captures, 0 in 600 million fuzzed lanes against the reference; 83 times faster than the interpreter on the captures (below) |
 | synthetic launches for the pairs the captures do not execute | not started |
 | glue in the override module (`src/mksm_vu1.cpp`) | not started |
 
@@ -428,6 +428,53 @@ The game and cut launches cost about 75 ns a pair: the reference helpers inline 
 (641,849 lines of disassembly for `vu1n_cut.cpp`, a 40 KB stack frame), so a vertex loop does not fit the
 instruction cache. That is what stage 3 replaces.
 
+## Fast arithmetic and entry functions (stage 3)
+
+### What changed
+
+- **One function per handled entry** (`vu1n_<image>_<pc>`, `vu1n_run_<image>` dispatches): each holds the pairs the
+  launches from that entry reach (the routines only meet at the end of a launch). With one function per image MSVC
+  took up to 583 s for `vu1n_game.cpp` and left the game program at 2.7 times the interpreter; now each unit takes
+  about 85 s and the code is about twice as large (pairs shared by several entries are emitted in each).
+- **No flush to zero.** DESIGN.md 4.1 planned MXCSR 0xFFC0 (flush to zero, denormals are zero) for the fast build.
+  It is 0x7F80 in both builds instead, the interpreter's own environment: with the operands normalised explicitly
+  (integer operations), every SSE operation then rounds as the interpreter's float code, and only the binary64
+  fix-up is left to handle. Flush to zero would change a product-sum with a denormal product by one unit (1.0 -
+  2^-140 truncates to 0x3F7FFFFF; the test has it). A denormal result costs a microcode assist; forcing FTZ/DAZ made
+  no measurable difference on the captures.
+- **The fast helpers** (`vu1n.h`, "the public names of the upper helpers", with the argument written there): ADD,
+  SUB, MUL equal the fix-up once a result below FLT_MIN becomes the zero of its sign; MADD, MSUB, OPMSUB take the
+  reference for the lanes with a nonzero product below 2^-79 or a product or result at or above 2^127, and are exact
+  elsewhere; MAX / MINI are MAXPS / MINPS on normalised operands; ABS, ITOF (multiplication by the exact reciprocal),
+  FTOI (CVTTPS2DQ with the positive saturation fixed). Dest is a template parameter; `vu1nCommit<Dest>` blends. The
+  lower instructions, DIV and the EFU are the same scalar code in both builds.
+- **MAC flags only where they are read**: the exploration keeps, with MAC readers in the image, the pcs of the last
+  flag writers (`TState::macHist`), so a read with k writers in flight names its producer (`PairFlow::macNeeded`).
+  Only those producers compute flags (with the reference helper); the others push a dummy so the ring stays aligned.
+  The cut program has 3 such producers. (The tracking adds states: game 3,671 to 4,565, cut 5,537 to 7,594.)
+- Targets: `vu1n_programs` is the fast build, `vu1n_programs_ref` the reference one, linked into `vu1difftest_ref`
+  (`devbuild.cmd vu1difftest vu1difftest_ref`).
+
+### Results (2026-11-11)
+
+- `vu1difftest` (fast) and `vu1difftest_ref`: **30,000 launches translated and compared, 0 mismatches** each.
+- `vu1n_tests` (`tests/math_tests.cpp`): every fast helper against the reference, bit for bit, on operands built to
+  part them (exponent 0 and 255, tiny and huge exponents, products near 2^-79, 2^-126 and 2^127, product-sums that
+  cancel to within three units, integers as floats, FTOI near its limits; dest masks xyzw, xz, w; vector and
+  broadcast forms): 0 mismatches with `VU1N_MATH_FUZZ=20000000` (14 FMAC runs, OPMULA / OPMSUB, MAX, MINI, ABS, ITOF
+  and FTOI in all four forms; 60 s). Checked that it can fail: with the exact-lane detection switched off it reported
+  227,206 FMAC and 46,774 OPMSUB mismatches at the default 200,000 vectors.
+- `--bench` (one run, the machine shared):
+
+| | oracle us a launch | fast us a launch | speed-up | reference build us a launch |
+|---|---|---|---|---|
+| front | 485.9 | 2.86 | 170 | |
+| game | 191.5 | 3.18 | 60 | |
+| cut | 200.8 | 2.80 | 72 | |
+| all | 247.4 | 2.97 | 83 | 8.37 (30 times) |
+
+  About 2.4 ns a cycle of the interpreter's clock, 2.9 ns an executed pair.
+
 ## The runtime interface (`runtime/`)
 
 What is decided, and why, where the brief left room:
@@ -458,15 +505,13 @@ What is decided, and why, where the brief left room:
 
 ## Next
 
-1. **Stage 3, fast arithmetic** (DESIGN.md 4.1, default build): SSE helpers behind the same names in `vu1n.h`
-   (MXCSR 0xFFC0, no FMA); the binary64 fix-up of an FMAC lane replaced by a cheap detection of the cases where it
-   matters (a result or product below FLT_MIN or above FLT_MAX, exponent-255 operands), with the exact path only
-   there; VF registers as `__m128` where it pays; MAC computed only by the producers an FMAND can see. Target: zero
-   mismatches on the captures again, every remaining class of difference listed here with its count.
-2. **Synthetic launches** (DESIGN.md section 6): the captures execute 50 / 664 / 795 of the 1,388 / 1,930 / 1,924
+1. **Synthetic launches** (DESIGN.md section 6): the captures execute 50 / 664 / 795 of the 1,388 / 1,930 / 1,924
    reachable pairs. Build records from captured ones with randomised lanes and input buffers, feed them through the
    comparison of `processFile`, report the coverage reached (`--coverage`).
-3. **Glue** (`src/mksm_vu1.cpp` in the main repository, `MKSM_VU1=0|1|verify`), then the game.
+2. **Glue** (`src/mksm_vu1.cpp` in the main repository, `MKSM_VU1=0|1|verify`), the build integration of the generated
+   library into the game (its own library, `/fp:precise`, no `/GL`), then a game run.
+3. Possible later speed: VF registers kept in `__m128` locals instead of `Vu1nRegs` in memory; operand normalisation
+   skipped for registers known to hold normalised values (FMAC results); the code duplication of the entry functions.
 
 ## Notes from stage 1 for the next stages
 

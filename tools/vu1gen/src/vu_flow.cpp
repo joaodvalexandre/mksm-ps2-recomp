@@ -32,7 +32,12 @@ namespace vu1gen
             uint8_t clip[kMaxFlagEntries]; // in issue order
             uint8_t vf[32 * 4];            // per register lane
             uint8_t vi[16];
+            // With MAC readers in the program: the pcs (+1, 0 = before the launch) of the last flag writers, newest
+            // first, so that a read with k writers in flight names the instruction whose flags it sees (macHist[k]).
+            uint16_t macHist[kMaxFlagEntries];
+            uint16_t padding; // keeps the struct free of compiler padding: the key is its bytes
         };
+        static_assert(sizeof(TState) == 200u, "TState must have no padding");
 
         std::string keyOf(const TState &s)
         {
@@ -201,7 +206,11 @@ namespace vu1gen
         class Explorer
         {
         public:
-            Explorer(ProgramFlow &program, uint32_t ownEnd) : m_program(program), m_ownEnd(ownEnd) {}
+            Explorer(ProgramFlow &program, uint32_t ownEnd) : m_program(program), m_ownEnd(ownEnd)
+            {
+                for (const Pair &pair : program.pairs)
+                    m_trackMac = m_trackMac || pair.lower.readsMac;
+            }
 
             // Explores every state a launch from start can reach.
             bool run(LaunchFlow &launch, std::set<LaunchStart> &continuations, std::string &error)
@@ -230,6 +239,7 @@ namespace vu1gen
         private:
             ProgramFlow &m_program;
             uint32_t m_ownEnd;
+            bool m_trackMac = false;
 
             void step(const TState &s0, LaunchFlow &launch, std::set<LaunchStart> &continuations, std::vector<TState> &work)
             {
@@ -277,7 +287,11 @@ namespace vu1gen
                     if (lo.readsP)
                         flow.pClass.insert(s.nefu);
                     if (lo.readsMac)
+                    {
                         flow.macClass.insert(s.nmac);
+                        if (m_trackMac && s.nmac < kMaxFlagEntries && s.macHist[s.nmac] != 0u)
+                            m_program.flow[(s.macHist[s.nmac] - 1u) / 8u].macNeeded = true;
+                    }
                     if (lo.readsClip)
                         flow.clipClass.insert(s.nclip);
                     if (lo.branch && s.backupReg != 0u && (lo.viRead & (1u << s.backupReg)) != 0u)
@@ -297,7 +311,14 @@ namespace vu1gen
                         if (n.nmac + n.nclip >= kMaxFlagEntries)
                             addRefusal(flow, "flag pipeline full");
                         else
+                        {
                             n.mac[n.nmac++] = 4u;
+                            if (m_trackMac)
+                            {
+                                std::memmove(&n.macHist[1], &n.macHist[0], sizeof(n.macHist) - sizeof(n.macHist[0]));
+                                n.macHist[0] = static_cast<uint16_t>(s.pc + 1u);
+                            }
+                        }
                     }
                     if (up.op == Op::Clip)
                     {

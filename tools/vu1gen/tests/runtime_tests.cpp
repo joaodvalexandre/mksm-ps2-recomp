@@ -396,12 +396,9 @@ TEST_CASE(run_starts_each_launch_with_an_empty_host)
 
 TEST_CASE(mxcsr_values_of_the_two_arithmetic_builds)
 {
-    // Exceptions masked and round toward zero in both; flush to zero and denormals are zero in the fast one only.
-#if defined(VU1N_MATH_REFERENCE)
+    // Both arithmetic builds: exceptions masked, round toward zero, no flush to zero, no denormals are zero.
     CHECK_EQ(kVu1nMxcsr, 0x7F80u);
-#else
-    CHECK_EQ(kVu1nMxcsr, 0xFFC0u);
-#endif
+    CHECK_EQ(kVu1nMxcsr & 0x8040u, 0u);
     CHECK_EQ(kVu1nMxcsr & 0x1F80u, 0x1F80u);
     CHECK_EQ(kVu1nMxcsr & 0x6000u, 0x6000u);
     CHECK_EQ(kVu1nMxcsr & 0x003Fu, 0u);
