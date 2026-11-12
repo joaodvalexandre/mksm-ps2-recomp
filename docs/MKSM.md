@@ -912,15 +912,21 @@ modules; the list of what is not verified is at the end.
   silence, then the voice (peak 7168, RMS 4948, 1714.4 Hz for an expected 1714.3; its first frame 60.0 ms after the
   key-on, the ring's level), silence after the key-off, the streamed sine (peak 8000, RMS 5656, 750.0 Hz) and silence
   after the stop; 122,880 frames mixed, 120,000 played, no gap.
-- **Not verified, because the game was not run.** (1) Sound from a real device: the raylib stream and its callback
-  have only been compiled. (2) The game's libsdr reaching SDRDRV in the game (the sample uploads of `0x463BF8` and
-  `0x464238`, the boot's `rSdInit`). (3) Music: CRI's stream needs the game's EE side (it decodes the ADX data and
-  hands the PCM to the IOP module, which serves RPC `0x90000200`; the module's PSM thread refills the block
-  transfer); only the module's start and the refill mechanism with a test driver are covered. (4) SNDF's voices and
-  its 200 Hz tick. (5) Whether the IOP still uses its whole time allowance (23 % of the game thread on 2026-11-11;
-  possibly LIBSD.IRX's own code waiting on registers that were a plain store, which the drivers no longer reach): to
-  be measured again. (6) The sound at low frame rates: a pause of the game thread of more than 60 ms between two
-  checkpoints is a gap. (7) The movies' sound (Sofdec) is another path.
+- **The device side, silently.** A second program outside the repository makes the runtime's raylib calls
+  (`InitAudioDevice`, a 48 kHz 16-bit stereo stream whose callback reads the ring) with the master volume at 0 and a
+  loop that writes what the ring is short of every millisecond. On the development machine the device asks for 480
+  frames at a time (10 ms), 301 times in 3 s (48,000 frames a second within one callback), the ring stays between
+  2,400 and 2,880 frames, no gap; a 300 ms pause of the writer gives one gap of 11,520 frames (the pause less the 60 ms
+  the ring held); the stream stops and unloads cleanly.
+- **Not verified, because the game was not run.** (1) Sound heard from the game: `PS2Runtime`'s own start and stop of
+  the stream have only been compiled. (2) The game's libsdr reaching SDRDRV in the game (the sample uploads of
+  `0x463BF8` and `0x464238`, the boot's `rSdInit`). (3) Music: CRI's stream needs the game's EE side (it decodes the
+  ADX data and hands the PCM to the IOP module, which serves RPC `0x90000200`; the module's PSM thread refills the
+  block transfer); only the module's start and the refill mechanism with a test driver are covered. (4) SNDF's
+  voices and its 200 Hz tick. (5) Whether the IOP still uses its whole time allowance (23 % of the game thread on
+  2026-11-11; possibly LIBSD.IRX's own code waiting on registers that were a plain store, which the drivers no longer
+  reach): to be measured again. (6) The sound at low frame rates: a pause of the game thread of more than 60 ms
+  between two checkpoints is a gap. (7) The movies' sound (Sofdec) is another path.
 - **Open risks.** An early libsdr call made before SDRDRV's thread has registered its server would be answered by
   upstream's HLE libsd service without an error (in the render the server was there 20 ms after the load;
   `MKSM_TRACE_LIBSD=1` shows whether the calls arrive: `#4 sceSdInit` for the game's `rSdInit`). The SPU2's mixing
