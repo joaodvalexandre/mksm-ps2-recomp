@@ -10,7 +10,7 @@ captures: they go to the build tree); the main repository tree `D:/Projects/Reco
 PS2Recomp tree `D:/Projects/Recomps/ps2recomp-pgs` are read only; never run `scripts/build.cmd`, `scripts/run.cmd`
 or the game from here.
 
-## State (2026-11-11, night): stages 2 and 3 done: exact on every captured launch, 83 times the interpreter's speed
+## State (2026-11-12): done and running in the game: exact on every launch checked, 83 times the interpreter's speed
 
 | Piece | State |
 |---|---|
@@ -24,7 +24,8 @@ or the game from here.
 | build integration (`VU1GEN_ELF`: vu1gen runs in the build, the generated library is linked into `vu1difftest`) | done |
 | fast SSE arithmetic (stage 3, `vu1n.h` default build) and one function per entry | done: 0 mismatches on the captures, 0 in 600 million fuzzed lanes against the reference; 83 times faster than the interpreter on the captures (below) |
 | synthetic launches (`difftest/synthetic.*`, `vu1difftest --synthetic`) | done: 60,000 launches, 0 mismatches; reachable pairs executed 927 / 1,873 / 1,616 of 1,388 / 1,930 / 1,924 (captures: 50 / 664 / 795) |
-| glue in the override module (`src/mksm_vu1.cpp`) | not started |
+| glue in the override module (`src/vu1_runtime.cpp`) and the game's build (`scripts/build.ps1`) | done: the game runs the translation; `MKSM_VU1=verify`, 346,246 launches in the game, 0 differ ("In the game" below) |
+| review of the translation against the interpreter's sources (four reviewers) | done: no wrong result found; its notes are closed or listed under "Documented differences" |
 
 ## Layout
 
@@ -535,19 +536,70 @@ What is decided, and why, where the brief left room:
   `vu1nRun` sets it around the launch and puts the caller's value back on every way out, an exception included.
 - `vu1nRun` returns `NotHandled` without touching anything for an entry the program does not handle; otherwise it
   empties the host's lists first.
-- `vu1nPrograms()` is defined by the generated table (not written yet; `difftest/no_programs.cpp` stands in);
-  `vu1nFindProgram()` compares all 16 KB.
+- `vu1nPrograms()` is defined by the generated table (`difftest/no_programs.cpp` stands in for a build without
+  `VU1GEN_ELF`); `vu1nFindProgram()` compares all 16 KB.
 - `vu1n.h` does not include upstream's `runtime/ps2_vu1.h` (`VU1State` is only declared), so the runtime and its
   tests build without PS2Recomp; generated code includes that header itself, before `vu1n.h`.
 
+## In the game (2026-11-11)
+
+`src/vu1_runtime.cpp` (`mksmInstallVu1`, called from the override module) replaces the two VIF1 callbacks of
+upstream's runtime, MSCAL and MSCNT, so no upstream patch is needed. `scripts/build.ps1` passes
+`-DCMAKE_PROJECT_PS2Runtime_INCLUDE=tools/vu1gen/cmake/ps2recomp.cmake` and `-DVU1GEN_ELF=<the game's ELF>` to the
+runtime's configure step; `cmake/targets.cmake` then translates the images during the build into
+`<build>/generated-vu1` and links `vu1n_programs` and `vu1n_runtime` into `ps2EntryRunner` (their own libraries,
+`/fp:precise`, no `/GL`).
+
+| `MKSM_VU1` | What runs |
+|---|---|
+| `1` or unset | the translation; an entry it does not handle, or an `UnknownTarget`, goes to the interpreter (never seen in the game) |
+| `0` | upstream's interpreter, as before |
+| `verify` | the interpreter is authoritative; the translation runs every launch on a copy and is compared (state, data memory, PATH1 packets) |
+| `verify:<n>` | the translation is authoritative, at full speed; a second interpreter checks one launch in n on a copy |
+
+`MKSM_VU1_STATS=1` prints the counts every 10 s in the normal mode; `MKSM_VU1_DUMP=<folder>` writes the launches
+that differ in the capture format (`--captures <folder>` replays them). The glue prepares a launch as `execute()`
+does (`prepare()`), keeps a snapshot for the entries flagged `kVu1nEntrySnapshot`, hands the interpreter an MSCNT
+with `execute(state.pc)` when the interpreter's own bookkeeping is stale, and reports a dropped XGKICK once.
+
+Verified in the game (first level, menus by `MKSM_PAD_SCRIPT`): `verify`, 240 s: 346,246 launches, 0 differ, none
+left to the interpreter; `verify:20`, 115 s at full speed: 70,677 launches checked, 0 differ; `verify:1`, 124 s:
+0 differ. The opening cutscene went from 2-8 frames a second to 30-36 (20 with the characters on screen); the
+translated code is now about 11 per cent of the game thread (`docs/MKSM.md`, 2026-11-11 night).
+
+### The review, and what it changed
+
+Four reviewers compared the lower instructions, the pair order and control flow, the timing exploration and the fast
+arithmetic with the interpreter's sources (reports in `D:/Projects/Recomps/mksm-vu1-build/review/`). No wrong result
+for any operand values or path of the game's programs. Closed from their notes:
+
+- a MAC flag read whose producer is before the launch is refused ("MAC flags read from before the launch"; no program
+  has one), and only the producers some read needs compute their flags (`macNeeded`);
+- a JR is followed only through the link register of the last BAL / JALR of its own launch, and the register is
+  forgotten when anything else writes it ("JR without a known return address"); the generated code did not change;
+- the glue reports a dropped XGKICK packet;
+- the argument for the fast arithmetic in `runtime/vu1n.h` is the complete one, and the cases that pin its bounds are
+  tests (`tests/math_tests.cpp`: the product bound 2^-79 is tight, at 2^-80 one MADD lane gives +0 for -0).
+
+### Documented differences
+
+- A launch that passes the interpreter's 65536-cycle budget runs to its end in the translation (backward jumps count
+  a budget of their own and leave through `vu1nLeave`).
+- `mac` and `status` of `VU1State` are not kept across translated launches (no program reads them from before its
+  launch; the status flag instructions are refused).
+- Fact 4, the packet copied whole at its XGKICK: true on every real launch checked (the captures and the game's
+  verify runs), false for constructed data. A run-time check is designed and not built: a lower bound on the cycle of
+  each store against the transfer's position, and the launch handed back to the interpreter from a snapshot when a
+  store can still reach a qword not yet transferred.
+
 ## Next
 
-1. **Glue** (`src/mksm_vu1.cpp` in the main repository, `MKSM_VU1=0|1|verify`), the build integration of the generated
-   library into the game (its own library, `/fp:precise`, no `/GL`), then a game run. The verify mode is where fact 4
-   is checked on the game's real data beyond the captures.
+1. The run-time check of fact 4 above.
 2. Coverage of the remaining pairs: synthetic bases fitted to each entry (a captured state of the same routine), or
    records captured from the front end's other routines.
-3. Possible later speed: VF registers kept in `__m128` locals instead of `Vu1nRegs` in memory; operand normalisation
+3. VU0: the game's VU0 microprograms still run in upstream's interpreter (`PS2Runtime::executeVU0Microprogram`, about
+   10 per cent of the game thread in 3D); the same generator could translate them.
+4. Possible later speed: VF registers kept in `__m128` locals instead of `Vu1nRegs` in memory; operand normalisation
    skipped for registers known to hold normalised values (FMAC results); the code duplication of the entry functions.
 
 ## Notes from stage 1 for the next stages

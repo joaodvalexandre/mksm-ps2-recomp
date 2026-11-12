@@ -718,3 +718,104 @@ commands, the full tables and the notes for the steps that follow.
   sent.
 - **Next.** Control flow from the entry points, the timing exploration that resolves each Q, P, MAC and clip read,
   emission, the arithmetic helpers, then the comparison of every captured launch with the interpreter.
+
+## 2026-11-11 (night) — the VU1 programs run translated; where the frame time goes now; the 3D picture
+
+Item (1) of "Next" above is done: the game's VU1 microcode runs as C++ generated at build time, checked against
+upstream's interpreter launch by launch, in the tests and in the game. `tools/vu1gen/PROGRESS.md` has the design, the
+commands and the full tables; this section records what was verified and what the game shows now.
+
+- **The translator** (`tools/vu1gen`). A port of the study's timing exploration (`src/vu_flow.*`) explores every
+  launch start of the four images and resolves each Q, P, MAC and clip read to a count of producers in flight (its
+  counts equal the study's table: Q reads 51/55, 46/15, 72/30; MFP 9/5; FMAND 1/2; FCAND 29; fixed stalls 37/89/105);
+  the emitter (`src/vu_emit.*`) writes one C++ function per entry point (one function per image took MSVC up to 583 s a
+  unit and left the gameplay program slow); `runtime/vu1n.h` has the arithmetic twice: the interpreter's code lane by
+  lane (the reference), and SSE4.1 under the interpreter's own MXCSR (round toward zero, no flush to zero) that is
+  exact by construction, with the reference taking the product-sum lanes it must (a nonzero product below 2^-79, a
+  product or result at or above 2^127). Every entry of the front-end, gameplay and cutscene programs is translated
+  (26, 36, 42).
+- **Verified against the interpreter outside the game** (`vu1difftest`): the 30,000 captured launches, 0 mismatches,
+  with the fast and with the reference arithmetic (state, the 16 KB of data memory, the PATH1 packets); 60,000
+  synthetic launches (captured states with their float words changed, every handled entry), 0 mismatches, which raise
+  the executed pairs from 50 / 664 / 795 to 927 / 1,873 / 1,616 of the 1,388 / 1,930 / 1,924 reachable ones; the fast
+  helpers against the reference on 20 million fuzzed vectors per operation, 0 mismatches. Each check was shown to fail
+  when it should (a swapped Q choice: 9,623 of 12,166 cutscene launches differ; the exact-lane detection switched
+  off: 227,206 fuzz mismatches).
+- **Reviewed.** Four independent reviewers compared the lower instructions, the pair order and control flow, the
+  timing exploration and the fast arithmetic with the interpreter's sources (reports in
+  `D:\Projects\Recomps\mksm-vu1-build\review\`): no wrong result for any operand values or path of the game's
+  programs. Closed from their notes: a MAC read from before the launch is refused (no program has one); a JR is
+  followed only through the link register of its own launch (the generated code did not change); the glue reports a
+  dropped XGKICK packet; the fast arithmetic's argument is now the complete one, with the cases that pin its bounds
+  as tests (2^-79 is tight: at 2^-80 one MADD lane would give +0 for -0). Left as documented differences: a launch
+  that passes the interpreter's 65536-cycle budget runs to its end in the translation, and `mac` / `status` of
+  `VU1State` are not kept across translated launches (nothing the game runs can observe either).
+- **In the game** (`src/vu1_runtime.cpp`). The override module replaces the VIF1 MSCAL / MSCNT callbacks (no upstream
+  patch); `scripts\build.cmd` passes `tools/vu1gen/cmake/ps2recomp.cmake` and the ELF to the runtime's configure
+  step, the images are translated during the build into `out\build-quick\generated-vu1` and linked into the runner
+  as their own library. The first build with it recompiled all 425 unity batches (the runner got an include
+  directory); later builds take about a minute. `MKSM_VU1=0` runs upstream's interpreter, `MKSM_VU1=verify` runs the
+  interpreter and compares the translation on a copy at every launch, `MKSM_VU1=verify:<n>` runs the translation and
+  has a second interpreter check one launch in n on a copy (`[mksm-vu1]` lines; `MKSM_VU1_DUMP=<folder>` writes the
+  launches that differ in the capture format; `MKSM_VU1_STATS=1` prints the counts every 10 s in the normal mode).
+  **Verified:** `verify`, 240 s through the menus into the first level: 346,246 launches, 0 differ, none left to the
+  interpreter; `verify:20` at full speed, 115 s: 70,677 launches checked, 0 differ; `verify:1`, 124 s: 0 differ.
+- **Speed.** The opening cutscene of Goro's Lair plays at 30 to 36 frames a second and drops to 20 when the
+  characters are on screen; gameplay after it (now reached) stays near 20. It was 2 to 8, and 4 with the characters.
+  The game makes 18,000 to 30,000 launches a second there, about 3 us each. The frame rate sits on divisors of 60
+  because the game flips at a vertical blank; its animation keeps real time down to about 15 frames a second and
+  slows below that (the interpreter's run needed 50 s of wall time for what the translated run plays in 23 s).
+- **Scripted pad, tighter.** With the menus at 60 frames a second:
+  `MKSM_PAD_SCRIPT=6:cross,9:cross,16.5:start,19.5:cross,22.5:cross,26:cross,29.5:cross` reaches the level's loading
+  at 30 s and the cutscene at 42 s (150 s with the 15 s spacing). The autosave notice is up 5 s after start and every
+  screen follows its press within 2.5 s, except the legal screen before "Press START button", which loads for about
+  5 s.
+- **The 3D picture has artifacts, and they are not the translation's.** In the cutscene and in gameplay the
+  characters are right, but the environment shows blocky stair-stepped areas, hard white wedges and light shafts as
+  solid slabs. The cutscene advances mostly per frame, so captures of two runs have to be compared at the same frame
+  count, not at the same second: about 110 frames into the scene the interpreter (`MKSM_VU1=0`) shows the same white
+  wedge and the same broken left side as the translated run (the picture was only "right" in the first seconds, which
+  is all anybody saw at 4 to 8 frames a second). `MKSM_GS_DUMP=<file>` with `MKSM_GS_DUMP_TICKS=<a>:<b>`
+  (`src/trace_gs_dump.cpp`) records the GIF packets of a range of vertical blanks, and `tools/gs_dump.py` lists the
+  uploads and the draw batches with their state. **First look at the opening shot** (ticks 2706-2709, not analysed
+  further): the scene is drawn into FBP 0x46 with the depth buffer at 0x8C (about 90 batches of textured strips,
+  88 uploads of 911 KB in a frame), and then comes a post-processing chain: the depth buffer read as a Z24 texture
+  (TBP 0x1180) into FBP 0x12C at 320x128; frame buffers with a Z24 pixel format (FBP 0x12C and 0x14C); a sprite that
+  writes colour into FBP 0x8C, the depth buffer's own memory; thirteen 320x128 sprites into FBP 0x8C that sample
+  TBP 0x08C0 (the scene) and TBP 0x1180 (the very buffer they draw into), each shifted by a few pixels, blended
+  `Cs*FIX+Cd`: an iterated blur with the render target as its own texture; and 64x64 textures drawn as sprites
+  thousands of pixels wide with FBMSK 0xFF000000. Stair-steps and hard-edged bright areas are what that chain would
+  give if it is not rendered as on the console. **Not verified which step fails**; the candidates are in "Next".
+- **Where the game thread's time goes now** (`MKSM_PROFILE=host`, which now lists 70 leaf and 60 inclusive entries;
+  3D scene with characters, about 20 frames a second, the thread 93 per cent busy; inclusive shares): the VIF1
+  transfer of a frame 37 per cent, of which paraLLEl-GS's work on the PATH1 packets is 19 (state and texture updates
+  per batch, flushes; 15 inside the Vulkan driver), the translated VU1 code 11 and the VIF unpack 5; the IOP
+  emulation 23 (it uses the whole allowance of patch 0006 all the time, so IOP code is spinning: probably the sound
+  modules without an SPU2, to be measured again with the sound work); VU0 microprograms through the interpreter 10
+  (`PS2Runtime::executeVU0Microprogram`); clock queries (`steady_clock::now`, 4.5), heap allocation and release
+  (about 5: a vector per GIF packet, a 1.8 MB buffer per DMA chain) and scheduler bookkeeping; the rest is the game's
+  own code, spread over hundreds of functions at the quick profile's `/O1`. A frame's VIF1 chain is about 111,000
+  quadwords (1.8 MB): 1 MB of texture data in 68 uploads through DIRECT, 770 KB of vertex data, 563 launches; the
+  game sends such a chain about 37 times a second in the opening shot. No MSKPATH3 is used.
+- **One crash seen.** With `PS2X_GS_BACKEND=cpu` (and the translated VU1, the 15 s pad script) the game stopped during
+  the level's loading with `[guest-branch:missing-target] ... target=0x1dfd520 ... trace=0x414638 -> 0x480010 ->
+  0x47ffb0 -> 0x414ca0 -> ...` (a jump into data from the job system). One occurrence, not investigated; the GPU
+  backend has not shown it in any run.
+- **Sound** was taken up again in its own worktree (`D:/Projects/Recomps/ps2recomp-snd`, notes in
+  `D:/Projects/Recomps/snd-notes/PROGRESS.md`): the SPU2 core and the libsd HLE are moved onto patches 0001-0032 and
+  IOP modules are started with argc and argv (three commits there, each with tests). The host audio output is half
+  written and not committed. Still to do: the output, an offline render to a WAV file as a proof, the patch files
+  (from 0040 up) with the configuration change, and a test in the game.
+- **Next.** (1) The 3D picture: find which step of the post-processing chain differs. Check how paraLLEl-GS, as the
+  backend configures it (`DebugMode::disable_sampler_feedback`), treats a texture that is the current render target,
+  a FRAME with a Z pixel format, and the depth buffer sampled as a texture; a capture of the same frame from another
+  GS (PCSX2's software renderer from a GS dump, or upstream's CPU backend once its crash is understood) tells whether
+  the stream or the backend is at fault. (2) The frame rate: a GS thread (the packets queued to a worker that owns the
+  backend) takes about a fifth of the game thread; the IOP share after the sound work; VU0 microprograms through the
+  translator; fewer clock queries and allocations; the release profile for the game's own code. (3) A pacing option
+  that does not wait for the next vertical blank when a frame is late (the frame rate then stops snapping to 30 and
+  20): the vertical blank is real time here and the game's animation follows it, so the display swap must be made
+  when the frame is ready instead; needs the game's swap protocol (frame sync `0x4158D8`, vsync callback `0x26F2A0`,
+  swap request `0x4FC09C`). (4) Sound: finish the output, make the patches and test in the game. (5) Smaller: a
+  run-time check of the XGKICK assumption (a store that can still reach the packet being transferred hands the launch
+  back to the interpreter from a snapshot), the software backend's loading crash, the audit leftovers above.

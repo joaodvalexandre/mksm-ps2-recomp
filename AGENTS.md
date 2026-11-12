@@ -12,12 +12,13 @@ scripts and the research log ([`docs/MKSM.md`](docs/MKSM.md)). No game files and
 | `PS2Recomp/` | upstream PS2Recomp, submodule pinned at the commit in `scripts/common.ps1` (`$PS2RecompCommit`) |
 | `patches/` | small patches applied on the submodule at build time, in name order (`NNNN-topic.patch`), each with a test in `ps2xTest` |
 | `config/recomp.toml` | the recompiler configuration for `SLES_535.24` (`@ELF@`, `@MAP@`, `@OUT@` are filled by the build) |
-| `src/` | the game override module (`mksm_overrides.cpp`), copied next to the generated code |
+| `src/` | the game override module, copied next to the generated code: `mksm_overrides.cpp` (bindings, replacements, diagnostics), `vu1_runtime.cpp` (runs the translated VU1 programs), `trace_gs_dump.cpp` (`MKSM_GS_DUMP`). The runner compiles the folder in unity batches in name order: give a new file a name that sorts after `sub_*`, or every batch shifts and the whole game recompiles |
 | `scripts/` | `build.cmd` (everything), `run.cmd` (run with a time limit) |
 | `game/` | the extracted PAL disc (git-ignored): `SLES_535.24`, `SYSTEM.CNF`, `IOP\`, the data files |
 | `docs/MKSM.md` | research log: what was tried, with what result, and the next steps |
 | `tools/ee_disasm.py` | disassembler for the game ELF (capstone), with the names of the generated code and of the configuration |
 | `tools/missing_targets.py` | lists the direct calls and tail jumps whose target has no generated function (run after a build) |
+| `tools/gs_dump.py` | decodes a `MKSM_GS_DUMP` recording: the uploads and the draw batches of a frame with their GS state |
 | `config/vu1_images.txt` | the game's VU1 program images for `tools/vu1gen`: ELF addresses, hashes, entry points (addresses only) |
 | `tools/vu1gen/` | ahead-of-time translator of the game's VU1 programs: generator, runtime helpers, `vu1difftest` against upstream's interpreter. `scripts\build.cmd` translates the images from the ELF during the build (into the build folder, never committed) and links them into the runner; state, commands and measurements in its `PROGRESS.md` |
 
@@ -63,8 +64,15 @@ scripts and the research log ([`docs/MKSM.md`](docs/MKSM.md)). No game files and
    of the override module (`MKSM_TRACE_*`, `MKSM_PROFILE`, `MKSM_PAD_SCRIPT`) are described in `docs/MKSM.md`.
    The game runs in its own NTSC mode, 60 frames a second (`MKSM_VIDEO=pal` keeps the disc's PAL mode, 50 Hz).
    The VU1 microcode runs translated to C++ (`src/vu1_runtime.cpp`, `tools/vu1gen`): `MKSM_VU1=0` runs upstream's
-   interpreter instead, `MKSM_VU1=verify` runs the interpreter and compares the translation with it on every launch
-   (`[mksm-vu1]` lines; `MKSM_VU1_DUMP=<folder>` saves the launches that differ for `vu1difftest`).
+   interpreter instead, `MKSM_VU1=verify` runs the interpreter and compares the translation with it on every launch,
+   `MKSM_VU1=verify:<n>` runs the translation and checks one launch in n against a second interpreter at full speed
+   (`[mksm-vu1]` lines; `MKSM_VU1_DUMP=<folder>` saves the launches that differ for `vu1difftest`,
+   `MKSM_VU1_STATS=1` prints the launch counts every 10 s).
+   To reach 3D without touching the keyboard:
+   `MKSM_PAD_SCRIPT=6:cross,9:cross,16.5:start,19.5:cross,22.5:cross,26:cross,29.5:cross` (seconds and buttons)
+   loads the first level at 30 s and starts its opening cutscene at 42 s. Run one instance of the game at a time and
+   no build beside it when the frame rate is being read. `MKSM_GS_DUMP=<file>` with `MKSM_GS_DUMP_TICKS=<a>:<b>`
+   records the GIF packets of a range of vertical blanks for `tools/gs_dump.py`.
    The picture is drawn on the GPU (a Vulkan GPU is needed; `PS2X_GS_BACKEND=cpu` draws it on the CPU, much slower),
    one field per vertical blank, and the fields are woven into full height on the CPU as with the CPU backend.
    Options of the GPU backend: `PS2X_GS_SSAA=2|4|8|16` super-samples the drawing, and with 4 or more
