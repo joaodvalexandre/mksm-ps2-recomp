@@ -8,8 +8,9 @@ not right yet, and there is no sound.** The project restarted on 2026-11-03 on u
 runs its menus at 60 frames a second in the game's own NTSC mode with the GS drawn on the GPU (2026-11-06), loads the
 first level and plays its opening cutscene and the gameplay after it (2026-11-11). The game's VU1 microcode runs
 translated to C++ ahead of time and checked against upstream's exact interpreter (`tools/vu1gen`), which took 3D from
-2-8 to 20-36 frames a second. Open: artifacts in the 3D environment (the post-processing passes), the frame rate, and
-sound, which is in progress. Movies are skipped. The previous attempt (NTSC-U
+2-8 to 20-36 frames a second. Open: artifacts in the 3D environment (the vertex colours of a mesh's later chunks reach
+the GS wrong: the VIF1 side, found on 2026-11-12, not fixed yet), the frame rate, and sound (written and tested outside
+the game, on the branch `sound`, not merged). Movies are skipped. The previous attempt (NTSC-U
 release on a heavily patched runtime) is kept in the branch `archive/ntsc-waffle-runtime`; what it taught about the
 game is summarized in the [research log](docs/MKSM.md).
 

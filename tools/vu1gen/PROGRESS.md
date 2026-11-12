@@ -594,6 +594,12 @@ for any operand values or path of the game's programs. Closed from their notes:
 
 ## Next
 
+0. The glue may have to start a launch later than its MSCAL / MSCNT. The artifacts of the 3D environment
+   (`docs/MKSM.md`, 2026-11-12) are colours the VIF unpacks straight into the packet a routine builds, and for a
+   mesh's later chunks they are not in place when the launch runs: the game seems to count on VU1 running beside the
+   VIF. If the VIF1 trace confirms it, MSCAL / MSCNT only record the start (pc, TOP, ITOP) and the launch runs when
+   the VIF next needs VU1 (the next MSCAL, MSCNT, MSCALF, a FLUSH, the end of the transfer); `src/vu1_runtime.cpp`
+   replaces those two callbacks today and needs the other events from upstream's VIF1 (a patch).
 1. The run-time check of fact 4 above.
 2. Coverage of the remaining pairs: synthetic bases fitted to each entry (a captured state of the same routine), or
    records captured from the front end's other routines.

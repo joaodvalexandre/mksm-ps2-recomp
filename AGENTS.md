@@ -18,7 +18,7 @@ scripts and the research log ([`docs/MKSM.md`](docs/MKSM.md)). No game files and
 | `docs/MKSM.md` | research log: what was tried, with what result, and the next steps |
 | `tools/ee_disasm.py` | disassembler for the game ELF (capstone), with the names of the generated code and of the configuration |
 | `tools/missing_targets.py` | lists the direct calls and tail jumps whose target has no generated function (run after a build) |
-| `tools/gs_dump.py` | decodes a `MKSM_GS_DUMP` recording: the uploads and the draw batches of a frame with their GS state |
+| `tools/gs_dump.py` | decodes a `MKSM_GS_DUMP` recording: the uploads and the draw batches of a frame with their GS state, the mipmap state (`--mip`), the vertices of a batch (`--verts`), and as pictures the textures (`--textures`) and the buffers drawn into (`--targets`) |
 | `config/vu1_images.txt` | the game's VU1 program images for `tools/vu1gen`: ELF addresses, hashes, entry points (addresses only) |
 | `tools/vu1gen/` | ahead-of-time translator of the game's VU1 programs: generator, runtime helpers, `vu1difftest` against upstream's interpreter. `scripts\build.cmd` translates the images from the ELF during the build (into the build folder, never committed) and links them into the runner; state, commands and measurements in its `PROGRESS.md` |
 
@@ -72,7 +72,8 @@ scripts and the research log ([`docs/MKSM.md`](docs/MKSM.md)). No game files and
    `MKSM_PAD_SCRIPT=6:cross,9:cross,16.5:start,19.5:cross,22.5:cross,26:cross,29.5:cross` (seconds and buttons)
    loads the first level at 30 s and starts its opening cutscene at 42 s. Run one instance of the game at a time and
    no build beside it when the frame rate is being read. `MKSM_GS_DUMP=<file>` with `MKSM_GS_DUMP_TICKS=<a>:<b>`
-   records the GIF packets of a range of vertical blanks for `tools/gs_dump.py`.
+   records the GIF packets of a range of vertical blanks for `tools/gs_dump.py` (`MKSM_GS_DUMP_VRAM=<n>` adds the GS
+   memory every n packets, which shows every buffer as it is drawn; the file grows by 4 MB a record).
    The picture is drawn on the GPU (a Vulkan GPU is needed; `PS2X_GS_BACKEND=cpu` draws it on the CPU, much slower),
    one field per vertical blank, and the fields are woven into full height on the CPU as with the CPU backend.
    Options of the GPU backend: `PS2X_GS_SSAA=2|4|8|16` super-samples the drawing, and with 4 or more

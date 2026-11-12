@@ -819,3 +819,80 @@ commands and the full tables; this section records what was verified and what th
   swap request `0x4FC09C`). (4) Sound: finish the output, make the patches and test in the game. (5) Smaller: a
   run-time check of the XGKICK assumption (a store that can still reach the packet being transferred hands the launch
   back to the interpreter from a snapshot), the software backend's loading crash, the audit leftovers above.
+
+## 2026-11-12 — the 3D artifacts are in the stream: the vertex colours of a mesh's later chunks
+
+The artifacts of the 3D environment were followed from the screen back to the data. They are not made by the GS
+backend, by its mipmapping, by the post-processing passes or by the VU1 translation: the vertex colours the GS
+receives are wrong, and they are wrong already when the VU1 program starts. Cause not fixed yet; the lead and the
+next step are at the end.
+
+- **Tools.** `tools/gs_dump.py` got `--mip` (TEX1's LCM, MXL, L and K, the level of detail the batch's Q range
+  selects, the MIPTBP levels, the range of S/Q and T/Q), `--verts B` (every vertex of a batch), `--textures <folder>`
+  (a model of the GS memory follows the uploads and writes each batch's texture, every mipmap level, as a PNG) and
+  `--targets <folder>` (the buffers drawn into, as the backend holds them, at each memory record).
+  `MKSM_GS_DUMP_VRAM=<n>` (`src/trace_gs_dump.cpp`) adds those memory records to a dump: the 4 MB of GS memory before
+  the first packet and after every n packets (through `GS::refreshDisplaySnapshot`, no runtime patch). A dump of
+  vertical blanks 3000 to 3100 with n = 30 is 2.9 GB (696 records over seven frames).
+- **Not the post-processing.** The memory records of one frame show the scene buffer (640x224, FBP 0x000 in that
+  frame, 0x046 in the next) with the artifacts before the first post-processing batch is drawn: flat, hard-edged
+  patches on walls and floor, the light shaft as an opaque wedge. The chain after it (the depth buffer copied to
+  FBP 0x12C, the blur into FBP 0x8C) only blurs that picture. The lead of 2026-11-11 is closed.
+- **Not the textures.** `--textures` decodes all 32 textures of a frame from the stream, mipmap levels included: they
+  are right (the game uploads its 4-bit textures of 128 pixels and more as 32-bit images of half the size, which the
+  memory model reproduces). Texture coordinates, positions and Q are sane as well: a wall batch has S/Q and T/Q in
+  0..1 with about one texel a pixel; 29 of a frame's 12,622 triangles are wider than the screen (those looked at lie
+  outside it). No PRIM has FIX set and PRMODECONT is 1.
+- **Not the mipmapping.** The environment's textures are trilinear (MMIN 5, MXL 2, L 0, K -12.5 for most, also
+  -17.19, -12.94, -10.94), Q is about 1e-4, so the level of detail is 0 to 1, and paraLLEl-GS computes it as the GS
+  does (`ubershader.comp`: `ldexp(-log2(|q|), L + 4) + K`). With level 0 forced (`hacks.disable_mipmaps`, through a
+  temporary switch that is not kept) the picture is the same with cleaner edges. The textures that are not mipmapped
+  are the characters' and the sprites': the correlation that started this was a coincidence of which meshes they are.
+- **The colours in the stream.** In the environment batches, vertices that share a position carry different colours
+  in 85 to 95 per cent of the shared positions (a wall batch: 485 of 504), with a spread of 20 to 30 on values around
+  40; in the sprite batches none do. Giving vertex i the colour of vertex i + k restores nothing for k from -9 to 9
+  (of the pairs with the same position and texture coordinate, 2 to 15 per cent have equal colours at every shift).
+  The alpha bytes are from the same rows (128 for most, 64, 0, 5 to 41 for the effects), so a light shaft drawn with
+  another mesh's alpha comes out opaque.
+- **Where the colours come from.** The cutscene program's environment routine (entry 0xB40, continuations at 0xBA8)
+  reads at TOP a header, the GIF tag (NLOOP, registers ST RGBAQ XYZF2) and two rows a vertex (position as integers
+  with the ADC flag in w, S and T in 4.12) and builds the packet at TOP + 196 with three rows a vertex. It writes the
+  STQ and XYZF2 rows only. The RGBAQ rows are written by the VIF: the baked colours are unpacked straight into the
+  packet (8-bit vectors, every third row) and never pass through VU1 code. (The routine can call a subroutine through
+  vi14 before the XGKICK; not examined.)
+- **The last test: the colours are wrong before VU1 runs.** In the launches captured on 2026-11-11
+  (`logs/vu1cap`, cutscene program, 3,400 launches of that routine), the groups of vertices with the same position and
+  texture coordinate whose colour rows differ at the start of the launch: 1 per cent for the chunk started by MSCAL
+  (38 of 3,204), 29 for the first continuation (MSCNT), 70 for the second, 79 to 88 after that. Unrelated data gives
+  about 80 (the same rows of the other half of the double buffer: 82). The buffer halves alternate as they should
+  (TOP 24 and 524) and the positions are in the right half. Read one launch later, from the next launch's memory, a
+  continuation's colour rows differ in 30 per cent of the groups instead of 60; two launches later in 43.
+- **Hypothesis, not verified.** The game's VIF1 stream counts on VU1 running beside the VIF: data unpacked after an
+  MSCNT (here part of a chunk's colours) lands in the packet while the program that MSCNT started is still
+  transforming, long before its XGKICK. The runtime runs a launch to its end inside the MSCAL or MSCNT command (the
+  interpreter and the translation alike), so the packet leaves with the colours of an older chunk. The first chunk of
+  a mesh would be right because all its data precedes the MSCAL. PCSX2 queues a microprogram at MSCAL / MSCNT and
+  runs it when the VIF next needs VU1 (from memory: `vifExecQueue`; to be read in its source before relying on it).
+- **Next.** (1) A trace of the VIF1 commands of one mesh (`MKSM_TRACE_VIF1`: for UNPACK the address, FLG, USN, NUM,
+  the format, CL / WL and the mask; BASE, OFFSET, ITOP, MSCAL, MSCNT, MSCALF, FLUSH) to see the order of the colour
+  UNPACK and the MSCNT. (2) If it is as supposed: MSCAL / MSCNT only record the start (pc, TOP, ITOP), and the launch
+  runs when the VIF reaches the next MSCAL, MSCNT, MSCALF, FLUSH, FLUSHE, FLUSHA or the end of the transfer; a patch
+  to upstream's VIF1 with a test, and the glue (`src/vu1_runtime.cpp`) follows. (3) The check: the colour groups of a
+  new GS dump (0 per cent, as the sprites), then the picture.
+- **Seen on the way.** Upstream's interpreter lets a second EFU instruction start at the issue of the first plus its
+  latency minus 1 (`m_efuResourceReady`); PCSX2's interpreter, from memory, waits the whole latency. Only the
+  cutscene program uses the EFU (8 ESADD, 6 ERLENG, 14 MFP); not examined further. A PCSX2 installation is on this
+  machine (`D:\Games\Emulators\pcsx2`), which could give a GS dump of the same scene as a reference; not used (it
+  must run from a copy in portable mode, so that the user's settings and memory cards are not touched).
+- **Scripts of this investigation** (outside the repository, `D:\Projects\Recomps\vu1-study\artifacts-2026-11-12`):
+  `cap_rows.py` (a captured launch's data memory as rows), `cap_colors.py`, `cap_colors2.py`, `cap_colors3.py` (the
+  counts above), `color_consistency.py`, `color_shift.py`, `tri_stats.py` (the same on a GS dump),
+  `run_capture.sh` with `capture_run.ps1` (a timed run with the scripted pad and window captures).
+- **Frame rate**: unchanged today (30 to 36 in the opening shot, 20 with the characters).
+- **Sound** is on its own branch, `sound` (worktree `D:\Projects\Recomps\mksm-snd`, from `vu1-native` at `7a22f41`):
+  patches 0040 to 0045 (the IOP's SPU2 core, the libsd HLE, module arguments, the SPU2 paced by a sound sink, the
+  output on the audio device, `look_ctype_table`), the configuration change (the game's libsdr recompiled instead of
+  stubbed) and its own section of this log. Its notes (`D:\Projects\Recomps\snd-notes\PROGRESS.md`) report the test
+  suites passing (`ps2x_tests` 500 of 500) and an offline render of 2.5 s through the game's own IOP modules. **It has
+  not been run in the game and is not merged**: that is the next step for sound (`scripts\build.cmd -Regenerate
+  -Tests`, then a run), and merging it will meet this section in `docs/MKSM.md` and the edits of `AGENTS.md`.
