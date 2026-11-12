@@ -923,11 +923,11 @@ modules; the list of what is not verified is at the end.
   checkpoints is a gap. (7) The movies' sound (Sofdec) is another path.
 - **Open risks.** An early libsdr call made before SDRDRV's thread has registered its server would be answered by
   upstream's HLE libsd service without an error (in the render the server was there 20 ms after the load;
-  `MKSM_TRACE_LIBSD=1` shows whether the calls arrive: `#4 sceSdInit` first). The SPU2's mixing counts in the IOP's
-  quarter of the host time (patch 0006), and while that allowance is used up the SPU2 is not served for up to 7.5 ms.
-  If IOP code spins, the IOP never goes idle and every transfer interrupt costs 3 ms of IOP time before mixing goes
-  on. `sceSdBlockTrans` in read mode is refused; reverb is not mixed; `spucore=2` is taken by the driver, but what it
-  selects was not followed further.
+  `MKSM_TRACE_LIBSD=1` shows whether the calls arrive: `#4 sceSdInit` for the game's `rSdInit`). The SPU2's mixing
+  counts in the IOP's quarter of the host time (patch 0006), and while that allowance is used up the SPU2 is not
+  served for up to 7.5 ms. If IOP code spins, the IOP never goes idle and every transfer interrupt costs 3 ms of IOP
+  time before mixing goes on. `sceSdBlockTrans` in read mode is refused; reverb is not mixed; `spucore=2` is taken by
+  the driver, but what it selects was not followed further.
 - **To test in the game.** `scripts\build.cmd -Regenerate -Tests`, then a run with the pad script of 2026-11-05:
   the menu music, the announcer and the select sounds are what the archived port had (its notes of 2026-10-28 and
   2026-11-03). `MKSM_TRACE_AUDIO=1` tells an underrun (missing, gaps) from a driver problem, `MKSM_AUDIO_WAV` keeps
