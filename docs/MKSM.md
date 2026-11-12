@@ -894,7 +894,13 @@ modules; the list of what is not verified is at the end.
   uses the syscalls SifSetDma (the runtime copies EE memory into IOP RAM at once) and SifDmaStat (done). Verified by
   generating the code with the old and the new configuration (outside the repository): 13,596 files each, five
   differ (the three functions are translated code instead of calls of `ps2_stubs::sceSd*`, the stubs header, the
-  registration), and `tools/missing_targets.py` reports the same single target (`0x46F700`) for both.
+  registration), and `tools/missing_targets.py` reports the same single target (`0x46F700`) for both. The game calls
+  its libsdr at 17 places: the boot (`0x21352C`: `sceSdRemoteInit`, a cold `rSdInit`, the four master volumes at
+  `0x3FFF`), the MMIX of both cores read and set (`0x2722F0` to `0x272338`), and the sample uploads (`0x463C6C`,
+  `0x463D64`, `0x4648B4`, `0x464A60`, `0x464C28` with `rSdVoiceTrans` and its status; `0x464678` and `0x4649A8` with
+  `sceSdTransToIOP`). The commands are `0x8000`, `0x8010`, `0x8020`, `0x80D0` and `0x80F0` only, which SDRDRV passes
+  to libsd ordinals 4, 5, 6, 17 and 19, all answered natively. SNDF's and CRI's own libsd imports are all answered
+  natively too (SNDF: 4 to 9, 11, 17, 19 and 23, the effect attributes, which are stored and not mixed).
 - **Verified.** In the worktree, on patches 0001-0045: `ps2x_tests` 500 of 500 (run from the PS2Recomp folder; 11 of
   them are new: module arguments, the ctype flags, libsd by ordinal, eight of the output ring, its pacing with and
   without a device, the gap ramps and the IOP's SPU2 making 48,000 frames a host second at a ninth and at twice the
@@ -911,7 +917,8 @@ modules; the list of what is not verified is at the end.
   `rSdSetAddr`/`rSdSetParam`/`rSdSetSwitch`, then a looping `rSdBlockTrans` of a PCM sine. The 2.5 s WAV file has
   silence, then the voice (peak 7168, RMS 4948, 1714.4 Hz for an expected 1714.3; its first frame 60.0 ms after the
   key-on, the ring's level), silence after the key-off, the streamed sine (peak 8000, RMS 5656, 750.0 Hz) and silence
-  after the stop; 122,880 frames mixed, 120,000 played, no gap.
+  after the stop; 122,880 frames mixed, 120,000 played, no gap. The IOP was idle through it: 134,318 instructions in
+  92.5 million cycles with the four sound modules loaded.
 - **The device side, silently.** A second program outside the repository makes the runtime's raylib calls
   (`InitAudioDevice`, a 48 kHz 16-bit stereo stream whose callback reads the ring) with the master volume at 0 and a
   loop that writes what the ring is short of every millisecond. On the development machine the device asks for 480
