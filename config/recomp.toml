@@ -53,9 +53,11 @@ stubs = [
   "__kernel_sinf@0x00209C28",
   "sceVu0InnerProduct@0x00214098",
   "sceVu0TransposeMatrix@0x00214118",
-  "sceSdRemoteInit@0x00382C70",
-  "sceSdTransToIOP@0x00382D20",
-  "sceSdRemote@0x00382DB0",
+  # Hand edit: libsdr (0x382C70 sceSdRemoteInit, 0x382D20 sceSdTransToIOP, 0x382DB0 sceSdRemote) stays the game's
+  # code: it reaches SDRDRV.IRX on the IOP through sceSifBindRpc/sceSifCallRpc (0x80000701) and SifSetDma, which
+  # the runtime serves. The runtime's handlers of those names only kept a record of the calls, so no sample ever
+  # reached the sound unit. They are entry points below under names that are no handler's (a function named after
+  # a runtime handler is stubbed whatever this list says).
   "sceGsSetDefDispEnv@0x003831F0",
   "sceGsPutDispEnv@0x00383568",
   "sceGsSetDefDrawEnv@0x00383628",
@@ -196,6 +198,11 @@ entry_points = [
   "mksm_kernel_init_tail@0x00487890",
   # A stub binding only applies to a function start: this entry creates the function the sceMpegDelete stub binds.
   "mksm_mpeg_delete@0x00468B50",
+  # Hand edit: the game's libsdr, recompiled (see the note in the stubs list): sceSdRemoteInit, sceSdTransToIOP and
+  # sceSdRemote under names of the port.
+  "mksm_libsdr_init@0x00382C70",
+  "mksm_libsdr_trans_to_iop@0x00382D20",
+  "mksm_libsdr_remote@0x00382DB0",
   # Hand edit (tools/missing_targets.py --data-pointers --entry-points): code addresses in .data/.rodata at no
   # registered address that look like function starts, inside functions the analyzer merged. Most are the
   # pc_begin of .eh_frame records (linked into .data), the rest vtable and callback-table entries the game calls
