@@ -939,8 +939,11 @@ modules; the list of what is not verified is at the end.
   `MKSM_TRACE_LIBSD=1` shows whether the calls arrive: `#4 sceSdInit` for the game's `rSdInit`). The SPU2's mixing
   counts in the IOP's quarter of the host time (patch 0006), and while that allowance is used up the SPU2 is not
   served for up to 7.5 ms. If IOP code spins, the IOP never goes idle and every transfer interrupt costs 3 ms of IOP
-  time before mixing goes on. `sceSdBlockTrans` in read mode is refused; reverb is not mixed; `spucore=2` is taken by
-  the driver, but what it selects was not followed further.
+  time before mixing goes on. `sceSdBlockTrans` in read mode is refused; reverb is not mixed. With `spucore=2` CRI's
+  driver starts a block transfer on both cores (`0x1FD8`: the loop over its two streams), with one handler and one
+  refill thread for the two; the SPU2 mixes both inputs, but two transfers side by side are not covered by a test
+  yet (each core's input is tested on its own). The driver can also switch core 1 to the digital output and silence
+  its AVOL (`0x5D6C`); neither is modelled (core 0 always passes through core 1).
 - **To test in the game.** `scripts\build.cmd -Regenerate -Tests`, then a run with the pad script of 2026-11-05:
   the menu music, the announcer and the select sounds are what the archived port had (its notes of 2026-10-28 and
   2026-11-03). `MKSM_TRACE_AUDIO=1` tells an underrun (missing, gaps) from a driver problem, `MKSM_AUDIO_WAV` keeps
