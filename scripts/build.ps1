@@ -298,8 +298,10 @@ if ($Tests) {
     Push-Location $rec
     try { Run $testsExe.FullName @() } finally { Pop-Location }
     Step 'Building and running the IOP emulator tests'
-    Run 'cmake' @('--build', $bld, '-j', $Jobs, '--target', 'ps2_iop_emulator_tests', '--target', 'ps2_iop_import_tests')
-    foreach ($name in @('ps2_iop_emulator_tests.exe', 'ps2_iop_import_tests.exe')) {
+    # ps2_iop_spu2_tests: the sound unit of patches\0040.
+    Run 'cmake' @('--build', $bld, '-j', $Jobs, '--target', 'ps2_iop_emulator_tests', '--target', 'ps2_iop_import_tests',
+                  '--target', 'ps2_iop_spu2_tests')
+    foreach ($name in @('ps2_iop_emulator_tests.exe', 'ps2_iop_import_tests.exe', 'ps2_iop_spu2_tests.exe')) {
         $iopTest = Get-ChildItem $bld -Recurse -Filter $name | Select-Object -First 1
         if ($iopTest) { Run $iopTest.FullName @() }
     }

@@ -819,3 +819,116 @@ commands and the full tables; this section records what was verified and what th
   swap request `0x4FC09C`). (4) Sound: finish the output, make the patches and test in the game. (5) Smaller: a
   run-time check of the XGKICK assumption (a store that can still reach the packet being transferred hands the launch
   back to the interpreter from a snapshot), the software backend's loading crash, the audit leftovers above.
+
+## 2026-11-12 — sound: an SPU2 in the IOP, libsd, the output to the audio device (branch `sound`; not run in the game)
+
+Patches 0040 to 0045 and a configuration change, made in a PS2Recomp worktree of its own (`ps2recomp-snd`, one commit a
+patch on top of 0001-0032) and tested there. **The game was not run with them**: everything below that is called
+verified was verified by unit tests, by generating the game's code, and by an offline render with the game's IOP
+modules; the list of what is not verified is at the end.
+
+- **`patches/0040-iop-spu2-core.patch`** (`ps2xIOP/src/emulator/core/iop_spu2.*`). A sound unit with no register file:
+  2 MB of sound RAM, two cores of 24 ADPCM voices (decoding and ADSR after psx-spx and PCSX2, 4.12 pitch with linear
+  interpolation, KON/KOFF/ENDX/NAX, loop flags), the VMIX dry mix, the master volumes, and for each core the input a
+  block transfer feeds (a two-block FIFO filled one block ahead of playback, as on the hardware, so a half of the
+  driver's ring is complete when its last block has been fetched). Not modelled: reverb (its parameters are stored),
+  noise, pitch modulation, volume sweeps (the target is applied at once), the gaussian interpolation, IRQA, the
+  digital output. Tests: `ps2_iop_spu2_tests` (9 cases), now also run by `scripts\build.cmd -Tests`.
+- **`patches/0041-iop-libsd-hle.patch`** (`ps2xIOP/src/emulator/imports/iop_libsd.*`). The sound drivers reach the
+  hardware only through LIBSD.IRX's exports, whose table is the same in every build, so each `libsd` import is
+  answered natively by ordinal with the arguments, results and error codes of LIBSD.IRX's own functions (init,
+  parameters, switches, addresses, core attributes, voice and block transfers with their status, the transfer and
+  SPU2 interrupt handlers, the effect area); LIBSD.IRX still loads, and the ordinals without a native form
+  (`sceSdNote2Pitch`, `sceSdProcBatch`...) run its code, logged once each (`[IOP] libsd #n ... has no native form`).
+  A transfer's interrupt handler is called with (channel, argument) when the transfer completes. `MKSM_TRACE_LIBSD=1`
+  logs the first 256 calls, the first 64 transfer interrupts and a count per ordinal every 5 s of IOP time
+  (`[mksm-libsd]`). The debug panel's IOP page has an `spu2` row (frames, interrupts, active voices, fallbacks...).
+- **`patches/0042-iop-module-argv.patch`** and **`patches/0045-iop-ctype-table.patch`**: why CRI's driver ignored
+  its options. The game loads `CRI_ADXI.IRX` with the argument block `sdinit=0\0spucore=2\0`. (1) The emulator called
+  a module's start function with (byte count, block) where the IOP kernel's modload passes (argc, argv): argv[0] the
+  module's path (`LBF` for a module loaded from a buffer), one pointer per string of the block, then a null pointer.
+  (2) With a proper argv the options were still not taken: the driver (`0x18C`) accepts a number only after
+  `look_ctype_table` (sysclib #8) says its first character is a digit, and upstream returned 0 for every character.
+  Left at its default the driver's main thread calls `sceSdInit(SD_INIT_COLD)`, which resets the sound unit the game
+  set up through SDRDRV before. Seen in the offline render: before 0045 the driver prints "sceSdInit(SD_INIT_COLD)
+  call.", after it "sceSdInit Call = %d" at its start and no cold init. SDRDRV reads its own options the same way.
+- **The SPU2's clock and the output** (`patches/0043-iop-spu2-sound-sink.patch`, `patches/0044-spu2-audio-output.patch`).
+  The emulated IOP's clock cannot feed an audio device: it gets its cycles from the EE's accounting, in bursts (one
+  step of up to a vertical blank after an idle wait, the catch-up steps of patch 0005), loses what exceeds 20 ms of
+  debt or its quarter of the host time (patch 0006), and runs RPC servers outside those grants. A sound unit that
+  makes one frame every 768 of those cycles (which is what 0040 and 0041 do on their own, and what the unit tests use)
+  would have to be resampled or cut to fit the device. Instead the SPU2 is paced by its output: `PS2Spu2Output`
+  (`ps2xRuntime/include/runtime/ps2_spu2_output.h`) is a ring of stereo frames with one writer (the thread that runs
+  the IOP) and one reader (the device's callback) and no lock, kept at a level of 60 ms (`PS2X_AUDIO_LATENCY=<ms>`,
+  10 to 500); at the IOP's service points (a scheduler pass or a libsd call, not more often than every 2048 IOP
+  cycles) the SPU2 mixes exactly what the ring is short of that level. So the sound unit advances as fast as the
+  device plays, 48,000 frames for each second of the device's own clock, with nothing resampled or dropped, and the
+  block-transfer interrupts follow the same clock because they are raised by the frames. The callback (a 48 kHz
+  stereo raylib stream, started after `InitAudioDevice`) only copies frames out. While no device reads (none exists,
+  `PS2X_AUDIO=0`, or it has not asked for 250 ms) the host's steady clock drains the ring at 48,000 frames a second,
+  so the drivers see the same sound unit with or without a device. When the IOP thread is away longer than the ring
+  covers, the device gets silence, entered and left with a 64-frame ramp, and the missed time is not made up: the
+  sound unit stood still and goes on where it was.
+- **The wait after a transfer interrupt.** Mixing a burst must not read a half of the driver's ring before the driver
+  has refilled it. CRI's driver refills from a thread: its transfer handler (`0x59E0`) only signals a semaphore, the
+  thread (`0x5530`, priority 39) wakes, asks `sceSdBlockTransStatus` which half the DMA is on, hands the other half's
+  chunks back to its stream (`0x5298`) and calls the routine that copies PCM into them (`0x1D18`). On the console that
+  is a matter of a few thousand IOP cycles, and the DMA comes back to that half only after the other one has been
+  fetched (1,280 frames later with the 1,024-frame halves the archived port saw). Here the SPU2 stops mixing when a
+  block-transfer handler has been called and goes on when no IOP thread is ready any more (the refill has run), or
+  after 3 ms of IOP time if the IOP never goes idle. A test stream driver built the same way (handler, semaphore,
+  refill thread) plays a counting signal through twelve rings in order when the output asks for all of it at once,
+  and plays blocks twice when the wait is taken out.
+- **Diagnostics of the output**: `MKSM_TRACE_AUDIO=1` logs every 5 s the frames mixed, played, discarded (host
+  clock), missing (silence the device got), the gaps and the ring's lowest and highest level (`[mksm-audio]`);
+  `MKSM_AUDIO_WAV=<file>` records what the SPU2 mixed as a WAV file (valid at any moment; the gaps' silence is not in
+  it). At start the log says `[audio] SPU2 output: 48 kHz stereo, 60 ms buffered`, or why there is no stream.
+- **libsdr is the game's code again** (`config/recomp.toml`; the build regenerates). `sceSdRemoteInit` (`0x382C70`),
+  `sceSdTransToIOP` (`0x382D20`) and `sceSdRemote` (`0x382DB0`) leave the stubs list and are entry points named
+  `mksm_libsdr_*` (a function named after a runtime handler is stubbed whatever the list says). The path their code
+  takes: `sceSifBindRpc(client 0x757640, 0x80000701)` and `sceSifCallRpc` are the runtime's (`Kernel/Syscalls/RPC.cpp`)
+  and end in `IopSubsystem::handleRpc`, which asks the emulator's registered servers first: the 0x40-byte send
+  buffer is copied into SDRDRV's, its server function (`0x588`) runs on the IOP with (command, buffer, size), calls
+  libsd by import, and its result is copied back (the command is the RPC function number, `0x8000` init, `0x8010`
+  set parameter, `0x80D0` voice transfer...; the arguments are words 1 and up, the result word 0). `sceSdTransToIOP`
+  uses the syscalls SifSetDma (the runtime copies EE memory into IOP RAM at once) and SifDmaStat (done). Verified by
+  generating the code with the old and the new configuration (outside the repository): 13,596 files each, five
+  differ (the three functions are translated code instead of calls of `ps2_stubs::sceSd*`, the stubs header, the
+  registration), and `tools/missing_targets.py` reports the same single target (`0x46F700`) for both.
+- **Verified.** In the worktree, on patches 0001-0045: `ps2x_tests` 500 of 500 (run from the PS2Recomp folder; 11 of
+  them are new: module arguments, the ctype flags, libsd by ordinal, eight of the output ring, its pacing with and
+  without a device, the gap ramps and the IOP's SPU2 making 48,000 frames a host second at a ninth and at twice the
+  IOP clock), `ps2_iop_spu2_tests` 9 of 9, `ps2_iop_emulator_tests` (nine sound cases), `ps2_iop_import_tests`,
+  `ps2_iop_compatibility_tests` 18 of 18, `ps2_iop_import_version_tests` 6 of 6. The module-argument test and the
+  refill test were seen to fail without their fix. The 38 patches apply in name order with
+  `git apply --ignore-whitespace` on `e563698` and give the worktree's tree exactly.
+- **An offline render with the game's modules** (a program kept outside the repository; nothing of the game is in
+  it or in its output). `LIBSD.IRX`, `SDRDRV.IRX`, `CRI_ADXI.IRX` (with the game's arguments) and `SNDFI.IRX` load into
+  the IOP emulator (start results 0, 2, 2, 2; five threads, four RPC servers), the output ring is the SPU2's sink on a
+  clock of the program's, and a stand-in device reads 48 frames a millisecond. SDRDRV is called as the game's libsdr
+  calls it (22 RPCs, all served by the module, none by upstream's HLE libsd service): `rSdInit`, the master volumes
+  (read back `0x3FFF`), a synthetic looping ADPCM block uploaded with `rSdVoiceTrans` and keyed on with
+  `rSdSetAddr`/`rSdSetParam`/`rSdSetSwitch`, then a looping `rSdBlockTrans` of a PCM sine. The 2.5 s WAV file has
+  silence, then the voice (peak 7168, RMS 4948, 1714.4 Hz for an expected 1714.3; its first frame 60.0 ms after the
+  key-on, the ring's level), silence after the key-off, the streamed sine (peak 8000, RMS 5656, 750.0 Hz) and silence
+  after the stop; 122,880 frames mixed, 120,000 played, no gap.
+- **Not verified, because the game was not run.** (1) Sound from a real device: the raylib stream and its callback
+  have only been compiled. (2) The game's libsdr reaching SDRDRV in the game (the sample uploads of `0x463BF8` and
+  `0x464238`, the boot's `rSdInit`). (3) Music: CRI's stream needs the game's EE side (it decodes the ADX data and
+  hands the PCM to the IOP module, which serves RPC `0x90000200`; the module's PSM thread refills the block
+  transfer); only the module's start and the refill mechanism with a test driver are covered. (4) SNDF's voices and
+  its 200 Hz tick. (5) Whether the IOP still uses its whole time allowance (23 % of the game thread on 2026-11-11;
+  possibly LIBSD.IRX's own code waiting on registers that were a plain store, which the drivers no longer reach): to
+  be measured again. (6) The sound at low frame rates: a pause of the game thread of more than 60 ms between two
+  checkpoints is a gap. (7) The movies' sound (Sofdec) is another path.
+- **Open risks.** An early libsdr call made before SDRDRV's thread has registered its server would be answered by
+  upstream's HLE libsd service without an error (in the render the server was there 20 ms after the load;
+  `MKSM_TRACE_LIBSD=1` shows whether the calls arrive: `#4 sceSdInit` first). The SPU2's mixing counts in the IOP's
+  quarter of the host time (patch 0006), and while that allowance is used up the SPU2 is not served for up to 7.5 ms.
+  If IOP code spins, the IOP never goes idle and every transfer interrupt costs 3 ms of IOP time before mixing goes
+  on. `sceSdBlockTrans` in read mode is refused; reverb is not mixed; `spucore=2` is taken by the driver, but what it
+  selects was not followed further.
+- **To test in the game.** `scripts\build.cmd -Regenerate -Tests`, then a run with the pad script of 2026-11-05:
+  the menu music, the announcer and the select sounds are what the archived port had (its notes of 2026-10-28 and
+  2026-11-03). `MKSM_TRACE_AUDIO=1` tells an underrun (missing, gaps) from a driver problem, `MKSM_AUDIO_WAV` keeps
+  the sound for inspection, `MKSM_TRACE_LIBSD=1` shows what the drivers ask of the sound unit.

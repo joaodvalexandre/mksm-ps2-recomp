@@ -10,7 +10,7 @@ scripts and the research log ([`docs/MKSM.md`](docs/MKSM.md)). No game files and
 | Path | What |
 |---|---|
 | `PS2Recomp/` | upstream PS2Recomp, submodule pinned at the commit in `scripts/common.ps1` (`$PS2RecompCommit`) |
-| `patches/` | small patches applied on the submodule at build time, in name order (`NNNN-topic.patch`), each with a test in `ps2xTest` |
+| `patches/` | small patches applied on the submodule at build time, in name order (`NNNN-topic.patch`), each with a test in `ps2xTest` (the IOP's also in `ps2xIOP/tests`; `scripts\build.cmd -Tests` runs both) |
 | `config/recomp.toml` | the recompiler configuration for `SLES_535.24` (`@ELF@`, `@MAP@`, `@OUT@` are filled by the build) |
 | `src/` | the game override module, copied next to the generated code: `mksm_overrides.cpp` (bindings, replacements, diagnostics), `vu1_runtime.cpp` (runs the translated VU1 programs), `trace_gs_dump.cpp` (`MKSM_GS_DUMP`). The runner compiles the folder in unity batches in name order: give a new file a name that sorts after `sub_*`, or every batch shifts and the whole game recompiles |
 | `scripts/` | `build.cmd` (everything), `run.cmd` (run with a time limit) |
@@ -73,6 +73,11 @@ scripts and the research log ([`docs/MKSM.md`](docs/MKSM.md)). No game files and
    loads the first level at 30 s and starts its opening cutscene at 42 s. Run one instance of the game at a time and
    no build beside it when the frame rate is being read. `MKSM_GS_DUMP=<file>` with `MKSM_GS_DUMP_TICKS=<a>:<b>`
    records the GIF packets of a range of vertical blanks for `tools/gs_dump.py`.
+   Sound (`patches/0040` to `0045`; not tested in the game yet, see `docs/MKSM.md` of 2026-11-12): the IOP's sound
+   unit plays through a 48 kHz stream of the default audio device, 60 ms buffered (`PS2X_AUDIO_LATENCY=<ms>`);
+   `PS2X_AUDIO=0` turns the output off (the sound unit still runs, on the host clock). `MKSM_TRACE_AUDIO=1` logs the
+   output's state every 5 s (`[mksm-audio]`), `MKSM_AUDIO_WAV=<file>` records what the sound unit mixed,
+   `MKSM_TRACE_LIBSD=1` logs the sound drivers' libsd calls.
    The picture is drawn on the GPU (a Vulkan GPU is needed; `PS2X_GS_BACKEND=cpu` draws it on the CPU, much slower),
    one field per vertical blank, and the fields are woven into full height on the CPU as with the CPU backend.
    Options of the GPU backend: `PS2X_GS_SSAA=2|4|8|16` super-samples the drawing, and with 4 or more
