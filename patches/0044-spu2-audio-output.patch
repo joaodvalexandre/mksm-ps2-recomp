@@ -1,0 +1,922 @@
+diff --git a/ps2xRuntime/CMakeLists.txt b/ps2xRuntime/CMakeLists.txt
+index d9da149..b5f5424 100644
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -380,6 +380,7 @@ add_library(ps2_runtime STATIC
+     src/lib/gs/ps2_gif_arbiter.cpp
+     src/lib/ps2_audio.cpp
+     src/lib/ps2_audio_vag.cpp
++    src/lib/ps2_spu2_output.cpp # MKSM: the SPU2's output ring and pacing
+     src/lib/gs/ps2_gs_memory.cpp
+     src/lib/gs/gs_frontend.cpp
+     src/lib/gs/gs_cpu_backend.cpp
+diff --git a/ps2xRuntime/include/ps2_runtime.h b/ps2xRuntime/include/ps2_runtime.h
+index 51b97a4..81475ca 100644
+--- a/ps2xRuntime/include/ps2_runtime.h
++++ b/ps2xRuntime/include/ps2_runtime.h
+@@ -30,6 +30,7 @@
+ #include "runtime/gs/gs_frontend.h"
+ #include "runtime/ps2_vu1.h"
+ #include "runtime/ps2_audio.h"
++#include "runtime/ps2_spu2_output.h"
+ #include "runtime/ps2_pad.h"
+ #include "runtime/ps2_rom_device.h"
+ #include "runtime/ps2_vfs.h"
+@@ -465,6 +466,9 @@ public:
+ 
+     inline PS2AudioBackend &audioBackend() { return m_audioBackend; }
+     inline const PS2AudioBackend &audioBackend() const { return m_audioBackend; }
++    // MKSM: the ring the IOP's SPU2 mixes into and the audio device reads (runtime/ps2_spu2_output.h)
++    inline PS2Spu2Output &spu2Output() { return m_spu2Output; }
++    inline const PS2Spu2Output &spu2Output() const { return m_spu2Output; }
+     inline PSPadBackend &padBackend() { return m_padBackend; }
+     inline const PSPadBackend &padBackend() const { return m_padBackend; }
+     inline PS2RomDevice &romDevice() { return m_romDevice; }
+@@ -507,6 +511,7 @@ private:
+     PS2Memory m_memory;
+     GifArbiter m_gifArbiter;
+     GS m_gs;
++    PS2Spu2Output m_spu2Output{PS2Spu2Output::latencyFromEnvironment()}; // MKSM: before the IOP, which mixes into it
+     std::unique_ptr<PS2IopHostAdapter> m_iopHost;
+     std::unique_ptr<ps2x::iop::IopSubsystem> m_iopSubsystem;
+     PS2AudioBackend m_audioBackend;
+diff --git a/ps2xRuntime/include/runtime/ps2_spu2_output.h b/ps2xRuntime/include/runtime/ps2_spu2_output.h
+new file mode 100644
+index 0000000..d602ce8
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ps2_spu2_output.h
+@@ -0,0 +1,125 @@
++#ifndef PS2_SPU2_OUTPUT_H
++#define PS2_SPU2_OUTPUT_H
++
++// MKSM: the SPU2's way out to the host's audio device.
++//
++// The IOP's SPU2 (ps2xIOP) mixes on the thread that runs the IOP; an audio device asks for samples on a thread of its
++// own. Between the two sits a ring of stereo frames with one writer and one reader and no lock: the device's callback
++// only copies frames out (read), the IOP thread only puts frames in (writeFrames).
++//
++// This object is also the SPU2's clock (ps2x::iop::IopSoundSink): the SPU2 mixes what framesWanted() returns, which is
++// what the ring is short of its target level. So the sound unit advances exactly as fast as the device plays, 48,000
++// frames for each second of the device's clock: the ring neither runs dry nor fills up over time, and nothing has to
++// be resampled or dropped to keep the two in step. The emulated IOP's own clock (cycles handed out by the EE, in
++// bursts, some of them lost when the IOP is busy) is not in the path.
++//
++// While no device reads (none exists, PS2X_AUDIO=0, or the device stopped asking), the host's clock drains the ring
++// at 48,000 frames a second, so the sound drivers see the same sound unit with or without a device.
++//
++// When the IOP thread is away for longer than the ring covers (the target level, PS2X_AUDIO_LATENCY milliseconds, 60
++// by default), the device gets silence, entered and left with a short ramp. The frames of that gap are not made up
++// afterwards: the sound unit stood still and goes on where it was.
++//
++// Diagnostics: MKSM_TRACE_AUDIO=1 logs a [mksm-audio] line every five seconds (frames mixed and played, gaps, the
++// ring's level); MKSM_AUDIO_WAV=<file> records what the SPU2 mixed (the gaps' silence is not in it).
++
++#include "ps2x/iop/iop_sound_sink.h"
++
++#include <atomic>
++#include <cstddef>
++#include <cstdint>
++#include <cstdio>
++#include <vector>
++
++class PS2Spu2Output final : public ps2x::iop::IopSoundSink
++{
++public:
++    static constexpr uint32_t SampleRate = 48000u;
++    static constexpr uint32_t DefaultLatencyMs = 60u;
++    static constexpr uint32_t FadeFrames = 64u;                 // the ramp into and out of a gap
++    static constexpr int64_t DeviceStallNs = 250'000'000;       // a device that has not read for this long is gone
++    using NowFunction = int64_t (*)();                          // nanoseconds of a monotonic clock
++
++    // latencyMs: the level the ring is kept at (10..500). now: the clock, the host's steady clock when null.
++    explicit PS2Spu2Output(uint32_t latencyMs = DefaultLatencyMs, NowFunction now = nullptr);
++    ~PS2Spu2Output() override;
++
++    PS2Spu2Output(const PS2Spu2Output &) = delete;
++    PS2Spu2Output &operator=(const PS2Spu2Output &) = delete;
++
++    // PS2X_AUDIO_LATENCY in milliseconds, DefaultLatencyMs when it is not set or not a number
++    [[nodiscard]] static uint32_t latencyFromEnvironment();
++
++    // ---- the thread that runs the IOP (ps2x::iop::IopSoundSink)
++    size_t framesWanted() noexcept override;
++    void writeFrames(const int16_t *stereo, size_t frames) noexcept override;
++
++    // ---- the audio device's thread: 'frames' interleaved signed 16-bit stereo frames at 48 kHz, always all of them
++    void read(int16_t *stereo, size_t frames) noexcept;
++
++    // A device reads the ring (after it was started) or no longer does (before it is stopped).
++    void setDeviceAttached(bool attached) noexcept;
++
++    [[nodiscard]] uint32_t targetFrames() const noexcept { return m_target; }
++    [[nodiscard]] uint32_t capacityFrames() const noexcept { return m_capacity; }
++    [[nodiscard]] size_t bufferedFrames() const noexcept;
++
++    struct Stats
++    {
++        uint64_t framesMixed = 0;     // frames the SPU2 wrote
++        uint64_t framesPlayed = 0;    // frames a device took out of the ring
++        uint64_t framesDiscarded = 0; // frames the host clock took out of the ring (no device)
++        uint64_t framesMissing = 0;   // frames of silence a device got because the ring was empty
++        uint64_t gaps = 0;            // times the ring ran dry under a device
++        uint64_t framesOverflowed = 0; // frames written beyond the ring's capacity (lost)
++        bool clockDriven = true;      // the host clock drains the ring (no device is reading)
++    };
++    [[nodiscard]] Stats stats() const noexcept;
++
++private:
++    [[nodiscard]] uint64_t readPosition() const noexcept;
++    void traceLine(int64_t now, uint64_t level) noexcept;
++    void recordFrames(const int16_t *stereo, size_t frames) noexcept;
++    void writeWavHeader() noexcept;
++
++    NowFunction m_now;
++    uint32_t m_target = 0;   // frames
++    uint32_t m_capacity = 0; // frames, a power of two
++    std::vector<int16_t> m_ring;
++
++    // Frame counts since the start. m_written belongs to the IOP thread, m_read to the device's thread; m_discardTo
++    // is the IOP thread's way to take frames out when no device does: the reader skips to it.
++    std::atomic<uint64_t> m_written{0};
++    std::atomic<uint64_t> m_read{0};
++    std::atomic<uint64_t> m_discardTo{0};
++    std::atomic<int64_t> m_lastReadNs{0};
++    std::atomic<bool> m_deviceAttached{false};
++
++    // the IOP thread
++    bool m_clockDriven = false;
++    int64_t m_clockStartNs = 0;
++    uint64_t m_clockFrames = 0; // frames the host clock has taken since m_clockStartNs
++    std::atomic<bool> m_clockDrivenFlag{true};
++    std::atomic<uint64_t> m_framesDiscarded{0};
++    std::atomic<uint64_t> m_framesOverflowed{0};
++
++    // the device's thread
++    int16_t m_lastOut[2]{};
++    uint32_t m_fadeIn = 0; // frames of the ramp out of a gap still to do
++    bool m_inGap = false;
++    std::atomic<uint64_t> m_framesPlayed{0};
++    std::atomic<uint64_t> m_framesMissing{0};
++    std::atomic<uint64_t> m_gaps{0};
++
++    // diagnostics (the IOP thread)
++    bool m_trace = false;
++    int64_t m_traceNextNs = 0;
++    uint64_t m_traceLow = UINT64_MAX;
++    uint64_t m_traceHigh = 0;
++    Stats m_traceLast{};
++    std::FILE *m_wav = nullptr;
++    uint64_t m_wavFrames = 0;
++    uint64_t m_wavHeaderFrames = 0;
++};
++
++#endif
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index c1d9ad6..c752b11 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -34,6 +34,66 @@
+ #include <unordered_map>
+ #include <sstream>
+ 
++#if !defined(PLATFORM_VITA)
++// MKSM: the SPU2's output on the host's audio device, as a 48 kHz stereo stream of raylib's. raylib asks for the
++// samples on its audio thread, and the callback only copies them out of the ring the IOP's SPU2 mixes into
++// (runtime/ps2_spu2_output.h). With PS2X_AUDIO=0 or no audio device there is no stream, and the SPU2 runs on the
++// host clock instead of the device's.
++namespace
++{
++    std::atomic<PS2Spu2Output *> g_spu2StreamSource{nullptr};
++    AudioStream g_spu2Stream{};
++
++    void spu2StreamCallback(void *buffer, unsigned int frames)
++    {
++        if (PS2Spu2Output *source = g_spu2StreamSource.load(std::memory_order_acquire))
++            source->read(static_cast<int16_t *>(buffer), frames);
++        else
++            std::memset(buffer, 0, static_cast<size_t>(frames) * 2u * sizeof(int16_t));
++    }
++
++    void startSpu2Stream(PS2Spu2Output &output)
++    {
++        const char *setting = std::getenv("PS2X_AUDIO");
++        if (setting && setting[0] == '0')
++        {
++            std::cerr << "[audio] SPU2 output off (PS2X_AUDIO=0)" << std::endl;
++            return;
++        }
++        if (!IsAudioDeviceReady())
++        {
++            std::cerr << "[audio] no audio device: the SPU2 runs without an output" << std::endl;
++            return;
++        }
++        if (g_spu2StreamSource.load(std::memory_order_acquire) != nullptr)
++            return;
++        g_spu2Stream = LoadAudioStream(PS2Spu2Output::SampleRate, 16u, 2u);
++        if (!IsAudioStreamValid(g_spu2Stream))
++        {
++            std::cerr << "[audio] the SPU2 output stream could not be created" << std::endl;
++            return;
++        }
++        g_spu2StreamSource.store(&output, std::memory_order_release);
++        SetAudioStreamCallback(g_spu2Stream, spu2StreamCallback);
++        PlayAudioStream(g_spu2Stream);
++        output.setDeviceAttached(true);
++        std::cerr << "[audio] SPU2 output: 48 kHz stereo, " << output.targetFrames() * 1000u / PS2Spu2Output::SampleRate
++                  << " ms buffered (PS2X_AUDIO_LATENCY)" << std::endl;
++    }
++
++    void stopSpu2Stream(PS2Spu2Output &output)
++    {
++        if (g_spu2StreamSource.load(std::memory_order_acquire) != &output)
++            return;
++        output.setDeviceAttached(false);
++        StopAudioStream(g_spu2Stream);
++        UnloadAudioStream(g_spu2Stream); // raylib takes the stream out under its mixing lock: no callback is left
++        g_spu2StreamSource.store(nullptr, std::memory_order_release);
++        g_spu2Stream = AudioStream{};
++    }
++}
++#endif
++
+ namespace ps2_stubs
+ {
+     void resetSifState();
+@@ -526,6 +586,7 @@ PS2Runtime::PS2Runtime()
+ {
+     m_iopHost = std::make_unique<PS2IopHostAdapter>(*this);
+     m_iopSubsystem = std::make_unique<ps2x::iop::IopSubsystem>(*m_iopHost);
++    m_iopSubsystem->setSoundSink(&m_spu2Output); // MKSM: the SPU2 mixes into the output ring, at the output's pace
+ 
+     m_eeScheduler = std::make_unique<EeScheduler>(*this);
+ 
+@@ -574,6 +635,9 @@ PS2Runtime::~PS2Runtime()
+     try
+     {
+         requestStop();
++#if !defined(PLATFORM_VITA)
++        stopSpu2Stream(m_spu2Output); // MKSM: the audio thread no longer reads the ring
++#endif
+         m_iopSubsystem.reset();
+         m_iopHost.reset();
+ #if defined(PLATFORM_VITA)
+@@ -783,6 +847,7 @@ bool PS2Runtime::initialize(const char *title)
+         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
+         InitAudioDevice();
+         m_audioBackend.setAudioReady(IsAudioDeviceReady());
++        startSpu2Stream(m_spu2Output); // MKSM: the SPU2's mixed output
+ #endif
+ #ifdef PS2X_GS_PARALLEL
+         // MKSM: upstream's GPU GS backend (paraLLEl-GS, branch feature/performance-patch-1). PS2X_GS_BACKEND=cpu keeps
+diff --git a/ps2xRuntime/src/lib/ps2_spu2_output.cpp b/ps2xRuntime/src/lib/ps2_spu2_output.cpp
+new file mode 100644
+index 0000000..b4ce858
+--- /dev/null
++++ b/ps2xRuntime/src/lib/ps2_spu2_output.cpp
+@@ -0,0 +1,294 @@
++#include "runtime/ps2_spu2_output.h"
++
++#include <algorithm>
++#include <chrono>
++#include <cstdlib>
++#include <cstring>
++#include <limits>
++
++// MKSM: the SPU2's output ring and pacing (see runtime/ps2_spu2_output.h).
++namespace
++{
++    constexpr int64_t kNever = std::numeric_limits<int64_t>::min();
++    constexpr int64_t kSecondNs = 1'000'000'000;
++    constexpr int64_t kTraceEveryNs = 5 * kSecondNs;
++
++    int64_t steadyNow()
++    {
++        return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++    }
++
++    void put16(uint8_t *bytes, uint32_t value)
++    {
++        bytes[0] = static_cast<uint8_t>(value);
++        bytes[1] = static_cast<uint8_t>(value >> 8u);
++    }
++
++    void put32(uint8_t *bytes, uint32_t value)
++    {
++        put16(bytes, value);
++        put16(bytes + 2, value >> 16u);
++    }
++}
++
++PS2Spu2Output::PS2Spu2Output(uint32_t latencyMs, NowFunction now)
++    : m_now(now ? now : steadyNow)
++{
++    m_target = std::clamp<uint32_t>(latencyMs, 10u, 500u) * SampleRate / 1000u;
++    m_capacity = 8192u;
++    while (m_capacity < m_target * 4u)
++        m_capacity *= 2u;
++    m_ring.assign(static_cast<size_t>(m_capacity) * 2u, int16_t{0});
++    m_lastReadNs.store(kNever, std::memory_order_relaxed);
++
++    const char *trace = std::getenv("MKSM_TRACE_AUDIO");
++    m_trace = trace && *trace && *trace != '0';
++    const char *wav = std::getenv("MKSM_AUDIO_WAV");
++    if (wav && *wav)
++    {
++        m_wav = std::fopen(wav, "wb");
++        if (m_wav)
++            writeWavHeader();
++        else
++            std::fprintf(stderr, "[mksm-audio] MKSM_AUDIO_WAV: cannot write %s\n", wav);
++    }
++}
++
++PS2Spu2Output::~PS2Spu2Output()
++{
++    if (m_wav)
++    {
++        writeWavHeader();
++        std::fclose(m_wav);
++    }
++}
++
++uint32_t PS2Spu2Output::latencyFromEnvironment()
++{
++    const char *setting = std::getenv("PS2X_AUDIO_LATENCY");
++    if (!setting || !*setting)
++        return DefaultLatencyMs;
++    char *end = nullptr;
++    const long value = std::strtol(setting, &end, 10);
++    return end != setting && value > 0 ? static_cast<uint32_t>(std::min<long>(value, 500)) : DefaultLatencyMs;
++}
++
++// The reader's position as the writer sees it: what the device has read, or what the host clock took.
++uint64_t PS2Spu2Output::readPosition() const noexcept
++{
++    return std::max(m_read.load(std::memory_order_acquire), m_discardTo.load(std::memory_order_relaxed));
++}
++
++size_t PS2Spu2Output::bufferedFrames() const noexcept
++{
++    const uint64_t written = m_written.load(std::memory_order_acquire);
++    const uint64_t read = readPosition();
++    return written > read ? static_cast<size_t>(written - read) : 0u;
++}
++
++void PS2Spu2Output::setDeviceAttached(bool attached) noexcept
++{
++    if (!attached)
++        m_lastReadNs.store(kNever, std::memory_order_relaxed);
++    m_deviceAttached.store(attached, std::memory_order_release);
++}
++
++size_t PS2Spu2Output::framesWanted() noexcept
++{
++    const int64_t now = m_now();
++    const uint64_t written = m_written.load(std::memory_order_relaxed);
++    uint64_t read = readPosition();
++    uint64_t level = written - read;
++
++    // Who takes frames out of the ring: the device, while it keeps asking; otherwise the host clock.
++    const int64_t lastRead = m_lastReadNs.load(std::memory_order_relaxed);
++    const bool device = m_deviceAttached.load(std::memory_order_acquire) && lastRead != kNever &&
++                        now - lastRead < DeviceStallNs;
++    if (device)
++    {
++        m_clockDriven = false;
++    }
++    else
++    {
++        if (!m_clockDriven)
++        {
++            m_clockDriven = true;
++            m_clockStartNs = now;
++            m_clockFrames = 0;
++        }
++        if (now - m_clockStartNs >= 1000 * kSecondNs) // keeps the product below small
++        {
++            m_clockStartNs += 1000 * kSecondNs;
++            m_clockFrames -= std::min<uint64_t>(m_clockFrames, 1000ull * SampleRate);
++        }
++        const uint64_t due = now > m_clockStartNs
++                                 ? static_cast<uint64_t>(now - m_clockStartNs) * SampleRate / static_cast<uint64_t>(kSecondNs)
++                                 : 0u;
++        if (due > m_clockFrames)
++        {
++            // the frames the clock asks for beyond what the ring holds are a gap: the sound unit stood still
++            const uint64_t taken = std::min(due - m_clockFrames, level);
++            m_clockFrames = due;
++            if (taken != 0u)
++            {
++                read += taken;
++                level -= taken;
++                m_discardTo.store(read, std::memory_order_release);
++                m_framesDiscarded.fetch_add(taken, std::memory_order_relaxed);
++            }
++        }
++    }
++    m_clockDrivenFlag.store(m_clockDriven, std::memory_order_relaxed);
++
++    if (m_trace)
++        traceLine(now, level);
++    return level < m_target ? static_cast<size_t>(m_target - level) : 0u;
++}
++
++void PS2Spu2Output::writeFrames(const int16_t *stereo, size_t frames) noexcept
++{
++    if (!stereo || frames == 0u)
++        return;
++    if (m_wav)
++        recordFrames(stereo, frames);
++    const uint64_t written = m_written.load(std::memory_order_relaxed);
++    const uint64_t level = written - readPosition();
++    const size_t space = level < m_capacity ? static_cast<size_t>(m_capacity - level) : 0u;
++    const size_t count = std::min(frames, space);
++    if (count != frames)
++        m_framesOverflowed.fetch_add(frames - count, std::memory_order_relaxed);
++    const size_t start = static_cast<size_t>(written & (m_capacity - 1u));
++    const size_t first = std::min<size_t>(count, m_capacity - start);
++    std::memcpy(m_ring.data() + start * 2u, stereo, first * 2u * sizeof(int16_t));
++    std::memcpy(m_ring.data(), stereo + first * 2u, (count - first) * 2u * sizeof(int16_t));
++    m_written.store(written + count, std::memory_order_release);
++}
++
++void PS2Spu2Output::read(int16_t *stereo, size_t frames) noexcept
++{
++    if (!stereo || frames == 0u)
++        return;
++    uint64_t read = std::max(m_read.load(std::memory_order_relaxed), m_discardTo.load(std::memory_order_acquire));
++    const uint64_t written = m_written.load(std::memory_order_acquire);
++    const size_t available = written > read ? static_cast<size_t>(written - read) : 0u;
++    const size_t count = std::min(frames, available);
++
++    const size_t start = static_cast<size_t>(read & (m_capacity - 1u));
++    const size_t first = std::min<size_t>(count, m_capacity - start);
++    std::memcpy(stereo, m_ring.data() + start * 2u, first * 2u * sizeof(int16_t));
++    std::memcpy(stereo + first * 2u, m_ring.data(), (count - first) * 2u * sizeof(int16_t));
++
++    // out of a gap: the first frames come up from silence
++    for (size_t frame = 0; frame < count && m_fadeIn != 0u; ++frame, --m_fadeIn)
++    {
++        const int32_t gain = static_cast<int32_t>(FadeFrames - m_fadeIn + 1u);
++        stereo[frame * 2u] = static_cast<int16_t>(stereo[frame * 2u] * gain / static_cast<int32_t>(FadeFrames));
++        stereo[frame * 2u + 1u] = static_cast<int16_t>(stereo[frame * 2u + 1u] * gain / static_cast<int32_t>(FadeFrames));
++    }
++
++    if (count < frames)
++    {
++        // The ring is empty: the last sample goes down to silence over a few frames instead of in one step.
++        const int32_t last[2] = {count != 0u ? stereo[(count - 1u) * 2u] : m_lastOut[0],
++                                 count != 0u ? stereo[(count - 1u) * 2u + 1u] : m_lastOut[1]};
++        const size_t ramp = std::min<size_t>(frames - count, FadeFrames);
++        for (size_t frame = 0; frame < ramp; ++frame)
++        {
++            const int32_t gain = static_cast<int32_t>(FadeFrames - 1u - frame);
++            stereo[(count + frame) * 2u] = static_cast<int16_t>(last[0] * gain / static_cast<int32_t>(FadeFrames));
++            stereo[(count + frame) * 2u + 1u] = static_cast<int16_t>(last[1] * gain / static_cast<int32_t>(FadeFrames));
++        }
++        std::memset(stereo + (count + ramp) * 2u, 0, (frames - count - ramp) * 2u * sizeof(int16_t));
++        m_fadeIn = FadeFrames;
++        if (written != 0u) // before the SPU2's first frame there is nothing to miss
++        {
++            m_framesMissing.fetch_add(frames - count, std::memory_order_relaxed);
++            if (!m_inGap)
++                m_gaps.fetch_add(1u, std::memory_order_relaxed);
++            m_inGap = true;
++        }
++    }
++    else
++    {
++        m_inGap = false;
++    }
++    m_lastOut[0] = stereo[(frames - 1u) * 2u];
++    m_lastOut[1] = stereo[(frames - 1u) * 2u + 1u];
++
++    m_read.store(read + count, std::memory_order_release);
++    m_framesPlayed.fetch_add(count, std::memory_order_relaxed);
++    m_lastReadNs.store(m_now(), std::memory_order_relaxed);
++}
++
++PS2Spu2Output::Stats PS2Spu2Output::stats() const noexcept
++{
++    Stats stats;
++    stats.framesPlayed = m_framesPlayed.load(std::memory_order_relaxed);
++    stats.framesDiscarded = m_framesDiscarded.load(std::memory_order_relaxed);
++    stats.framesMissing = m_framesMissing.load(std::memory_order_relaxed);
++    stats.gaps = m_gaps.load(std::memory_order_relaxed);
++    stats.framesOverflowed = m_framesOverflowed.load(std::memory_order_relaxed);
++    stats.framesMixed = m_written.load(std::memory_order_relaxed) + stats.framesOverflowed;
++    stats.clockDriven = m_clockDrivenFlag.load(std::memory_order_relaxed);
++    return stats;
++}
++
++// MKSM_TRACE_AUDIO=1: every five seconds, what was mixed, played and missed since the last line, and the lowest and
++// highest level of the ring at the moments the SPU2 asked.
++void PS2Spu2Output::traceLine(int64_t now, uint64_t level) noexcept
++{
++    m_traceLow = std::min(m_traceLow, level);
++    m_traceHigh = std::max(m_traceHigh, level);
++    if (m_traceNextNs == 0)
++        m_traceNextNs = now + kTraceEveryNs;
++    if (now < m_traceNextNs)
++        return;
++    const Stats current = stats();
++    std::fprintf(stderr,
++                 "[mksm-audio] mixed=%llu played=%llu discarded=%llu missing=%llu gaps=%llu overflowed=%llu "
++                 "level=%llu-%llu of %u frames, drained by the %s\n",
++                 static_cast<unsigned long long>(current.framesMixed - m_traceLast.framesMixed),
++                 static_cast<unsigned long long>(current.framesPlayed - m_traceLast.framesPlayed),
++                 static_cast<unsigned long long>(current.framesDiscarded - m_traceLast.framesDiscarded),
++                 static_cast<unsigned long long>(current.framesMissing - m_traceLast.framesMissing),
++                 static_cast<unsigned long long>(current.gaps - m_traceLast.gaps),
++                 static_cast<unsigned long long>(current.framesOverflowed - m_traceLast.framesOverflowed),
++                 static_cast<unsigned long long>(m_traceLow), static_cast<unsigned long long>(m_traceHigh), m_target,
++                 current.clockDriven ? "host clock" : "device");
++    m_traceLast = current;
++    m_traceLow = UINT64_MAX;
++    m_traceHigh = 0;
++    m_traceNextNs = now + kTraceEveryNs;
++}
++
++// MKSM_AUDIO_WAV=<file>: the frames as the SPU2 made them. The header is brought up to date once a second of sound,
++// so the file is whole when the process is ended from outside.
++void PS2Spu2Output::recordFrames(const int16_t *stereo, size_t frames) noexcept
++{
++    m_wavFrames += std::fwrite(stereo, 2u * sizeof(int16_t), frames, m_wav);
++    if (m_wavFrames - m_wavHeaderFrames >= SampleRate)
++        writeWavHeader();
++}
++
++void PS2Spu2Output::writeWavHeader() noexcept
++{
++    const uint32_t dataBytes = static_cast<uint32_t>(std::min<uint64_t>(m_wavFrames * 4u, 0xFFFFFF00u));
++    uint8_t header[44];
++    std::memcpy(header, "RIFF", 4);
++    put32(header + 4, 36u + dataBytes);
++    std::memcpy(header + 8, "WAVEfmt ", 8);
++    put32(header + 16, 16u);            // the format chunk
++    put16(header + 20, 1u);             // PCM
++    put16(header + 22, 2u);             // stereo
++    put32(header + 24, SampleRate);
++    put32(header + 28, SampleRate * 4u); // bytes a second
++    put16(header + 32, 4u);             // bytes a frame
++    put16(header + 34, 16u);            // bits a sample
++    std::memcpy(header + 36, "data", 4);
++    put32(header + 40, dataBytes);
++    if (std::fseek(m_wav, 0, SEEK_SET) == 0)
++        (void)std::fwrite(header, 1u, sizeof(header), m_wav);
++    (void)std::fseek(m_wav, 0, SEEK_END);
++    (void)std::fflush(m_wav);
++    m_wavHeaderFrames = m_wavFrames;
++}
+diff --git a/ps2xTest/CMakeLists.txt b/ps2xTest/CMakeLists.txt
+index 3eaa8b3..d5dfae6 100644
+--- a/ps2xTest/CMakeLists.txt
++++ b/ps2xTest/CMakeLists.txt
+@@ -38,6 +38,7 @@ add_library(ps2_test_lib STATIC
+     src/ps2_recompiler_tests.cpp
+     src/ps2_runtime_expansion_tests.cpp
+     src/ps2_float_semantics_tests.cpp
++    src/ps2_spu2_output_tests.cpp # MKSM
+ )
+ 
+ target_include_directories(ps2_test_lib PRIVATE
+diff --git a/ps2xTest/src/main.cpp b/ps2xTest/src/main.cpp
+index 7b78891..65c8f4c 100644
+--- a/ps2xTest/src/main.cpp
++++ b/ps2xTest/src/main.cpp
+@@ -19,6 +19,7 @@ void register_ps2_sif_dma_tests();
+ void register_ps2_recompiler_tests();
+ void register_ps2_runtime_expansion_tests();
+ void register_ps2_float_semantics_tests();
++void register_ps2_spu2_output_tests(); // MKSM
+ void reset_ps2_test_function_table();
+ 
+ int main()
+@@ -42,6 +43,7 @@ int main()
+     register_ps2_recompiler_tests();
+     register_ps2_runtime_expansion_tests();
+     register_ps2_float_semantics_tests();
++    register_ps2_spu2_output_tests(); // MKSM
+     int res = MiniTest::Run();
+     std::cout.flush();
+     std::cerr.flush();
+diff --git a/ps2xTest/src/ps2_spu2_output_tests.cpp b/ps2xTest/src/ps2_spu2_output_tests.cpp
+new file mode 100644
+index 0000000..65d4b9f
+--- /dev/null
++++ b/ps2xTest/src/ps2_spu2_output_tests.cpp
+@@ -0,0 +1,314 @@
++#include "MiniTest.h"
++#include "runtime/ps2_spu2_output.h"
++#include "../../ps2xIOP/tests/iop_compat_test_support.h"
++
++#include <algorithm>
++#include <cstdint>
++#include <vector>
++
++// MKSM: the SPU2's output ring and its pacing (runtime/ps2_spu2_output.h), without a sound device: the tests stand in
++// for the device's thread by calling read(), and for the host clock with a clock of their own.
++namespace
++{
++    int64_t g_now = 0;
++    int64_t testNow() { return g_now; }
++    constexpr int64_t kMs = 1'000'000;
++
++    // Frame n of the test signal: left = n, right = -n (16 bits each).
++    void counting(std::vector<int16_t> &out, uint64_t first, size_t frames)
++    {
++        out.resize(frames * 2u);
++        for (size_t i = 0; i < frames; ++i)
++        {
++            out[i * 2u] = static_cast<int16_t>(first + i);
++            out[i * 2u + 1u] = static_cast<int16_t>(0u - (first + i));
++        }
++    }
++
++    // What the SPU2 does at a service point: mixes what the output is short of.
++    size_t feed(PS2Spu2Output &output, uint64_t &next)
++    {
++        const size_t wanted = output.framesWanted();
++        std::vector<int16_t> frames;
++        counting(frames, next, wanted);
++        output.writeFrames(frames.data(), wanted);
++        next += wanted;
++        return wanted;
++    }
++
++    // True when 'frames' frames of out are the test signal from frame 'first' on.
++    bool isCounting(const std::vector<int16_t> &out, uint64_t first, size_t frames)
++    {
++        for (size_t i = 0; i < frames; ++i)
++        {
++            if (out[i * 2u] != static_cast<int16_t>(first + i) || out[i * 2u + 1u] != static_cast<int16_t>(0u - (first + i)))
++                return false;
++        }
++        return true;
++    }
++}
++
++void register_ps2_spu2_output_tests()
++{
++    MiniTest::Case("PS2Spu2Output", [](TestCase &tc)
++    {
++        tc.Run("the ring's level and size follow the latency", [](TestCase &t)
++        {
++            g_now = 0;
++            PS2Spu2Output output(60u, testNow);
++            t.Equals(output.targetFrames(), 2880u, "60 ms at 48 kHz should be 2880 frames");
++            t.IsTrue(output.capacityFrames() >= 4u * output.targetFrames() &&
++                         (output.capacityFrames() & (output.capacityFrames() - 1u)) == 0u,
++                     "the ring should be a power of two with room above the target level");
++            t.Equals(PS2Spu2Output(1u, testNow).targetFrames(), 480u, "the latency should not go below 10 ms");
++            t.Equals(PS2Spu2Output(5000u, testNow).targetFrames(), 24000u, "the latency should not go above 500 ms");
++            t.Equals(PS2Spu2Output::latencyFromEnvironment(), PS2Spu2Output::DefaultLatencyMs,
++                     "without PS2X_AUDIO_LATENCY the latency should be the default");
++        });
++
++        tc.Run("a device gets the frames in order, across the ring's wrap", [](TestCase &t)
++        {
++            g_now = 0;
++            PS2Spu2Output output(60u, testNow);
++            output.setDeviceAttached(true);
++            uint64_t written = 0, played = 0;
++            std::vector<int16_t> out;
++            bool ordered = true, levelKept = true;
++            // device periods of several sizes; the SPU2 is served after each, as at a service point
++            const size_t periods[] = {480u, 441u, 1024u, 7u, 960u, 128u};
++            (void)feed(output, written);
++            for (uint32_t round = 0; round < 400u; ++round) // about 200,000 frames: the ring wraps many times
++            {
++                const size_t period = periods[round % 6u];
++                out.assign(period * 2u, 0x5555);
++                output.read(out.data(), period);
++                ordered = ordered && isCounting(out, played, period);
++                played += period;
++                g_now += static_cast<int64_t>(period) * 1'000'000'000 / 48000;
++                const size_t wanted = feed(output, written);
++                levelKept = levelKept && wanted == period && output.bufferedFrames() == output.targetFrames();
++            }
++            t.IsTrue(ordered, "the device should read the frames the SPU2 wrote, in order");
++            t.IsTrue(levelKept, "the SPU2 should be asked for exactly what the device took");
++            const PS2Spu2Output::Stats stats = output.stats();
++            t.Equals(stats.framesPlayed, played, "every frame read should be counted as played");
++            t.Equals(stats.framesMixed, played + output.targetFrames(), "the SPU2 should be one target level ahead");
++            t.IsTrue(stats.gaps == 0u && stats.framesMissing == 0u && stats.framesOverflowed == 0u &&
++                         stats.framesDiscarded == 0u && !stats.clockDriven,
++                     "a device that keeps reading should see no gap, and the host clock should stay out");
++        });
++
++        tc.Run("with no device the host clock takes 48,000 frames a second", [](TestCase &t)
++        {
++            g_now = 5 * kMs;
++            PS2Spu2Output output(60u, testNow);
++            uint64_t written = 0;
++            t.Equals(feed(output, written), static_cast<size_t>(2880u), "an empty ring should want its target level");
++            t.Equals(feed(output, written), static_cast<size_t>(0u), "a ring at its level should want nothing");
++            // service points at uneven distances, ten seconds in all
++            const int64_t steps[] = {1 * kMs, 3 * kMs, 16 * kMs, 250'000, 7 * kMs, 2'750'000};
++            bool neverAbove = true;
++            for (int64_t elapsed = 0, i = 0; elapsed < 10'000 * kMs; ++i)
++            {
++                const int64_t step = std::min<int64_t>(steps[i % 6], 10'000 * kMs - elapsed);
++                g_now += step;
++                elapsed += step;
++                (void)feed(output, written);
++                neverAbove = neverAbove && output.bufferedFrames() == output.targetFrames();
++            }
++            t.Equals(written, static_cast<uint64_t>(2880u + 480000u),
++                     "ten seconds of host time should be exactly 480,000 frames");
++            t.IsTrue(neverAbove, "the ring should be back at its level after each service point");
++            const PS2Spu2Output::Stats stats = output.stats();
++            t.IsTrue(stats.clockDriven && stats.framesDiscarded == 480000u && stats.framesPlayed == 0u && stats.gaps == 0u,
++                     "the frames should be taken by the host clock, none played");
++        });
++
++        tc.Run("a pause of the IOP thread is a gap, not a burst", [](TestCase &t)
++        {
++            // no device: two seconds without a service point
++            g_now = 0;
++            PS2Spu2Output clocked(60u, testNow);
++            uint64_t written = 0;
++            (void)feed(clocked, written);
++            g_now += 2000 * kMs;
++            t.Equals(feed(clocked, written), static_cast<size_t>(2880u),
++                     "after a pause the SPU2 should refill the ring, not make up two seconds");
++
++            // a device: it reads through the pause
++            g_now = 0;
++            PS2Spu2Output output(60u, testNow);
++            output.setDeviceAttached(true);
++            written = 0;
++            (void)feed(output, written);
++            std::vector<int16_t> out(480u * 2u);
++            uint64_t played = 0;
++            bool ordered = true;
++            for (uint32_t period = 0; period < 20u; ++period) // 200 ms with no service point: the ring holds 60
++            {
++                output.read(out.data(), 480u);
++                if (period < 6u)
++                    ordered = ordered && isCounting(out, played, 480u);
++                else if (period > 6u)
++                    ordered = ordered && std::all_of(out.begin(), out.end(), [](int16_t sample) { return sample == 0; });
++                played += period < 6u ? 480u : 0u;
++                g_now += 10 * kMs;
++            }
++            t.IsTrue(ordered, "the device should get the ring's frames, then silence");
++            PS2Spu2Output::Stats stats = output.stats();
++            t.IsTrue(stats.gaps == 1u && stats.framesMissing == 14u * 480u && stats.framesPlayed == 2880u,
++                     "the pause should be counted as one gap of fourteen periods");
++            // the IOP thread is back: the sound goes on with the frame after the last one played
++            t.Equals(feed(output, written), static_cast<size_t>(2880u), "the SPU2 should refill the ring after the pause");
++            out.assign(480u * 2u, 0);
++            output.read(out.data(), 480u);
++            bool resumes = true;
++            for (size_t i = PS2Spu2Output::FadeFrames; i < 480u; ++i)
++                resumes = resumes && out[i * 2u] == static_cast<int16_t>(2880u + i);
++            t.IsTrue(resumes, "no frame should be lost or played twice around a gap");
++            stats = output.stats();
++            t.IsTrue(stats.gaps == 1u && !stats.clockDriven, "the device should still be the one that drains the ring");
++        });
++
++        tc.Run("a gap is entered and left with a ramp", [](TestCase &t)
++        {
++            g_now = 0;
++            PS2Spu2Output output(60u, testNow);
++            output.setDeviceAttached(true);
++            std::vector<int16_t> level(400u * 2u);
++            for (size_t i = 0; i < 400u; ++i)
++            {
++                level[i * 2u] = 16000;
++                level[i * 2u + 1u] = -16000;
++            }
++            output.writeFrames(level.data(), 100u);
++            std::vector<int16_t> out(300u * 2u, 0x5555);
++            output.read(out.data(), 300u);
++            bool steady = true, down = true, silent = true;
++            for (size_t i = 0; i < 100u; ++i)
++                steady = steady && out[i * 2u] == 16000 && out[i * 2u + 1u] == -16000;
++            for (size_t i = 100u; i < 100u + PS2Spu2Output::FadeFrames; ++i)
++                down = down && out[i * 2u] < out[(i - 1u) * 2u] && out[i * 2u] >= 0 && out[i * 2u + 1u] == -out[i * 2u];
++            for (size_t i = 100u + PS2Spu2Output::FadeFrames; i < 300u; ++i)
++                silent = silent && out[i * 2u] == 0 && out[i * 2u + 1u] == 0;
++            t.IsTrue(steady, "the frames before the gap should be untouched");
++            t.IsTrue(down && out[(100u + PS2Spu2Output::FadeFrames - 1u) * 2u] == 0,
++                     "the last sample should go down to silence step by step");
++            t.IsTrue(silent, "the rest of the gap should be silence");
++
++            output.writeFrames(level.data(), 400u);
++            out.assign(400u * 2u, 0x5555);
++            output.read(out.data(), 400u);
++            bool up = out[0] > 0 && out[0] < 1000, after = true;
++            for (size_t i = 1; i < PS2Spu2Output::FadeFrames; ++i)
++                up = up && out[i * 2u] > out[(i - 1u) * 2u] && out[i * 2u + 1u] == -out[i * 2u];
++            for (size_t i = PS2Spu2Output::FadeFrames; i < 400u; ++i)
++                after = after && out[i * 2u] == 16000 && out[i * 2u + 1u] == -16000;
++            t.IsTrue(up, "the sound should come back up from silence step by step");
++            t.IsTrue(after, "the frames after the ramp should be untouched");
++            t.Equals(output.stats().gaps, static_cast<uint64_t>(1u), "one gap should be counted");
++        });
++
++        tc.Run("a device that stops reading hands the ring to the host clock", [](TestCase &t)
++        {
++            g_now = 0;
++            PS2Spu2Output output(60u, testNow);
++            output.setDeviceAttached(true);
++            uint64_t written = 0;
++            // attached, but its first callback has not come: the clock drains the ring meanwhile
++            (void)feed(output, written);
++            g_now += 100 * kMs;
++            t.Equals(feed(output, written), static_cast<size_t>(2880u),
++                     "before the device's first read the host clock should drain the ring");
++            t.IsTrue(output.stats().clockDriven, "the host clock should be draining the ring");
++
++            // the device reads: it takes over
++            std::vector<int16_t> out(480u * 2u);
++            output.read(out.data(), 480u);
++            g_now += 10 * kMs;
++            t.Equals(feed(output, written), static_cast<size_t>(480u), "the device's period should be what the SPU2 makes");
++            t.IsFalse(output.stats().clockDriven, "a reading device should be the one that drains the ring");
++            const uint64_t discarded = output.stats().framesDiscarded;
++
++            // it stops (unplugged, or its thread is held up): after a quarter of a second the clock is back
++            g_now += 200 * kMs;
++            t.Equals(feed(output, written), static_cast<size_t>(0u), "a short silence of the device should change nothing");
++            g_now += 100 * kMs;
++            t.Equals(feed(output, written), static_cast<size_t>(0u), "the clock should start from the moment it takes over");
++            g_now += 20 * kMs;
++            t.Equals(feed(output, written), static_cast<size_t>(960u), "then the host clock should take 48 frames a millisecond");
++            t.IsTrue(output.stats().clockDriven && output.stats().framesDiscarded == discarded + 960u,
++                     "the frames should be counted as taken by the host clock");
++
++            // it comes back and gets the newest frames, not a quarter of a second of old ones
++            out.assign(480u * 2u, 0);
++            output.read(out.data(), 480u);
++            t.IsTrue(out[0] == static_cast<int16_t>(written - 2880u),
++                     "the device should go on with what the ring holds now");
++            output.setDeviceAttached(false);
++            g_now += 10 * kMs;
++            (void)feed(output, written);
++            t.IsTrue(output.stats().clockDriven, "a detached device should leave the ring to the host clock at once");
++        });
++
++        tc.Run("frames written beyond the ring's size are dropped", [](TestCase &t)
++        {
++            g_now = 0;
++            PS2Spu2Output output(60u, testNow);
++            output.setDeviceAttached(true);
++            const size_t capacity = output.capacityFrames();
++            std::vector<int16_t> frames;
++            counting(frames, 0u, capacity + 100u);
++            output.writeFrames(frames.data(), capacity + 100u);
++            t.Equals(output.bufferedFrames(), capacity, "the ring should be full");
++            t.Equals(output.stats().framesOverflowed, static_cast<uint64_t>(100u), "the frames that did not fit should be counted");
++            std::vector<int16_t> out(capacity * 2u);
++            output.read(out.data(), capacity);
++            t.IsTrue(isCounting(out, 0u, capacity), "the frames that were in the ring should not be overwritten");
++            t.Equals(output.framesWanted(), static_cast<size_t>(output.targetFrames()), "an emptied ring should want its level");
++        });
++
++        // The whole path with the IOP: a sound unit with nothing to play still advances with the host clock, exactly.
++        tc.Run("the IOP's SPU2 follows the output: 48,000 frames for a second of host time", [](TestCase &t)
++        {
++            g_now = 0;
++            PS2Spu2Output output(60u, testNow);
++            iop_test::Host host;
++            ps2x::iop::IopSubsystem subsystem(host);
++            subsystem.setSoundSink(&output);
++            subsystem.runEeCycles(255u * 8u); // the first service point: the ring is filled, the clock starts
++            t.Equals(iop_test::metric(subsystem, "spu2", "frames"), static_cast<uint64_t>(2880u),
++                     "the SPU2 should fill the ring at the first service point");
++            // A second of host time in 1 ms steps. The EE hands the IOP a ninth of the cycles of a real second (in
++            // steps small enough to run at once, whatever the emulation budget), then twice a real second's in the
++            // next one: the SPU2 does not care.
++            for (uint32_t ms = 0; ms < 1000u; ++ms)
++            {
++                g_now += kMs;
++                for (uint32_t step = 0; step < 16u; ++step)
++                    subsystem.runEeCycles(255u * 8u);
++            }
++            t.Equals(iop_test::metric(subsystem, "spu2", "frames"), static_cast<uint64_t>(2880u + 48000u),
++                     "a slow IOP clock should not slow the sound unit down");
++            for (uint32_t ms = 0; ms < 1000u; ++ms)
++            {
++                g_now += kMs;
++                for (uint32_t step = 0; step < 290u; ++step)
++                    subsystem.runEeCycles(255u * 8u);
++            }
++            t.Equals(iop_test::metric(subsystem, "spu2", "frames"), static_cast<uint64_t>(2880u + 96000u),
++                     "a fast IOP clock should not speed the sound unit up");
++            t.Equals(output.stats().framesMixed, static_cast<uint64_t>(2880u + 96000u),
++                     "every frame the SPU2 made should be in the output");
++            // without an output the SPU2 is clocked by IOP cycles again, 768 a frame from here on (it makes its
++            // frames in batches of 128 while nothing is due)
++            subsystem.setSoundSink(nullptr);
++            const uint64_t before = iop_test::metric(subsystem, "spu2", "frames");
++            for (uint32_t step = 0; step < 1506u; ++step) // 500 frames of IOP time
++                subsystem.runEeCycles(255u * 8u);
++            const uint64_t made = iop_test::metric(subsystem, "spu2", "frames") - before;
++            t.IsTrue(made > 500u - 130u && made <= 500u,
++                     "without an output the SPU2 should follow the IOP's cycles from the moment the output left");
++        });
++    });
++}

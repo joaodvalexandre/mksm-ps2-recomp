@@ -1,0 +1,722 @@
+diff --git a/ps2xIOP/include/ps2x/iop/iop_sound_sink.h b/ps2xIOP/include/ps2x/iop/iop_sound_sink.h
+new file mode 100644
+index 0000000..7994be7
+--- /dev/null
++++ b/ps2xIOP/include/ps2x/iop/iop_sound_sink.h
+@@ -0,0 +1,25 @@
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++
++namespace ps2x::iop
++{
++    // MKSM: where the SPU2's mixed output goes, and the clock the SPU2 runs on. With a sink set
++    // (IopSubsystem::setSoundSink) the SPU2 makes exactly the frames the sink asks for: the sink is the audio
++    // output's buffer, so the sound unit advances with the audio device (48,000 frames for each second the device
++    // plays), whatever the emulated IOP's own clock does. The driver's transfer interrupts are raised at the frame
++    // they belong to, and after one the SPU2 waits until the IOP has run the driver's refill. Without a sink the
++    // SPU2 is clocked by IOP cycles (one frame every 768) and keeps its frames to itself.
++    // Both functions are called on the thread that runs the IOP, at every service point of the emulator.
++    class IopSoundSink
++    {
++    public:
++        virtual ~IopSoundSink() = default;
++
++        // The stereo frames the output is short of right now; 0 while it has what it needs. Called very often.
++        virtual size_t framesWanted() noexcept = 0;
++        // Frames in playback order: interleaved signed 16-bit stereo at 48 kHz.
++        virtual void writeFrames(const int16_t *stereo, size_t frames) noexcept = 0;
++    };
++}
+diff --git a/ps2xIOP/include/ps2x/iop/iop_subsystem.h b/ps2xIOP/include/ps2x/iop/iop_subsystem.h
+index 68fec81..8361c54 100644
+--- a/ps2xIOP/include/ps2x/iop/iop_subsystem.h
++++ b/ps2xIOP/include/ps2x/iop/iop_subsystem.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include "ps2x/iop/iop_host.h"
++#include "ps2x/iop/iop_sound_sink.h"
+ #include "ps2x/iop/iop_types.h"
+ 
+ #include <memory>
+@@ -43,6 +44,10 @@ namespace ps2x::iop
+ 
+         [[nodiscard]] DebugSnapshot debugSnapshot() const;
+ 
++        // MKSM: the audio output the SPU2 feeds and is paced by (see iop_sound_sink.h). Not owned: it must outlive
++        // the subsystem or be taken away with nullptr first. Without one the SPU2 is clocked by IOP cycles.
++        void setSoundSink(IopSoundSink *sink) noexcept;
++
+     private:
+         class Impl;
+         std::unique_ptr<Impl> m_impl;
+diff --git a/ps2xIOP/src/emulator/core/iop_spu2.h b/ps2xIOP/src/emulator/core/iop_spu2.h
+index 6905c04..d3b89e9 100644
+--- a/ps2xIOP/src/emulator/core/iop_spu2.h
++++ b/ps2xIOP/src/emulator/core/iop_spu2.h
+@@ -93,6 +93,8 @@ namespace ps2x::iop::detail
+         [[nodiscard]] uint64_t nextEventCycle() const noexcept;
+         // the cycle up to which frames have been made
+         [[nodiscard]] uint64_t frameCycle() const noexcept { return m_lastCycle; }
++        // a new time base, with no frame made: the clock the owner counts the SPU2's cycles on has changed
++        void rebase(uint64_t cycle) noexcept { m_lastCycle = cycle; }
+ 
+         // ---- output: interleaved signed 16-bit stereo at 48 kHz, taken by the owner
+         [[nodiscard]] const std::vector<int16_t> &output() const noexcept { return m_output; }
+diff --git a/ps2xIOP/src/emulator/imports/iop_libsd.cpp b/ps2xIOP/src/emulator/imports/iop_libsd.cpp
+index 50985ef..56567f0 100644
+--- a/ps2xIOP/src/emulator/imports/iop_libsd.cpp
++++ b/ps2xIOP/src/emulator/imports/iop_libsd.cpp
+@@ -5,6 +5,7 @@
+ #include "../core/iop_spu2.h"
+ #include "../services/iop_rpc.h"
+ #include "ps2x/iop/iop_host.h"
++#include "ps2x/iop/iop_sound_sink.h"
+ 
+ #include <algorithm>
+ #include <cstdio>
+@@ -25,6 +26,11 @@ namespace ps2x::iop::detail
+         constexpr uint32_t kMaxEventsPerService = 1024u;
+         constexpr uint64_t kMaxInterruptsPerChannel = 4u;    // late interrupts beyond these are dropped
+         constexpr uint32_t kHandlerBudget = 100000u;
++        // paced by a sink: the sink is asked again after this many IOP cycles (56 us of IOP time), and a hold after
++        // a transfer interrupt ends after this many (3 ms: a refill takes a few thousand instructions, and a ring
++        // with one block in each half still gets 256 frames per hold, more than a device plays in that time)
++        constexpr uint64_t kPacedPollCycles = 2048u;
++        constexpr uint64_t kHoldCycles = 110592u;
+         constexpr uint32_t kAllVoices = 0xFFFFFFu;
+         constexpr uint32_t kSilentLoopAddress = 0x5000u;     // sound RAM right after the two cores' input areas
+         // the reverb work area of each effect mode, in units of 8 bytes (LIBSD.IRX 0x4A98)
+@@ -84,6 +90,11 @@ namespace ps2x::iop::detail
+         m_completions.clear();
+         m_effectMode = {};
+         m_servicing = false;
++        m_hold = false; // the sink stays: it belongs to the host
++        m_holdCycle = 0u;
++        m_pollCycle = 0u;
++        m_holds = 0u;
++        m_holdTimeouts = 0u;
+         m_interruptsDelivered = 0u;
+         m_completionsDelivered = 0u;
+         m_voiceTransfers = 0u;
+@@ -104,7 +115,15 @@ namespace ps2x::iop::detail
+         const uint32_t arguments[5] = {cpu.gpr[4], cpu.gpr[5], cpu.gpr[6], cpu.gpr[7],
+                                        m_trace ? m_memory.read32(cpu.gpr[29] + 16u) : 0u};
+         // every call first brings the SPU2 to its cycle, so that a key-on, a status or an ENVX read lands on its frame
+-        m_spu2.advanceTo(cycle);
++        if (!m_sink)
++        {
++            m_spu2.advanceTo(cycle);
++        }
++        else if (!m_servicing && cycle >= m_pollCycle) // paced: to what the output wants now
++        {
++            mixPaced();
++            m_pollCycle = cycle + kPacedPollCycles;
++        }
+         const bool handled = dispatch(ordinal, cpu, cycle);
+         if (!handled)
+             noteFallback(ordinal);
+@@ -407,7 +426,12 @@ namespace ps2x::iop::detail
+             }
+         } guard{*this};
+ 
+-        deliver(cycle, executor);
++        if (m_sink)
++        {
++            servicePaced(cycle, executor);
++            return;
++        }
++        (void)deliver(cycle, executor);
+         // each transfer interrupt at its own cycle: advance to the earliest event, deliver, repeat
+         for (uint32_t events = 0; events < kMaxEventsPerService; ++events)
+         {
+@@ -415,17 +439,84 @@ namespace ps2x::iop::detail
+             if (next > cycle)
+                 break;
+             m_spu2.advanceTo(next);
+-            deliver(next, executor);
++            (void)deliver(next, executor);
+         }
+         if (cycle >= m_spu2.frameCycle() + kBatchFrames * IopSpu2::CyclesPerFrame)
+             m_spu2.advanceTo(cycle);
+     }
+ 
++    // Paced by the output: the interrupts a libsd call left pending, then the frames the sink is short of, then the
++    // interrupts those raised. A block transfer handler that was called starts a hold (see iop_libsd.h): nothing
++    // more is mixed until the IOP has run what the handler woke, so the SPU2 never reads a half before its refill.
++    void IopLibsd::servicePaced(uint64_t cycle, IopGuestExecutor &executor)
++    {
++        if (m_hold && cycle - m_holdCycle >= kHoldCycles)
++        {
++            m_hold = false; // the IOP has not gone idle for 3 ms of its time: the SPU2 goes on
++            ++m_holdTimeouts;
++        }
++        for (uint32_t pass = 0; pass < 2u; ++pass)
++        {
++            if (deliver(cycle, executor))
++            {
++                m_hold = true;
++                m_holdCycle = cycle;
++                ++m_holds;
++            }
++            if (pass == 1u)
++                break;
++            mixPaced();
++            if (!interruptPending())
++                break;
++        }
++        m_pollCycle = cycle + kPacedPollCycles;
++    }
++
++    // The frames the sink wants, up to the first block fetch that completes a half: its interrupt is delivered
++    // before anything else is mixed. Each stretch ends at a block fetch, where the SPU2 can raise one.
++    void IopLibsd::mixPaced()
++    {
++        if (m_hold || interruptPending())
++            return;
++        for (uint64_t wanted = m_sink->framesWanted(); wanted != 0u;)
++        {
++            const uint64_t fetch = m_spu2.nextEventCycle();
++            const uint64_t toFetch = fetch == UINT64_MAX ? wanted : (fetch - m_spu2.frameCycle()) / IopSpu2::CyclesPerFrame;
++            const uint64_t frames = std::min(wanted, std::max<uint64_t>(toFetch, 1u));
++            m_spu2.advanceTo(m_spu2.frameCycle() + frames * IopSpu2::CyclesPerFrame);
++            m_sink->writeFrames(m_spu2.output().data(), m_spu2.pendingFrames());
++            m_spu2.clearOutput();
++            wanted -= frames;
++            if (interruptPending())
++                break;
++        }
++    }
++
++    void IopLibsd::setSink(IopSoundSink *sink, uint64_t cycle) noexcept
++    {
++        m_sink = sink;
++        m_hold = false;
++        m_pollCycle = 0u;
++        m_spu2.clearOutput();
++        m_spu2.rebase(cycle); // the frames the other clock made or did not make are not caught up with
++        refreshDue();
++    }
++
++    void IopLibsd::onIopIdle() noexcept
++    {
++        if (!m_hold)
++            return;
++        m_hold = false;
++        m_pollCycle = 0u; // the frames the hold kept back are mixed at the next service
++        refreshDue();
++    }
++
+     // One call of the channel's handler per block transfer interrupt the SPU2 raised (a half in loop mode, the
+     // buffer in a one-shot transfer) and per voice transfer whose completion is due. They are taken one at a time:
+-    // a handler that stops the channel drops the ones still pending.
+-    void IopLibsd::deliver(uint64_t cycle, IopGuestExecutor &executor)
++    // a handler that stops the channel drops the ones still pending. True: a block transfer handler was called.
++    bool IopLibsd::deliver(uint64_t cycle, IopGuestExecutor &executor)
+     {
++        bool blockHandlerCalled = false;
+         for (uint32_t channel = 0; channel < 2u; ++channel)
+         {
+             for (uint64_t calls = 0; m_delivered[channel] != m_spu2.inputInterrupts(channel); ++calls)
+@@ -436,7 +527,11 @@ namespace ps2x::iop::detail
+                     break;
+                 }
+                 ++m_delivered[channel];
+-                m_interruptsDelivered += callTransferHandler(channel, cycle, executor) ? 1u : 0u;
++                if (callTransferHandler(channel, cycle, executor))
++                {
++                    ++m_interruptsDelivered;
++                    blockHandlerCalled = true;
++                }
+             }
+             for (;;)
+             {
+@@ -448,6 +543,7 @@ namespace ps2x::iop::detail
+                 m_completionsDelivered += callTransferHandler(channel, cycle, executor) ? 1u : 0u;
+             }
+         }
++        return blockHandlerCalled;
+     }
+ 
+     // LIBSD's DMA interrupt (0x27E8) calls the handler registered at that moment with (channel, argument). With no
+@@ -484,11 +580,14 @@ namespace ps2x::iop::detail
+ 
+     void IopLibsd::refreshDue() noexcept
+     {
+-        m_eventCycle = std::min(m_spu2.nextEventCycle(), nextCompletionCycle());
++        // paced by a sink, the SPU2's block fetches are not events of the IOP clock: the sink is polled instead
++        m_eventCycle = m_sink ? nextCompletionCycle() : std::min(m_spu2.nextEventCycle(), nextCompletionCycle());
+         if (m_servicing)
+             m_dueCycle = UINT64_MAX;
+         else if (interruptPending())
+             m_dueCycle = 0u;
++        else if (m_sink)
++            m_dueCycle = std::min(m_eventCycle, m_pollCycle);
+         else
+             m_dueCycle = std::min(m_eventCycle, m_spu2.frameCycle() + kBatchFrames * IopSpu2::CyclesPerFrame);
+     }
+@@ -564,5 +663,8 @@ namespace ps2x::iop::detail
+         metrics.push_back({"voice_transfers", m_voiceTransfers, false});
+         metrics.push_back({"block_transfers", m_blockTransfers, false});
+         metrics.push_back({"libsd_fallbacks", m_fallbackOrdinals, false});
++        metrics.push_back({"paced", m_sink ? 1u : 0u, false});
++        metrics.push_back({"holds", m_holds, false});
++        metrics.push_back({"hold_timeouts", m_holdTimeouts, false});
+     }
+ }
+diff --git a/ps2xIOP/src/emulator/imports/iop_libsd.h b/ps2xIOP/src/emulator/imports/iop_libsd.h
+index f1bd90f..0dfae61 100644
+--- a/ps2xIOP/src/emulator/imports/iop_libsd.h
++++ b/ps2xIOP/src/emulator/imports/iop_libsd.h
+@@ -10,6 +10,7 @@
+ namespace ps2x::iop
+ {
+     class IopHost;
++    class IopSoundSink;
+ }
+ 
+ namespace ps2x::iop::detail
+@@ -28,6 +29,12 @@ namespace ps2x::iop::detail
+     // DMA interrupt does, at the IOP cycle the transfer completes: a block transfer when the last block of a half
+     // (loop mode) or of the buffer (one-shot) has been fetched, a voice transfer 512 cycles after the call or when
+     // the driver waits for it.
++    // The SPU2's clock: IOP cycles (768 a frame) on its own; with a sound sink (ps2x/iop/iop_sound_sink.h) the
++    // frames the sink asks for. The emulated IOP gets its cycles in bursts and loses some when it is busy, so its
++    // clock cannot feed an audio device; the sink is the device's buffer, and the SPU2 follows it. A block transfer
++    // interrupt is still raised at its frame, and after one the SPU2 holds until the IOP has run what the handler
++    // woke (no thread is ready any more, or kHoldCycles have run): the driver's refill of the half that was
++    // transferred lands before the SPU2 reads on, however many frames the sink is waiting for.
+     class IopLibsd
+     {
+     public:
+@@ -43,6 +50,10 @@ namespace ps2x::iop::detail
+         [[nodiscard]] uint64_t nextEventCycle(uint64_t fallback) const noexcept;
+         // the cycle from which serviceDue has work: cheap enough to test after every instruction
+         [[nodiscard]] uint64_t dueCycle() const noexcept { return m_dueCycle; }
++        // the output the SPU2 is paced by; null: the SPU2 is clocked by IOP cycles, from 'cycle' on. Not owned.
++        void setSink(IopSoundSink *sink, uint64_t cycle) noexcept;
++        // no IOP thread is ready: whatever the last transfer interrupt woke has run
++        void onIopIdle() noexcept;
+ 
+         void appendDebugMetrics(std::vector<DebugMetric> &metrics) const;
+ 
+@@ -71,7 +82,9 @@ namespace ps2x::iop::detail
+         uint32_t setEffectAttr(uint32_t core, uint32_t attributes);
+         uint32_t clearEffectWorkArea(uint32_t core, uint32_t mode);
+         [[nodiscard]] uint32_t effectEnd(uint32_t core) const;
+-        void deliver(uint64_t cycle, IopGuestExecutor &executor);
++        bool deliver(uint64_t cycle, IopGuestExecutor &executor);
++        void servicePaced(uint64_t cycle, IopGuestExecutor &executor);
++        void mixPaced();
+         bool callTransferHandler(uint32_t channel, uint64_t cycle, IopGuestExecutor &executor);
+         [[nodiscard]] uint64_t nextCompletionCycle() const noexcept;
+         [[nodiscard]] bool interruptPending() const noexcept;
+@@ -92,6 +105,12 @@ namespace ps2x::iop::detail
+         uint64_t m_dueCycle = UINT64_MAX;
+         uint64_t m_eventCycle = UINT64_MAX;
+         bool m_servicing = false;
++        IopSoundSink *m_sink = nullptr; // paced by the output when set
++        bool m_hold = false;            // paced: a transfer handler was called; the SPU2 waits for the driver
++        uint64_t m_holdCycle = 0u;      // the IOP cycle the hold began at
++        uint64_t m_pollCycle = 0u;      // paced: the IOP cycle from which the sink is asked again
++        uint64_t m_holds = 0u;
++        uint64_t m_holdTimeouts = 0u;
+ 
+         uint64_t m_interruptsDelivered = 0u;
+         uint64_t m_completionsDelivered = 0u;
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index 3f6423c..277397a 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -587,6 +587,7 @@ namespace ps2x::iop::detail
+                     IopThread *next = kernel.beginNextReady(totalCycles);
+                     if (!next)
+                     {
++                        libsd.onIopIdle(); // MKSM: the driver has answered its transfer interrupt: the SPU2 goes on
+                         uint64_t nextWake = kernel.nextWakeCycle(target);
+                         for (const auto &[irq, completionCycle] : pendingDmaInterrupts)
+                             nextWake = std::min(nextWake, completionCycle);
+@@ -930,6 +931,11 @@ namespace ps2x::iop::detail
+         return static_cast<uint32_t>(m_impl->rpc.serverCount());
+     }
+ 
++    void IopEmulator::setSoundSink(IopSoundSink *sink) noexcept
++    {
++        m_impl->libsd.setSink(sink, m_impl->totalCycles);
++    }
++
+     void IopEmulator::appendSoundMetrics(std::vector<DebugMetric> &metrics) const
+     {
+         m_impl->libsd.appendDebugMetrics(metrics);
+diff --git a/ps2xIOP/src/emulator/iop_emulator.h b/ps2xIOP/src/emulator/iop_emulator.h
+index 37a371a..c691890 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.h
++++ b/ps2xIOP/src/emulator/iop_emulator.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include "ps2x/iop/iop_host.h"
++#include "ps2x/iop/iop_sound_sink.h"
+ #include "ps2x/iop/iop_types.h"
+ 
+ #include <cstdint>
+@@ -43,6 +44,8 @@ namespace ps2x::iop::detail
+         [[nodiscard]] uint32_t rpcServerCount() const noexcept;
+         // MKSM: the sound counters (the 'spu2' debug row)
+         void appendSoundMetrics(std::vector<DebugMetric> &metrics) const;
++        // MKSM: the output the SPU2 is paced by (ps2x/iop/iop_sound_sink.h); null: clocked by IOP cycles
++        void setSoundSink(IopSoundSink *sink) noexcept;
+ 
+     private:
+         class Impl;
+diff --git a/ps2xIOP/src/iop_subsystem.cpp b/ps2xIOP/src/iop_subsystem.cpp
+index 373a3eb..e4fdb97 100644
+--- a/ps2xIOP/src/iop_subsystem.cpp
++++ b/ps2xIOP/src/iop_subsystem.cpp
+@@ -169,6 +169,11 @@ namespace ps2x::iop
+         m_impl->emulator.runEeCycles(eeCycles);
+     }
+ 
++    void IopSubsystem::setSoundSink(IopSoundSink *sink) noexcept // MKSM
++    {
++        m_impl->emulator.setSoundSink(sink);
++    }
++
+     RpcAbi IopSubsystem::selectRpcAbi(const RpcAbiRequest &request) const
+     {
+         for (const auto &service : m_impl->coreServices)
+diff --git a/ps2xIOP/tests/iop_emulator_tests.cpp b/ps2xIOP/tests/iop_emulator_tests.cpp
+index 98a3c0b..775a844 100644
+--- a/ps2xIOP/tests/iop_emulator_tests.cpp
++++ b/ps2xIOP/tests/iop_emulator_tests.cpp
+@@ -1,6 +1,7 @@
+ #include "ps2x/iop/iop_subsystem.h"
+ 
+ #include <algorithm>
++#include <array>
+ #include <chrono>
+ #include <cstdint>
+ #include <cstring>
+@@ -1443,6 +1444,310 @@ namespace
+         return expect(soundMetric(iop, "libsd_fallbacks") == 1u,
+                       "the spu2 debug row should count the ordinals that fell back");
+     }
++
++    // ---- MKSM: the SPU2 paced by a sound sink (ps2x/iop/iop_sound_sink.h) ----------------------------------------
++    // With a sink the SPU2 makes the frames the sink asks for instead of one every 768 IOP cycles. The tests use a
++    // sink that wants what they tell it to and keeps what it is given.
++
++    struct TestSoundSink final : IopSoundSink
++    {
++        size_t framesWanted() noexcept override { return wanted; }
++        void writeFrames(const int16_t *stereo, size_t frames) noexcept override
++        {
++            samples.insert(samples.end(), stereo, stereo + frames * 2u);
++            wanted -= std::min(wanted, frames);
++        }
++        [[nodiscard]] size_t frames() const noexcept { return samples.size() / 2u; }
++
++        size_t wanted = 0u;
++        std::vector<int16_t> samples; // interleaved left, right
++    };
++
++    // Takes the sink away when a test ends: the subsystem does not own it.
++    struct SoundSinkScope
++    {
++        SoundSinkScope(IopSubsystem &subsystem, IopSoundSink &sink) : iop(subsystem) { iop.setSoundSink(&sink); }
++        ~SoundSinkScope() { iop.setSoundSink(nullptr); }
++        IopSubsystem &iop;
++    };
++
++    constexpr uint32_t kT2 = 10u, kT3 = 11u, kT4 = 12u, kT5 = 13u, kT6 = 14u;
++    constexpr uint32_t mipsSh(uint32_t rt, uint32_t offset, uint32_t base)
++    {
++        return 0xA4000000u | (base << 21u) | (rt << 16u) | (offset & 0xFFFFu);
++    }
++    constexpr uint32_t mipsXori(uint32_t rt, uint32_t rs, uint32_t value)
++    {
++        return 0x38000000u | (rs << 21u) | (rt << 16u) | (value & 0xFFFFu);
++    }
++    constexpr uint32_t mipsSll(uint32_t rd, uint32_t rt, uint32_t shift) { return (rt << 16u) | (rd << 11u) | (shift << 6u); }
++    constexpr uint32_t mipsSrl(uint32_t rd, uint32_t rt, uint32_t shift) { return mipsSll(rd, rt, shift) | 2u; }
++    constexpr uint32_t mipsAddu(uint32_t rd, uint32_t rs, uint32_t rt)
++    {
++        return (rs << 21u) | (rt << 16u) | (rd << 11u) | 0x21u;
++    }
++    constexpr uint32_t mipsBne(uint32_t rs, uint32_t rt, int32_t instructions) // relative to the delay slot
++    {
++        return 0x14000000u | (rs << 21u) | (rt << 16u) | (static_cast<uint32_t>(instructions) & 0xFFFFu);
++    }
++    constexpr uint32_t mipsJ(uint32_t target) { return 0x08000000u | ((target >> 2u) & 0x03FFFFFFu); }
++
++    // A streamed sound refilled the way CRI's ADX driver does it: the transfer handler only signals a semaphore
++    // (handed to it through its argument), and a thread waiting on it writes the half the DMA has just finished,
++    // which it learns from sceSdBlockTransStatus. The 4 KB ring (two halves of two 256-frame blocks) starts out
++    // holding the samples 0..1023 on both sides, and every refill goes on counting: whatever plays a block twice or
++    // skips one shows in the output. With 'spinner' a second thread of lower priority never waits, so the IOP is
++    // never idle. State at kSoundState: +0 handler calls, +0xC the semaphore, +0x10 the next sample, +0x14 the
++    // thread, +0x18 refills, +0x1C what sceSdBlockTrans returned.
++    void writeRefillStreamDriverIrx(TestHost &host, uint32_t address, bool spinner)
++    {
++        constexpr uint32_t loadAddress = 0x00010000u;
++        constexpr uint32_t handlerEntry = loadAddress + 0x140u;
++        constexpr uint32_t threadEntry = loadAddress + 0x380u;
++        constexpr uint32_t spinnerEntry = loadAddress + 0x420u;
++        constexpr uint32_t threadDescriptor = loadAddress + 0x240u;
++        constexpr uint32_t spinnerDescriptor = loadAddress + 0x260u;
++        constexpr uint32_t semaphoreDescriptor = loadAddress + 0x280u;
++        constexpr uint32_t libsdTable = 0x2A0u;
++        constexpr uint32_t thbaseTable = 0x2E0u;
++        constexpr uint32_t thsemapTable = 0x320u;
++        constexpr uint32_t setHandlerStub = loadAddress + libsdTable + 20u;
++        constexpr uint32_t blockTransStub = setHandlerStub + 8u;
++        constexpr uint32_t blockStatusStub = setHandlerStub + 16u;
++        constexpr uint32_t createThreadStub = loadAddress + thbaseTable + 20u;
++        constexpr uint32_t startThreadStub = createThreadStub + 8u;
++        constexpr uint32_t createSemaStub = loadAddress + thsemapTable + 20u;
++        constexpr uint32_t signalSemaStub = createSemaStub + 8u;
++        constexpr uint32_t waitSemaStub = createSemaStub + 16u;
++        const auto stateInto = [](uint32_t reg) { return std::array<uint32_t, 2>{mipsLui(reg, kSoundState >> 16u), mipsOri(reg, reg, kSoundState)}; };
++
++        // t1 = the first byte of 'blocks' blocks, t2 = the first sample: each block is 256 left then 256 right samples
++        const auto fillBlocks = [](std::vector<uint32_t> &code, uint32_t blocks)
++        {
++            const std::initializer_list<uint32_t> words = {
++                mipsAddiu(kT5, kZero, static_cast<int32_t>(blocks)),
++                mipsAddiu(kT3, kZero, 256),                               // a block
++                mipsSh(kT2, 0u, kT1), mipsSh(kT2, 0x200u, kT1),           // a sample, left and right
++                mipsAddiu(kT2, kT2, 1), mipsAddiu(kT3, kT3, -1),
++                mipsBne(kT3, kZero, -5), mipsAddiu(kT1, kT1, 2),
++                mipsAddiu(kT5, kT5, -1),
++                mipsBne(kT5, kZero, -9), mipsAddiu(kT1, kT1, 0x200),      // over the right samples to the next block
++            };
++            code.insert(code.end(), words);
++        };
++        const auto append = [](std::vector<uint32_t> &code, std::initializer_list<uint32_t> words)
++        {
++            code.insert(code.end(), words);
++        };
++
++        std::vector<uint32_t> start;
++        append(start, {mipsAddiu(kSp, kSp, -0x20), mipsSw(kRa, 0x1Cu, kSp),
++                       mipsLui(kT1, kSoundRing >> 16u), mipsOri(kT2, kZero, 0u)});
++        fillBlocks(start, 4u);                                            // the ring holds 0..1023
++        append(start, {stateInto(kT0)[0], stateInto(kT0)[1], mipsSw(kT2, 0x10u, kT0),
++                       mipsLui(kA0, semaphoreDescriptor >> 16u), mipsOri(kA0, kA0, semaphoreDescriptor),
++                       mipsJal(createSemaStub), kNop,
++                       stateInto(kT0)[0], stateInto(kT0)[1], mipsSw(kV0, 0x0Cu, kT0),
++                       mipsLui(kA0, threadDescriptor >> 16u), mipsOri(kA0, kA0, threadDescriptor),
++                       mipsJal(createThreadStub), kNop,
++                       stateInto(kT0)[0], stateInto(kT0)[1], mipsSw(kV0, 0x14u, kT0),
++                       mipsAddu(kA0, kV0, kZero), mipsOri(kA1, kZero, 0u),
++                       mipsJal(startThreadStub), kNop});
++        if (spinner)
++        {
++            append(start, {mipsLui(kA0, spinnerDescriptor >> 16u), mipsOri(kA0, kA0, spinnerDescriptor),
++                           mipsJal(createThreadStub), kNop,
++                           mipsAddu(kA0, kV0, kZero), mipsOri(kA1, kZero, 0u),
++                           mipsJal(startThreadStub), kNop});
++        }
++        append(start, {mipsOri(kA0, kZero, 0u),                                              // channel 0
++                       mipsLui(kA1, handlerEntry >> 16u), mipsOri(kA1, kA1, handlerEntry),
++                       mipsLui(kA2, (kSoundState + 0x0Cu) >> 16u), mipsOri(kA2, kA2, kSoundState + 0x0Cu),
++                       mipsJal(setHandlerStub), kNop,                                        // sceSdSetTransIntrHandler
++                       mipsOri(kA0, kZero, 0u), mipsOri(kA1, kZero, 0x10u),                  // channel 0, write | loop
++                       mipsLui(kA2, kSoundRing >> 16u), mipsOri(kA3, kZero, 0x1000u),
++                       mipsSw(kZero, 0x10u, kSp),
++                       mipsJal(blockTransStub), kNop,                                        // sceSdBlockTrans
++                       stateInto(kT0)[0], stateInto(kT0)[1], mipsSw(kV0, 0x1Cu, kT0),
++                       mipsLw(kRa, 0x1Cu, kSp), mipsOri(kV0, kZero, 0u),
++                       kJrRa, mipsAddiu(kSp, kSp, 0x20)});
++
++        // the handler: one more call, and the semaphore its argument points at is signalled
++        const std::vector<uint32_t> handler = {
++            stateInto(kT0)[0], stateInto(kT0)[1],
++            mipsLw(kT1, 0u, kT0), kNop, mipsAddiu(kT1, kT1, 1), mipsSw(kT1, 0u, kT0),
++            mipsAddiu(kSp, kSp, -0x18), mipsSw(kRa, 0x10u, kSp),
++            mipsLw(kA0, 0u, kA1), kNop,
++            mipsJal(signalSemaStub), kNop,                                // iSignalSema
++            mipsLw(kRa, 0x10u, kSp), kNop,
++            kJrRa, mipsAddiu(kSp, kSp, 0x18),
++        };
++
++        // the thread: waits for the handler, then refills the half the DMA has left
++        std::vector<uint32_t> thread;
++        append(thread, {stateInto(kT0)[0], stateInto(kT0)[1],
++                        mipsLw(kA0, 0x0Cu, kT0), kNop,
++                        mipsJal(waitSemaStub), kNop,                      // WaitSema
++                        mipsOri(kA0, kZero, 0u), mipsOri(kA1, kZero, 0u),
++                        mipsJal(blockStatusStub), kNop,                   // sceSdBlockTransStatus
++                        mipsSrl(kT0, kV0, 24u),                           // the half the DMA is on
++                        mipsXori(kT0, kT0, 1u),                           // the half it has finished
++                        mipsSll(kT0, kT0, 11u),                           // 0x800 bytes a half
++                        mipsLui(kT1, kSoundRing >> 16u), mipsAddu(kT1, kT1, kT0),
++                        stateInto(kT4)[0], stateInto(kT4)[1],
++                        mipsLw(kT2, 0x10u, kT4), kNop});
++        fillBlocks(thread, 2u);
++        append(thread, {mipsSw(kT2, 0x10u, kT4),
++                        mipsLw(kT6, 0x18u, kT4), kNop, mipsAddiu(kT6, kT6, 1), mipsSw(kT6, 0x18u, kT4),
++                        mipsJ(threadEntry), kNop});
++
++        // 0x000 start, 0x140 handler, 0x200 state, 0x240.. descriptors and import tables, 0x380 thread, 0x420 spinner
++        std::vector<uint8_t> segment(0x480u, 0u);
++        const auto place = [&](uint32_t offset, const std::vector<uint32_t> &words)
++        {
++            std::memcpy(segment.data() + offset, words.data(), words.size() * sizeof(uint32_t));
++        };
++        (void)expect(start.size() * 4u <= handlerEntry - loadAddress && handler.size() * 4u <= 0xC0u &&
++                         thread.size() * 4u <= spinnerEntry - threadEntry,
++                     "the refilling stream driver does not fit its layout");
++        place(0u, start);
++        place(handlerEntry - loadAddress, handler);
++        place(threadEntry - loadAddress, thread);
++        putWords(segment, spinnerEntry - loadAddress, {mipsJ(spinnerEntry), kNop});
++        putWords(segment, threadDescriptor - loadAddress, {0x02000000u, 0u, threadEntry, 0x400u, 0x20u});
++        putWords(segment, spinnerDescriptor - loadAddress, {0x02000000u, 0u, spinnerEntry, 0x400u, 0x60u});
++        putWords(segment, semaphoreDescriptor - loadAddress, {0u, 0u, 0u, 1u});
++        putLibsdImports(segment, libsdTable, {26u, 18u, 20u});
++        putWords(segment, thbaseTable, {0x41E00000u, 0u, 0x00000101u, 0x61626874u, 0x00006573u, // "thbase"
++                                        kJrRa, 0x24000004u, kJrRa, 0x24000006u});
++        putWords(segment, thsemapTable, {0x41E00000u, 0u, 0x00000101u, 0x65736874u, 0x0070616Du, // "thsemap"
++                                         kJrRa, 0x24000004u, kJrRa, 0x24000007u, kJrRa, 0x24000008u});
++        writeSoundIrx(host, address, loadAddress, segment);
++    }
++
++    // The ring's samples reach the output at close to full scale: the sound input of core 0 at full volume, and both
++    // master volumes.
++    void routeSoundInputToOutput(TestHost &host, IopSubsystem &iop)
++    {
++        (void)callLibsd(host, iop, 5u, 0x0800u, 0x00C0u); // MMIX of core 0: the input, left and right
++        (void)callLibsd(host, iop, 5u, 0x0F80u, 0x7FFFu); // BVOLL
++        (void)callLibsd(host, iop, 5u, 0x1080u, 0x7FFFu); // BVOLR
++        for (const uint32_t entry : {0x0980u, 0x0A80u, 0x0981u, 0x0A81u}) // MVOLL and MVOLR of both cores
++            (void)callLibsd(host, iop, 5u, entry, 0x3FFFu);
++    }
++
++    // The counting stream comes out in order: both sides equal, never a step back, and no step larger than the
++    // rounding of the three volumes allows.
++    bool streamIsContinuous(const TestSoundSink &sink)
++    {
++        for (size_t frame = 0; frame < sink.frames(); ++frame)
++        {
++            const int left = sink.samples[frame * 2u], right = sink.samples[frame * 2u + 1u];
++            if (left != right)
++                return false;
++            if (frame != 0u && (left < sink.samples[(frame - 1u) * 2u] || left > sink.samples[(frame - 1u) * 2u] + 2))
++                return false;
++        }
++        return true;
++    }
++
++    // Runs the IOP in small steps until the sink has the frames or the IOP has run 'limit' cycles.
++    void runIopForFrames(IopSubsystem &iop, const TestSoundSink &sink, size_t frames, uint64_t limit)
++    {
++        const uint64_t end = iopCycles(iop) + limit;
++        while (sink.frames() < frames && iopCycles(iop) < end)
++            runIopUntil(iop, iopCycles(iop) + 255u);
++    }
++
++    bool pacedSpu2FollowsSink(TestHost &host, IopSubsystem &iop)
++    {
++        TestSoundSink sink;
++        const SoundSinkScope scope(iop, sink);
++        if (!expect(soundMetric(iop, "paced") == 1u, "the spu2 debug row should say the SPU2 is paced")) return false;
++
++        // 20 ms of the IOP's clock while the output wants nothing: the sound unit stands still
++        runIopUntil(iop, iopCycles(iop) + 20u * 36864u);
++        if (!expect(soundMetric(iop, "frames") == 0u && sink.frames() == 0u,
++                    "a paced SPU2 should make no frame the output did not ask for")) return false;
++
++        // the output is 480 frames short: it gets exactly those, at once
++        sink.wanted = 480u;
++        runIopUntil(iop, iopCycles(iop) + 4096u);
++        if (!expect(sink.frames() == 480u && sink.wanted == 0u && soundMetric(iop, "frames") == 480u,
++                    "a paced SPU2 should make the frames the output is short of")) return false;
++        if (!expect(std::all_of(sink.samples.begin(), sink.samples.end(), [](int16_t sample) { return sample == 0; }),
++                    "an idle sound unit should give silence")) return false;
++
++        // a voice keyed on now is in the very next frames the output asks for
++        const uint8_t block[16] = {0x00, 0x07, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11};
++        if (!expect(iop.writeMemory(kSoundSource, block, sizeof(block)), "could not fill IOP RAM")) return false;
++        (void)callLibsd(host, iop, 17u, 0u, 8u, kSoundSource, 0x00020000u, sizeof(block)); // upload
++        (void)callLibsd(host, iop, 9u, 0x2000u, 0x00020000u); // SSA of voice 0 on core 0
++        (void)callLibsd(host, iop, 5u, 0x0000u, 0x3FFFu);     // VOLL
++        (void)callLibsd(host, iop, 5u, 0x0100u, 0x3FFFu);     // VOLR
++        (void)callLibsd(host, iop, 5u, 0x0200u, 0x1000u);     // PITCH: 48 kHz
++        (void)callLibsd(host, iop, 5u, 0x0300u, 0x000Fu);     // ADSR1: fastest attack
++        (void)callLibsd(host, iop, 7u, 0x1800u, 1u);          // VMIXL
++        (void)callLibsd(host, iop, 7u, 0x1A00u, 1u);          // VMIXR
++        for (const uint32_t entry : {0x0980u, 0x0A80u, 0x0981u, 0x0A81u})
++            (void)callLibsd(host, iop, 5u, entry, 0x3FFFu);   // the master volumes
++        sink.samples.clear();
++        (void)callLibsd(host, iop, 7u, 0x1500u, 1u);          // KON
++        sink.wanted = 256u;
++        runIopUntil(iop, iopCycles(iop) + 4096u);
++        if (!expect(sink.frames() == 256u, "the output should get the frames it asked for after the key-on")) return false;
++        return expect(sink.samples[2u * 255u] > 3000 && sink.samples[2u * 255u + 1u] > 3000,
++                      "the keyed-on voice should be heard in the frames the output asked for");
++    }
++
++    bool pacedSpu2WaitsForRefill(TestHost &host, IopSubsystem &iop)
++    {
++        TestSoundSink sink;
++        const SoundSinkScope scope(iop, sink);
++        routeSoundInputToOutput(host, iop);
++        writeRefillStreamDriverIrx(host, 0x100u, false);
++        const ModuleLoadResult driver = iop.loadModuleBuffer(0x100u);
++        if (!expect(driver.handled && driver.startResult == 0 && iopWord(iop, kSoundState + 0x1Cu) == 0x800u,
++                    "the refilling stream driver did not start")) return false;
++        if (!expect(iopWord(iop, kSoundState) == 1u,
++                    "the first half should call the handler when the transfer starts")) return false;
++
++        // The output is short of twelve times what the ring holds. Each half is refilled by a thread after its
++        // interrupt, and the SPU2 must not read on before that thread has run: the stream comes out in order.
++        constexpr size_t frames = 12000u;
++        sink.wanted = frames;
++        runIopForFrames(iop, sink, frames, 4'000'000u);
++        if (!expect(sink.frames() == frames, "the output should get all the frames it asked for")) return false;
++        if (!expect(streamIsContinuous(sink), "no block should be played twice or skipped")) return false;
++        if (!expect(sink.samples[2u * (frames - 1u)] > 11900 && sink.samples[2u * (frames - 1u)] < 12000,
++                    "the last frame should be the stream's twelve-thousandth sample")) return false;
++        if (!expect(soundMetric(iop, "repeated_blocks") == 0u, "no block should be fetched twice unchanged")) return false;
++        const uint32_t interrupts = iopWord(iop, kSoundState), refills = iopWord(iop, kSoundState + 0x18u);
++        if (!expect(interrupts >= frames / 512u && (refills == interrupts || refills + 1u == interrupts),
++                    "every half should have been refilled once, after its interrupt")) return false;
++        return expect(soundMetric(iop, "holds") == interrupts && soundMetric(iop, "hold_timeouts") == 0u,
++                      "every transfer interrupt should hold the SPU2 until the IOP is idle again");
++    }
++
++    bool pacedHoldIsBounded(TestHost &host, IopSubsystem &iop)
++    {
++        TestSoundSink sink;
++        const SoundSinkScope scope(iop, sink);
++        routeSoundInputToOutput(host, iop);
++        writeRefillStreamDriverIrx(host, 0x100u, true); // with a thread that never waits: the IOP is never idle
++        const ModuleLoadResult driver = iop.loadModuleBuffer(0x100u);
++        if (!expect(driver.handled && driver.startResult == 0, "the refilling stream driver did not start")) return false;
++
++        // the hold after the first interrupt lasts 3 ms of IOP time (110,592 cycles), not for ever
++        sink.wanted = 2048u;
++        runIopUntil(iop, iopCycles(iop) + 100'000u);
++        if (!expect(sink.frames() == 0u, "the SPU2 should hold while the driver may still be refilling")) return false;
++        runIopForFrames(iop, sink, 2048u, 2'000'000u);
++        if (!expect(sink.frames() == 2048u, "a busy IOP should not stop the sound for ever")) return false;
++        if (!expect(soundMetric(iop, "hold_timeouts") >= 3u, "the holds should have ended on their bound")) return false;
++        return expect(streamIsContinuous(sink) && soundMetric(iop, "repeated_blocks") == 0u,
++                      "the refill thread outranks the busy one: the stream should still come out in order");
++    }
+ }
+ 
+ int main()
+@@ -1727,6 +2032,9 @@ int main()
+         {"a keyed-on voice raises ENVX", keyedOnVoiceRaisesEnvx},
+         {"sceSdInit leaves the sound unit as LIBSD's own init does", initLeavesLibsdState},
+         {"a libsd ordinal with no native form runs the loaded module's export", fallbackRunsModuleExport},
++        {"with a sound sink the SPU2 makes the frames the output asks for", pacedSpu2FollowsSink},
++        {"a paced SPU2 waits for the driver's refill after a transfer interrupt", pacedSpu2WaitsForRefill},
++        {"the wait for a refill ends when the IOP never goes idle", pacedHoldIsBounded},
+     };
+     for (const SoundTest &test : soundTests)
+     {

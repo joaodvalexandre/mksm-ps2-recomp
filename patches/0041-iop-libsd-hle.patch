@@ -1,0 +1,1443 @@
+diff --git a/ps2xIOP/CMakeLists.txt b/ps2xIOP/CMakeLists.txt
+index 0ae6a82..cc73438 100644
+--- a/ps2xIOP/CMakeLists.txt
++++ b/ps2xIOP/CMakeLists.txt
+@@ -20,6 +20,7 @@ add_library(ps2_iop STATIC
+     src/emulator/imports/iop_imports.cpp
+     src/emulator/imports/iop_intrman.cpp
+     src/emulator/imports/iop_ioman.cpp
++    src/emulator/imports/iop_libsd.cpp
+     src/emulator/imports/iop_loadcore.cpp
+     src/emulator/imports/iop_stdio.cpp
+     src/emulator/imports/iop_sysclib.cpp
+diff --git a/ps2xIOP/src/emulator/imports/iop_libsd.cpp b/ps2xIOP/src/emulator/imports/iop_libsd.cpp
+new file mode 100644
+index 0000000..50985ef
+--- /dev/null
++++ b/ps2xIOP/src/emulator/imports/iop_libsd.cpp
+@@ -0,0 +1,568 @@
++#include "iop_libsd.h"
++
++#include "../core/iop_cpu.h"
++#include "../core/iop_memory.h"
++#include "../core/iop_spu2.h"
++#include "../services/iop_rpc.h"
++#include "ps2x/iop/iop_host.h"
++
++#include <algorithm>
++#include <cstdio>
++#include <cstdlib>
++#include <iterator>
++#include <string>
++
++// MKSM: native libsd (see iop_libsd.h). The handler bodies come from the archived port's LIBSD overrides, checked
++// against the code of LIBSD.IRX (libsd 1.05); the offsets in the comments are that module's.
++namespace ps2x::iop::detail
++{
++    namespace
++    {
++        constexpr uint32_t kTransferError = static_cast<uint32_t>(-100); // LIBSD's error for a bad argument
++        constexpr uint32_t kTransferBusy = static_cast<uint32_t>(-210);  // the channel's DMA is still running
++        constexpr uint64_t kTransferCompletionCycles = 512u; // a voice transfer's interrupt comes shortly after the call
++        constexpr uint64_t kBatchFrames = 128u;              // with no event due, frames are made in batches
++        constexpr uint32_t kMaxEventsPerService = 1024u;
++        constexpr uint64_t kMaxInterruptsPerChannel = 4u;    // late interrupts beyond these are dropped
++        constexpr uint32_t kHandlerBudget = 100000u;
++        constexpr uint32_t kAllVoices = 0xFFFFFFu;
++        constexpr uint32_t kSilentLoopAddress = 0x5000u;     // sound RAM right after the two cores' input areas
++        // the reverb work area of each effect mode, in units of 8 bytes (LIBSD.IRX 0x4A98)
++        constexpr uint32_t kEffectWorkUnits[10] = {0x02, 0x4D8, 0x3E8, 0x908, 0xDFC, 0x15BC, 0x1ED8, 0x3008, 0x3008, 0x780};
++        constexpr uint32_t kTraceCalls = 256u;
++        constexpr uint32_t kTraceInterrupts = 64u;
++        constexpr uint64_t kTraceSummaryCycles = 5ull * 36'864'000ull; // 5 s of IOP time
++
++        // libsd ids (entry >> 8) used here
++        enum : uint32_t
++        {
++            IdVolL = 0x00, IdVolR = 0x01, IdPitch = 0x02, IdAdsr1 = 0x03, IdAdsr2 = 0x04, IdMmix = 0x08,
++            IdEvolL = 0x0B, IdEvolR = 0x0C, IdAvolL = 0x0D, IdAvolR = 0x0E, IdBvolL = 0x0F, IdBvolR = 0x10,
++            IdKon = 0x15, IdKoff = 0x16, IdEndx = 0x17, IdVmixL = 0x18, IdVmixER = 0x1B,
++            IdEsa = 0x1C, IdEea = 0x1D, IdSsa = 0x20,
++        };
++
++        // libsd entry codes: a voice's, a core's (switches, addresses, MMIX), and a core volume's (bit 7 set)
++        constexpr uint32_t voiceEntry(uint32_t id, uint32_t core, uint32_t voice) { return (id << 8u) | (voice << 1u) | core; }
++        constexpr uint32_t coreEntry(uint32_t id, uint32_t core) { return (id << 8u) | core; }
++        constexpr uint32_t volumeEntry(uint32_t id, uint32_t core) { return (id << 8u) | 0x80u | core; }
++
++        const char *ordinalName(uint16_t ordinal)
++        {
++            static constexpr const char *kNames[] = {
++                "start", "init", "deinit", "reserved", "sceSdInit", "sceSdSetParam", "sceSdGetParam",
++                "sceSdSetSwitch", "sceSdGetSwitch", "sceSdSetAddr", "sceSdGetAddr", "sceSdSetCoreAttr",
++                "sceSdGetCoreAttr", "sceSdNote2Pitch", "sceSdPitch2Note", "sceSdProcBatch", "sceSdProcBatchEx",
++                "sceSdVoiceTrans", "sceSdBlockTrans", "sceSdVoiceTransStatus", "sceSdBlockTransStatus",
++                "sceSdSetTransCallback", "sceSdSetIRQCallback", "sceSdSetEffectAttr", "sceSdGetEffectAttr",
++                "sceSdClearEffectWorkArea", "sceSdSetTransIntrHandler", "sceSdSetSpu2IntrHandler",
++                "sceSdGetTransIntrHandlerArgument", "sceSdGetSpu2IntrHandlerArgument", "sceSdStopTrans",
++                "sceSdCleanEffectWorkArea", "sceSdSetEffectMode", "sceSdSetEffectModeParams",
++            };
++            return ordinal < std::size(kNames) ? kNames[ordinal] : "?";
++        }
++
++        bool traceEnabled()
++        {
++            const char *flag = std::getenv("MKSM_TRACE_LIBSD");
++            return flag && *flag && *flag != '0';
++        }
++    }
++
++    IopLibsd::IopLibsd(IopHost &host, IopMemory &memory, IopSpu2 &spu2)
++        : m_host(host), m_memory(memory), m_spu2(spu2), m_trace(traceEnabled())
++    {
++        reset();
++    }
++
++    void IopLibsd::reset()
++    {
++        m_transferHandlers = {};
++        m_spu2Handler = {};
++        m_delivered = {};
++        m_half = {};
++        m_completions.clear();
++        m_effectMode = {};
++        m_servicing = false;
++        m_interruptsDelivered = 0u;
++        m_completionsDelivered = 0u;
++        m_voiceTransfers = 0u;
++        m_blockTransfers = 0u;
++        m_fellBack = {};
++        m_fallbackOrdinals = 0u;
++        m_warnedRead = false;
++        m_traceLines = 0u;
++        m_traceInterruptLines = 0u;
++        m_traceCounts = {};
++        m_traceInterrupts = 0u;
++        m_traceSummaryCycle = kTraceSummaryCycles;
++        refreshDue();
++    }
++
++    bool IopLibsd::dispatchImport(uint16_t ordinal, IopCpuState &cpu, uint64_t cycle)
++    {
++        const uint32_t arguments[5] = {cpu.gpr[4], cpu.gpr[5], cpu.gpr[6], cpu.gpr[7],
++                                       m_trace ? m_memory.read32(cpu.gpr[29] + 16u) : 0u};
++        // every call first brings the SPU2 to its cycle, so that a key-on, a status or an ENVX read lands on its frame
++        m_spu2.advanceTo(cycle);
++        const bool handled = dispatch(ordinal, cpu, cycle);
++        if (!handled)
++            noteFallback(ordinal);
++        if (m_trace)
++            trace(ordinal, arguments, cpu, handled, cycle);
++        refreshDue();
++        return handled;
++    }
++
++    bool IopLibsd::dispatch(uint16_t ordinal, IopCpuState &cpu, uint64_t cycle)
++    {
++        const uint32_t a0 = cpu.gpr[4], a1 = cpu.gpr[5], a2 = cpu.gpr[6], a3 = cpu.gpr[7];
++        const uint32_t entry = a0 & 0xFFFFu;
++        const uint32_t channel = a0 & 1u;
++        const auto fifth = [&] { return m_memory.read32(cpu.gpr[29] + 16u); }; // on the caller's stack
++        const auto setV0 = [&](uint32_t value) { cpu.gpr[2] = value; };
++        switch (ordinal)
++        {
++        case 4: // sceSdInit(flag)
++            setV0(init(a0));
++            return true;
++        case 5: // sceSdSetParam(entry, value)
++            m_spu2.setParam(entry, static_cast<uint16_t>(a1));
++            return true;
++        case 6: // sceSdGetParam(entry)
++            setV0(m_spu2.getParam(entry));
++            return true;
++        case 7: // sceSdSetSwitch(entry, mask)
++            m_spu2.setSwitch(entry, a1);
++            return true;
++        case 8: // sceSdGetSwitch(entry)
++            setV0(m_spu2.getSwitch(entry));
++            return true;
++        case 9: // sceSdSetAddr(entry, address)
++            m_spu2.setAddr(entry, a1);
++            return true;
++        case 10: // sceSdGetAddr(entry): EEA holds only the upper address bits, the others read as ones
++            setV0(((entry >> 8u) & 0xFFu) == IdEea ? effectEnd(entry & 1u) : m_spu2.getAddr(entry));
++            return true;
++        case 11: // sceSdSetCoreAttr(entry, value)
++            m_spu2.setCoreAttr(entry, a1 & 0xFFFFu);
++            return true;
++        case 12: // sceSdGetCoreAttr(entry)
++            setV0(m_spu2.getCoreAttr(entry));
++            return true;
++        case 17: // sceSdVoiceTrans(channel, mode, iopAddress, spuAddress, size)
++            setV0(voiceTrans(channel, a1 & 0xFFFFu, a2, a3, fifth(), cycle));
++            return true;
++        case 18: // sceSdBlockTrans(channel, mode, iopAddress, size, startAddress)
++            setV0(blockTrans(channel, a1 & 0xFFFFu, a2, a3, fifth()));
++            return true;
++        case 19: // sceSdVoiceTransStatus(channel, flag)
++            setV0(voiceTransStatus(channel, a1 & 0xFFFFu, cycle));
++            return true;
++        case 20: // sceSdBlockTransStatus(channel, flag)
++            setV0(blockTransStatus(channel));
++            return true;
++        case 23: // sceSdSetEffectAttr(core, attributes)
++            setV0(setEffectAttr(a0 & 1u, a1));
++            return true;
++        case 25: // sceSdClearEffectWorkArea(core, channel, mode)
++        case 31: // sceSdCleanEffectWorkArea(core, channel, mode): LIBSD's version that does not wait for the DMA
++            setV0(clearEffectWorkArea(a0 & 1u, a2));
++            return true;
++        case 26: // sceSdSetTransIntrHandler(channel, handler, argument): returns the previous handler (LIBSD.IRX 0x3E5C)
++        {
++            Handler &handler = m_transferHandlers[channel];
++            setV0(handler.function);
++            handler = {a1, a2, cpu.gpr[28]};
++            return true;
++        }
++        case 27: // sceSdSetSpu2IntrHandler(handler, argument): stored; no SPU2 interrupt (IRQA) is raised
++            setV0(m_spu2Handler.function);
++            m_spu2Handler = {a0, a1, cpu.gpr[28]};
++            return true;
++        case 28: // sceSdGetTransIntrHandlerArgument(channel)
++            setV0(m_transferHandlers[channel].argument);
++            return true;
++        case 29: // sceSdGetSpu2IntrHandlerArgument()
++            setV0(m_spu2Handler.argument);
++            return true;
++        case 30: // sceSdStopTrans(channel)
++            setV0(stopTransfer(channel));
++            return true;
++        default:
++            return false;
++        }
++    }
++
++    // #4 sceSdInit(flag): the state LIBSD's own init leaves the sound unit in (LIBSD.IRX 0x45BC). Every init forgets
++    // the handlers, ends the transfers (a hot one drops LIBSD's transfer state, so its DMA is not continued), puts
++    // the voices on the silent loop at 0x5000 and sets the mixer. A cold init (flag 0) resets the sound unit first:
++    // the master and effect volumes, PMON, NON and the effect area go back to their defaults too.
++    uint32_t IopLibsd::init(uint32_t flag)
++    {
++        const bool cold = (flag & 0xFu) == 0u;
++        m_transferHandlers = {};
++        m_spu2Handler = {};
++        // shift 0 and filter 0; loop start, loop end and repeat; 28 samples of silence
++        const uint8_t silentLoop[16] = {0x00, 0x07};
++        m_spu2.writeSampleRam(kSilentLoopAddress, silentLoop, sizeof(silentLoop));
++        for (uint32_t core = 0; core < 2u; ++core)
++        {
++            (void)stopTransfer(core);
++            if (cold)
++            {
++                m_spu2.initCore(core); // voices and registers cleared: MVOL, EVOL, PMON and NON are 0
++                m_effectMode[core] = 0u;
++                const uint32_t end = core == 0u ? 0x1DFFFFu : 0x1FFFFFu; // EEA 0xE and 0xF
++                m_spu2.setAddr(coreEntry(IdEea, core), end);
++                m_spu2.setAddr(coreEntry(IdEsa, core), end - (kEffectWorkUnits[0] * 8u - 1u));
++            }
++            for (uint32_t voice = 0; voice < IopSpu2::VoicesPerCore; ++voice)
++            {
++                for (uint32_t id : {IdVolL, IdVolR, IdAdsr1, IdAdsr2})
++                    m_spu2.setParam(voiceEntry(id, core, voice), 0u);
++                m_spu2.setParam(voiceEntry(IdPitch, core, voice), 0x3FFFu);
++                m_spu2.setAddr(voiceEntry(IdSsa, core, voice), kSilentLoopAddress);
++            }
++            // every voice is keyed on and off on the silent loop: one that was playing goes quiet at once
++            m_spu2.setSwitch(coreEntry(IdKon, core), kAllVoices);
++            m_spu2.setSwitch(coreEntry(IdKoff, core), kAllVoices);
++            m_spu2.setSwitch(coreEntry(IdEndx, core), 0u);
++            // ATTR 0xC000 after a cold init, 0xC080 after a hot one: output on, no IRQ, noise clock 0; effects on (hot)
++            m_spu2.setCoreAttr(2u | core, cold ? 0u : 1u);
++            m_spu2.setCoreAttr(4u | core, 0u);
++            m_spu2.setCoreAttr(6u | core, 1u);
++            m_spu2.setCoreAttr(8u | core, 0u);
++            for (uint32_t id = IdVmixL; id <= IdVmixER; ++id) // VMIXL, VMIXEL, VMIXR, VMIXER: all voices
++                m_spu2.setSwitch(coreEntry(id, core), kAllVoices);
++            m_spu2.setParam(coreEntry(IdMmix, core), core == 0u ? 0x0FF0u : 0x0FFCu);
++            const uint16_t external = core == 1u ? 0x7FFFu : 0u; // core 1's AVOL lets core 0's output through
++            m_spu2.setParam(volumeEntry(IdAvolL, core), external);
++            m_spu2.setParam(volumeEntry(IdAvolR, core), external);
++            m_spu2.setParam(volumeEntry(IdBvolL, core), 0u);
++            m_spu2.setParam(volumeEntry(IdBvolR, core), 0u);
++        }
++        return 0u;
++    }
++
++    // #17 sceSdVoiceTrans: an immediate copy between IOP RAM and sound RAM, at the sound address rounded down to 16
++    // bytes as LIBSD sets TSA. Returns the size rounded up to 64 bytes, the length of LIBSD's DMA. A transfer by DMA
++    // (a write without mode bit 3, and every read) ends with the channel's transfer interrupt; a write by I/O has
++    // none. LIBSD refuses a transfer while the channel's DMA is busy (-210); a copy is never in the way, so it is
++    // accepted here.
++    uint32_t IopLibsd::voiceTrans(uint32_t channel, uint32_t mode, uint32_t iopAddress, uint32_t spuAddress,
++                                  uint32_t size, uint64_t cycle)
++    {
++        const uint32_t direction = mode & 3u;
++        if (size == 0u || direction > 1u || size > IopMemory::RamSize) // LIBSD accepts only write (0) and read (1)
++            return kTransferError;
++        std::vector<uint8_t> data(size);
++        const uint32_t soundAddress = spuAddress & ~0xFu;
++        if (direction == 0u) // write
++        {
++            if (!m_memory.readRam(iopAddress, data.data(), data.size()))
++                return kTransferError;
++            m_spu2.writeSampleRam(soundAddress, data.data(), data.size());
++        }
++        else // read
++        {
++            m_spu2.readSampleRam(soundAddress, data.data(), data.size());
++            if (!m_memory.writeRam(iopAddress, data.data(), data.size()))
++                return kTransferError;
++        }
++        ++m_voiceTransfers;
++        if (direction == 1u || (mode & 8u) == 0u)
++            m_completions.push_back({cycle + kTransferCompletionCycles, channel});
++        return (size + 63u) & ~63u;
++    }
++
++    // #19 sceSdVoiceTransStatus(channel, flag): voice transfers are copies that complete at once. With flag 1 LIBSD
++    // waits for the transfer, so its interrupt comes before the call returns: a pending one is made due now.
++    uint32_t IopLibsd::voiceTransStatus(uint32_t channel, uint32_t flag, uint64_t cycle)
++    {
++        if (flag == 1u)
++        {
++            for (Completion &completion : m_completions)
++            {
++                if (completion.channel == channel)
++                    completion.cycle = std::min(completion.cycle, cycle);
++            }
++        }
++        return 1u;
++    }
++
++    // #18 sceSdBlockTrans: the core input (ADMA). Mode 2 stops it; write (0) and write from the fifth argument (3)
++    // start it, looping with SD_BLOCK_LOOP (0x10). Returns what LIBSD returns (0x1C30): the size of each DMA, which
++    // is half the buffer in loop mode; -210 while a transfer runs on the channel; -100 for a bad argument.
++    uint32_t IopLibsd::blockTrans(uint32_t channel, uint32_t mode, uint32_t iopAddress, uint32_t size, uint32_t start)
++    {
++        const uint32_t direction = mode & 3u;
++        if (direction == 2u)
++            return stopTransfer(channel);
++        if (size == 0u)
++            return kTransferError;
++        if (m_spu2.inputBusy(channel))
++            return kTransferBusy;
++        if (direction == 1u)
++        {
++            if (!m_warnedRead)
++            {
++                m_warnedRead = true;
++                m_host.log(LogLevel::Warning, "[IOP] libsd: sceSdBlockTrans read mode is not supported");
++            }
++            return kTransferError;
++        }
++        const bool loop = (mode & 0x10u) != 0u;
++        uint32_t offset = 0u;
++        if (direction == 3u && start != 0u)
++        {
++            offset = start - iopAddress;
++            if (start < iopAddress || offset >= size)
++                return kTransferError;
++        }
++        m_half[channel] = 0u;
++        m_delivered[channel] = m_spu2.inputInterrupts(channel); // nothing of an earlier transfer is pending
++        if (!m_spu2.startInput(channel, iopAddress, size, loop, offset))
++            return kTransferError; // the buffer is not in IOP RAM, or holds no whole block
++        (void)blockTransStatus(channel); // the half the DMA is on now
++        ++m_blockTransfers;
++        return loop ? size >> 1u : size;
++    }
++
++    // #20 sceSdBlockTransStatus(channel, flag): (half << 24) | DMA address (LIBSD.IRX 0x2BA8). The address reads 0
++    // once the transfer is over, while LIBSD's half variable keeps its value until the next transfer starts: the
++    // driver compares the half with the last one it saw, also after it stopped the transfer.
++    uint32_t IopLibsd::blockTransStatus(uint32_t channel)
++    {
++        if (!m_spu2.inputBusy(channel))
++            return m_half[channel] << 24u;
++        const uint32_t status = m_spu2.inputStatus(channel);
++        m_half[channel] = status >> 24u;
++        return status;
++    }
++
++    // sceSdBlockTrans mode 2 and #30 sceSdStopTrans(channel): ends the channel's transfers. Like LIBSD (0x23F4) it
++    // returns the status of the block transfer it interrupted, 0 when none ran. Interrupts not delivered yet are
++    // dropped.
++    uint32_t IopLibsd::stopTransfer(uint32_t channel)
++    {
++        const uint32_t status = m_spu2.inputBusy(channel) ? blockTransStatus(channel) : 0u;
++        m_spu2.stopInput(channel);
++        m_delivered[channel] = m_spu2.inputInterrupts(channel);
++        m_completions.erase(std::remove_if(m_completions.begin(), m_completions.end(),
++                                           [&](const Completion &completion) { return completion.channel == channel; }),
++                            m_completions.end());
++        return status;
++    }
++
++    // the last byte of a core's reverb work area: EEA holds only the upper address bits (LIBSD.IRX 0x1100)
++    uint32_t IopLibsd::effectEnd(uint32_t core) const
++    {
++        return m_spu2.getAddr(coreEntry(IdEea, core)) | 0x1FFFFu;
++    }
++
++    // #23 sceSdSetEffectAttr(core, attributes): the effect type in the low byte of the mode at +4 places the work
++    // area below EEA; the 16-bit depths at +8 and +0xA are EVOL (LIBSD.IRX 0xC2C). Stored only: the reverb is not
++    // mixed yet, so the type's parameters, the delay and feedback at +0xC and +0x10, and the request to clear the
++    // work area (mode bit 8) have nothing to act on.
++    uint32_t IopLibsd::setEffectAttr(uint32_t core, uint32_t attributes)
++    {
++        const uint32_t type = m_memory.read32(attributes + 4u) & 0xFFu;
++        if (type >= std::size(kEffectWorkUnits))
++            return kTransferError;
++        m_effectMode[core] = type;
++        m_spu2.setAddr(coreEntry(IdEsa, core), effectEnd(core) - (kEffectWorkUnits[type] * 8u - 1u));
++        m_spu2.setParam(volumeEntry(IdEvolL, core), m_memory.read16(attributes + 8u));
++        m_spu2.setParam(volumeEntry(IdEvolR, core), m_memory.read16(attributes + 0xAu));
++        return 0u;
++    }
++
++    // #25 and #31: clear the work area an effect type takes below the core's EEA (LIBSD.IRX 0x660, 0x97C)
++    uint32_t IopLibsd::clearEffectWorkArea(uint32_t core, uint32_t mode)
++    {
++        const uint32_t type = mode & 0xFFu;
++        if (type >= std::size(kEffectWorkUnits))
++            return kTransferError;
++        if (type != 0u)
++        {
++            const uint32_t bytes = kEffectWorkUnits[type] * 8u;
++            m_spu2.clearSampleRam(effectEnd(core) - (bytes - 1u), bytes);
++        }
++        return 0u;
++    }
++
++    void IopLibsd::serviceDue(uint64_t cycle, IopGuestExecutor &executor)
++    {
++        if (cycle < m_dueCycle || m_servicing)
++            return;
++        m_servicing = true;
++        m_dueCycle = UINT64_MAX; // the guest handlers' own instructions do not come back here
++        struct ServiceGuard
++        {
++            IopLibsd &self;
++            ~ServiceGuard()
++            {
++                self.m_servicing = false;
++                self.refreshDue();
++            }
++        } guard{*this};
++
++        deliver(cycle, executor);
++        // each transfer interrupt at its own cycle: advance to the earliest event, deliver, repeat
++        for (uint32_t events = 0; events < kMaxEventsPerService; ++events)
++        {
++            const uint64_t next = std::min(m_spu2.nextEventCycle(), nextCompletionCycle());
++            if (next > cycle)
++                break;
++            m_spu2.advanceTo(next);
++            deliver(next, executor);
++        }
++        if (cycle >= m_spu2.frameCycle() + kBatchFrames * IopSpu2::CyclesPerFrame)
++            m_spu2.advanceTo(cycle);
++    }
++
++    // One call of the channel's handler per block transfer interrupt the SPU2 raised (a half in loop mode, the
++    // buffer in a one-shot transfer) and per voice transfer whose completion is due. They are taken one at a time:
++    // a handler that stops the channel drops the ones still pending.
++    void IopLibsd::deliver(uint64_t cycle, IopGuestExecutor &executor)
++    {
++        for (uint32_t channel = 0; channel < 2u; ++channel)
++        {
++            for (uint64_t calls = 0; m_delivered[channel] != m_spu2.inputInterrupts(channel); ++calls)
++            {
++                if (calls == kMaxInterruptsPerChannel)
++                {
++                    m_delivered[channel] = m_spu2.inputInterrupts(channel);
++                    break;
++                }
++                ++m_delivered[channel];
++                m_interruptsDelivered += callTransferHandler(channel, cycle, executor) ? 1u : 0u;
++            }
++            for (;;)
++            {
++                const auto due = std::find_if(m_completions.begin(), m_completions.end(), [&](const Completion &completion)
++                                              { return completion.channel == channel && completion.cycle <= cycle; });
++                if (due == m_completions.end())
++                    break;
++                m_completions.erase(due);
++                m_completionsDelivered += callTransferHandler(channel, cycle, executor) ? 1u : 0u;
++            }
++        }
++    }
++
++    // LIBSD's DMA interrupt (0x27E8) calls the handler registered at that moment with (channel, argument). With no
++    // handler it only sets the channel's event flag, which nothing waits on here.
++    bool IopLibsd::callTransferHandler(uint32_t channel, uint64_t cycle, IopGuestExecutor &executor)
++    {
++        const Handler handler = m_transferHandlers[channel];
++        if (handler.function == 0u)
++            return false;
++        if (m_trace)
++            traceInterrupt(channel, handler.function, handler.argument, cycle);
++        (void)executor.executeGuestFunctionWithBudget(handler.function, channel, handler.argument, 0u, 0u, handler.gp,
++                                                      kHandlerBudget);
++        return true;
++    }
++
++    uint64_t IopLibsd::nextCompletionCycle() const noexcept
++    {
++        uint64_t next = UINT64_MAX;
++        for (const Completion &completion : m_completions)
++            next = std::min(next, completion.cycle);
++        return next;
++    }
++
++    bool IopLibsd::interruptPending() const noexcept
++    {
++        return m_spu2.inputInterrupts(0u) != m_delivered[0] || m_spu2.inputInterrupts(1u) != m_delivered[1];
++    }
++
++    uint64_t IopLibsd::nextEventCycle(uint64_t fallback) const noexcept
++    {
++        return std::min(fallback, interruptPending() ? 0u : m_eventCycle);
++    }
++
++    void IopLibsd::refreshDue() noexcept
++    {
++        m_eventCycle = std::min(m_spu2.nextEventCycle(), nextCompletionCycle());
++        if (m_servicing)
++            m_dueCycle = UINT64_MAX;
++        else if (interruptPending())
++            m_dueCycle = 0u;
++        else
++            m_dueCycle = std::min(m_eventCycle, m_spu2.frameCycle() + kBatchFrames * IopSpu2::CyclesPerFrame);
++    }
++
++    void IopLibsd::noteFallback(uint16_t ordinal)
++    {
++        bool &noted = m_fellBack[std::min<size_t>(ordinal, m_fellBack.size() - 1u)];
++        if (noted)
++            return;
++        noted = true;
++        ++m_fallbackOrdinals;
++        m_host.log(LogLevel::Warning, std::string("[IOP] libsd #") + std::to_string(ordinal) + " (" +
++                                          ordinalName(ordinal) + ") has no native form: LIBSD.IRX's own export runs");
++    }
++
++    void IopLibsd::trace(uint16_t ordinal, const uint32_t (&arguments)[5], const IopCpuState &cpu, bool handled,
++                         uint64_t cycle)
++    {
++        if (ordinal < m_traceCounts.size())
++            ++m_traceCounts[ordinal];
++        if (m_traceLines < kTraceCalls)
++        {
++            ++m_traceLines;
++            char result[16] = "LIBSD.IRX"; // no native form: the result is the module's
++            if (handled && (ordinal == 5u || ordinal == 7u || ordinal == 9u || ordinal == 11u))
++                std::snprintf(result, sizeof(result), "void");
++            else if (handled)
++                std::snprintf(result, sizeof(result), "0x%x", cpu.gpr[2]);
++            char text[256];
++            std::snprintf(text, sizeof(text), "[mksm-libsd] #%u %s a0=0x%x a1=0x%x a2=0x%x a3=0x%x a4=0x%x -> %s cycle=%llu",
++                          ordinal, ordinalName(ordinal), arguments[0], arguments[1], arguments[2], arguments[3],
++                          arguments[4], result, static_cast<unsigned long long>(cycle));
++            m_host.log(LogLevel::Info, text);
++        }
++        if (cycle < m_traceSummaryCycle)
++            return;
++        std::string summary = "[mksm-libsd] calls in the last 5 s of IOP time:";
++        for (size_t i = 0; i < m_traceCounts.size(); ++i)
++        {
++            if (m_traceCounts[i] != 0u)
++                summary += " #" + std::to_string(i) + "x" + std::to_string(m_traceCounts[i]);
++        }
++        summary += ", transfer interrupts " + std::to_string(m_traceInterrupts) + ", frames " +
++                   std::to_string(m_spu2.framesProduced()) + ", repeated blocks " +
++                   std::to_string(m_spu2.repeatedBlocks());
++        m_host.log(LogLevel::Info, summary);
++        m_traceCounts = {};
++        m_traceInterrupts = 0u;
++        m_traceSummaryCycle = cycle + kTraceSummaryCycles;
++    }
++
++    void IopLibsd::traceInterrupt(uint32_t channel, uint32_t function, uint32_t argument, uint64_t cycle)
++    {
++        ++m_traceInterrupts;
++        if (m_traceInterruptLines >= kTraceInterrupts)
++            return;
++        ++m_traceInterruptLines;
++        char text[160];
++        std::snprintf(text, sizeof(text),
++                      "[mksm-libsd] transfer interrupt channel=%u handler=0x%x arg=0x%x status=0x%x cycle=%llu", channel,
++                      function, argument, blockTransStatus(channel), static_cast<unsigned long long>(cycle));
++        m_host.log(LogLevel::Info, text);
++    }
++
++    void IopLibsd::appendDebugMetrics(std::vector<DebugMetric> &metrics) const
++    {
++        metrics.push_back({"frames", m_spu2.framesProduced(), false});
++        metrics.push_back({"input_interrupts", m_interruptsDelivered, false});
++        metrics.push_back({"voice_completions", m_completionsDelivered, false});
++        metrics.push_back({"blocks_fetched", m_spu2.blocksFetched(), false});
++        metrics.push_back({"repeated_blocks", m_spu2.repeatedBlocks(), false});
++        metrics.push_back({"active_voices", m_spu2.activeVoices(), false});
++        metrics.push_back({"voice_transfers", m_voiceTransfers, false});
++        metrics.push_back({"block_transfers", m_blockTransfers, false});
++        metrics.push_back({"libsd_fallbacks", m_fallbackOrdinals, false});
++    }
++}
+diff --git a/ps2xIOP/src/emulator/imports/iop_libsd.h b/ps2xIOP/src/emulator/imports/iop_libsd.h
+new file mode 100644
+index 0000000..f1bd90f
+--- /dev/null
++++ b/ps2xIOP/src/emulator/imports/iop_libsd.h
+@@ -0,0 +1,112 @@
++#pragma once
++
++#include "ps2x/iop/iop_types.h"
++
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <vector>
++
++namespace ps2x::iop
++{
++    class IopHost;
++}
++
++namespace ps2x::iop::detail
++{
++    struct IopCpuState;
++    class IopGuestExecutor;
++    class IopMemory;
++    class IopSpu2;
++
++    // MKSM: Sony's libsd answered natively by export ordinal. The IRX sound drivers (CRI ADX, SNDF, SDRDRV) import
++    // libsd from LIBSD.IRX; its export table is the same in every build, so each "libsd" call is handed here before
++    // the import resolves into the module, and lands in the native SPU2 core (core/iop_spu2.h). LIBSD.IRX still
++    // loads, and the ordinals with no native form (Note2Pitch, ProcBatch, the effect modes...) run its own export.
++    // Arguments, results and error codes are the ones of LIBSD.IRX's own functions.
++    // Transfer interrupts call the handler set with sceSdSetTransIntrHandler with (channel, argument), as LIBSD's
++    // DMA interrupt does, at the IOP cycle the transfer completes: a block transfer when the last block of a half
++    // (loop mode) or of the buffer (one-shot) has been fetched, a voice transfer 512 cycles after the call or when
++    // the driver waits for it.
++    class IopLibsd
++    {
++    public:
++        IopLibsd(IopHost &host, IopMemory &memory, IopSpu2 &spu2);
++
++        void reset();
++
++        // false: the ordinal has no native form and the module's own export runs
++        [[nodiscard]] bool dispatchImport(uint16_t ordinal, IopCpuState &cpu, uint64_t cycle);
++        // delivers the transfer interrupts due at or before cycle, and makes the SPU2's frames up to it
++        void serviceDue(uint64_t cycle, IopGuestExecutor &executor);
++        // the next transfer completion (an idle IOP must not skip past it)
++        [[nodiscard]] uint64_t nextEventCycle(uint64_t fallback) const noexcept;
++        // the cycle from which serviceDue has work: cheap enough to test after every instruction
++        [[nodiscard]] uint64_t dueCycle() const noexcept { return m_dueCycle; }
++
++        void appendDebugMetrics(std::vector<DebugMetric> &metrics) const;
++
++    private:
++        struct Handler
++        {
++            uint32_t function = 0u;
++            uint32_t argument = 0u;
++            uint32_t gp = 0u;
++        };
++
++        struct Completion
++        {
++            uint64_t cycle = 0u;
++            uint32_t channel = 0u;
++        };
++
++        bool dispatch(uint16_t ordinal, IopCpuState &cpu, uint64_t cycle);
++        uint32_t init(uint32_t flag);
++        uint32_t voiceTrans(uint32_t channel, uint32_t mode, uint32_t iopAddress, uint32_t spuAddress, uint32_t size,
++                            uint64_t cycle);
++        uint32_t voiceTransStatus(uint32_t channel, uint32_t flag, uint64_t cycle);
++        uint32_t blockTrans(uint32_t channel, uint32_t mode, uint32_t iopAddress, uint32_t size, uint32_t start);
++        uint32_t blockTransStatus(uint32_t channel);
++        uint32_t stopTransfer(uint32_t channel);
++        uint32_t setEffectAttr(uint32_t core, uint32_t attributes);
++        uint32_t clearEffectWorkArea(uint32_t core, uint32_t mode);
++        [[nodiscard]] uint32_t effectEnd(uint32_t core) const;
++        void deliver(uint64_t cycle, IopGuestExecutor &executor);
++        bool callTransferHandler(uint32_t channel, uint64_t cycle, IopGuestExecutor &executor);
++        [[nodiscard]] uint64_t nextCompletionCycle() const noexcept;
++        [[nodiscard]] bool interruptPending() const noexcept;
++        void refreshDue() noexcept;
++        void noteFallback(uint16_t ordinal);
++        void trace(uint16_t ordinal, const uint32_t (&arguments)[5], const IopCpuState &cpu, bool handled, uint64_t cycle);
++        void traceInterrupt(uint32_t channel, uint32_t function, uint32_t argument, uint64_t cycle);
++
++        IopHost &m_host;
++        IopMemory &m_memory;
++        IopSpu2 &m_spu2;
++        std::array<Handler, 2> m_transferHandlers{};
++        Handler m_spu2Handler{};
++        std::array<uint64_t, 2> m_delivered{}; // block transfer interrupts consumed, per channel
++        std::array<uint32_t, 2> m_half{};       // LIBSD's half variable: kept when the block transfer is over
++        std::vector<Completion> m_completions;  // voice transfers by DMA waiting for their completion interrupt
++        std::array<uint32_t, 2> m_effectMode{};
++        uint64_t m_dueCycle = UINT64_MAX;
++        uint64_t m_eventCycle = UINT64_MAX;
++        bool m_servicing = false;
++
++        uint64_t m_interruptsDelivered = 0u;
++        uint64_t m_completionsDelivered = 0u;
++        uint64_t m_voiceTransfers = 0u;
++        uint64_t m_blockTransfers = 0u;
++        std::array<bool, 64> m_fellBack{};
++        uint32_t m_fallbackOrdinals = 0u;
++        bool m_warnedRead = false;
++
++        // MKSM_TRACE_LIBSD=1: the first calls and transfer interrupts, then per-ordinal counts every 5 s of IOP time
++        bool m_trace = false;
++        uint32_t m_traceLines = 0u;
++        uint32_t m_traceInterruptLines = 0u;
++        std::array<uint64_t, 64> m_traceCounts{};
++        uint64_t m_traceInterrupts = 0u;
++        uint64_t m_traceSummaryCycle = 0u;
++    };
++}
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index 873c8e3..c8ca497 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -6,8 +6,10 @@
+ #include "imports/iop_intrman.h"
+ #include "imports/iop_ioman.h"
+ #include "core/iop_kernel.h"
++#include "imports/iop_libsd.h"
+ #include "imports/iop_loadcore.h"
+ #include "core/iop_memory.h"
++#include "core/iop_spu2.h"
+ #include "services/iop_module_loader.h"
+ #include "services/iop_rpc.h"
+ #include "imports/iop_stdio.h"
+@@ -106,6 +108,8 @@ namespace ps2x::iop::detail
+               heaplib(memory),
+               intrman(memory),
+               timrman(),
++              spu2(memory),
++              libsd(host, memory, spu2),
+               ioman(memory),
+               cpuCore(memory),
+               imports(memory),
+@@ -124,6 +128,8 @@ namespace ps2x::iop::detail
+             cdvd.reset();
+             intrman.reset();
+             timrman.reset();
++            spu2.reset();
++            libsd.reset();
+             ioman.reset();
+             pendingDmaInterrupts.clear();
+             pendingGuestCallbacks.clear();
+@@ -134,6 +140,8 @@ namespace ps2x::iop::detail
+             eeCycleCarry = 0;
+             iopCycleDebt = 0;
+             budgetSpentNs = 0;
++            outsideRunCycles = 0;
++            lastRunCyclesExit = 0;
+             activeCpu = nullptr;
+             lastError.clear();
+             servicingDmaInterrupts = false;
+@@ -344,6 +352,10 @@ namespace ps2x::iop::detail
+             }
+             if (iequals(call.library, "heaplib") && heaplib.dispatchImport(call.ordinal, cpu))
+                 return ImportDisposition::Handled;
++            // MKSM: Sony's libsd drives the native SPU2 by export ordinal; the ordinals without a native form run
++            // the module's own export below.
++            if (iequals(call.library, "libsd") && libsd.dispatchImport(call.ordinal, cpu, totalCycles))
++                return ImportDisposition::Handled;
+ 
+             const uint32_t target = imports.resolve(call.library, call.ordinal, call.version);
+             if (target != 0u)
+@@ -413,6 +425,9 @@ namespace ps2x::iop::detail
+                     servicePendingDmaInterrupts();
+                 if (!servicingGuestCallbacks && !pendingGuestCallbacks.empty())
+                     servicePendingGuestCallbacks();
++                // MKSM: a sound transfer interrupt at its exact cycle, also inside a slice or a synchronous call
++                if (totalCycles >= libsd.dueCycle())
++                    libsd.serviceDue(totalCycles, *this);
+             }
+             activeCpu = previous;
+             return static_cast<uint32_t>(totalInstructions - start);
+@@ -560,12 +575,15 @@ namespace ps2x::iop::detail
+         {
+             try
+             {
++                // MKSM: IOP time spent outside the EE's cycle grants (synchronous RPC servers, module starts)
++                outsideRunCycles += totalCycles - lastRunCyclesExit;
+                 const uint64_t target = totalCycles + cycles;
+                 while (totalCycles < target)
+                 {
+                     servicePendingDmaInterrupts();
+                     servicePendingGuestCallbacks();
+                     timrman.serviceDue(totalCycles, *this);
++                    libsd.serviceDue(totalCycles, *this); // MKSM: the SPU2 is clocked by totalCycles
+                     IopThread *next = kernel.beginNextReady(totalCycles);
+                     if (!next)
+                     {
+@@ -575,6 +593,8 @@ namespace ps2x::iop::detail
+                         if (!pendingGuestCallbacks.empty())
+                             nextWake = std::min(nextWake, pendingGuestCallbacks.begin()->first);
+                         nextWake = timrman.nextEventCycle(nextWake);
++                        // MKSM: an idle IOP stops at the next sound block fetch, where a transfer interrupt may come
++                        nextWake = libsd.nextEventCycle(nextWake);
+                         totalCycles = std::max(totalCycles + 1u, std::min(target, nextWake));
+                         continue;
+                     }
+@@ -584,11 +604,16 @@ namespace ps2x::iop::detail
+                     if (totalCycles == before)
+                         ++totalCycles;
+                 }
++                libsd.serviceDue(totalCycles, *this);
++                // MKSM: nothing takes the frames yet: once two seconds have piled up, only the last one is kept
++                if (spu2.pendingFrames() >= 2u * 48000u)
++                    spu2.trimOutput(48000u);
+             }
+             catch (...)
+             {
+                 // Runtime scheduling must never throw through EeScheduler::accountCycles().
+             }
++            lastRunCyclesExit = totalCycles;
+         }
+ 
+         ModuleLoadResult loadImage(std::string path, std::span<const uint8_t> image, const void *arguments, uint32_t argumentSize)
+@@ -693,6 +718,8 @@ namespace ps2x::iop::detail
+         IopHeaplib heaplib;
+         IopIntrman intrman;
+         IopTimrman timrman;
++        IopSpu2 spu2;   // MKSM: native SPU2
++        IopLibsd libsd; // MKSM: libsd by export ordinal
+         IopIoman ioman;
+         IopCpuCore cpuCore;
+         IopImportRegistry imports;
+@@ -708,6 +735,8 @@ namespace ps2x::iop::detail
+         uint64_t iopCycleDebt = 0;                              // MKSM: large cycle steps still owed to the IOP
+         std::chrono::steady_clock::time_point budgetWindowStart; // MKSM: host time budget window
+         int64_t budgetSpentNs = 0;                              // MKSM: host time spent in the IOP this window
++        uint64_t outsideRunCycles = 0;                          // MKSM: cycles run between runCycles calls
++        uint64_t lastRunCyclesExit = 0;                         // MKSM: totalCycles when runCycles last returned
+         CpuState *activeCpu = nullptr;
+         std::string lastError;
+         bool servicingDmaInterrupts = false;
+@@ -867,4 +896,10 @@ namespace ps2x::iop::detail
+         return static_cast<uint32_t>(m_impl->rpc.serverCount());
+     }
+ 
++    void IopEmulator::appendSoundMetrics(std::vector<DebugMetric> &metrics) const
++    {
++        m_impl->libsd.appendDebugMetrics(metrics);
++        metrics.push_back({"outside_run_cycles", m_impl->outsideRunCycles, false});
++    }
++
+ }
+diff --git a/ps2xIOP/src/emulator/iop_emulator.h b/ps2xIOP/src/emulator/iop_emulator.h
+index 01b48df..37a371a 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.h
++++ b/ps2xIOP/src/emulator/iop_emulator.h
+@@ -41,6 +41,8 @@ namespace ps2x::iop::detail
+         [[nodiscard]] uint32_t loadedModuleCount() const noexcept;
+         [[nodiscard]] uint32_t threadCount() const noexcept;
+         [[nodiscard]] uint32_t rpcServerCount() const noexcept;
++        // MKSM: the sound counters (the 'spu2' debug row)
++        void appendSoundMetrics(std::vector<DebugMetric> &metrics) const;
+ 
+     private:
+         class Impl;
+diff --git a/ps2xIOP/src/iop_subsystem.cpp b/ps2xIOP/src/iop_subsystem.cpp
+index b498155..373a3eb 100644
+--- a/ps2xIOP/src/iop_subsystem.cpp
++++ b/ps2xIOP/src/iop_subsystem.cpp
+@@ -272,6 +272,12 @@ namespace ps2x::iop
+             service->appendDebugMetrics(row.metrics);
+             snapshot.services.push_back(std::move(row));
+         }
++
++        // MKSM: the native SPU2 and libsd counters
++        DebugService sound;
++        sound.name = "spu2";
++        m_impl->emulator.appendSoundMetrics(sound.metrics);
++        snapshot.services.push_back(std::move(sound));
+         return snapshot;
+     }
+ }
+diff --git a/ps2xIOP/tests/iop_emulator_tests.cpp b/ps2xIOP/tests/iop_emulator_tests.cpp
+index 1d5b1ad..98a3c0b 100644
+--- a/ps2xIOP/tests/iop_emulator_tests.cpp
++++ b/ps2xIOP/tests/iop_emulator_tests.cpp
+@@ -947,6 +947,502 @@ namespace
+             std::cerr << "FAIL: " << message << '\n';
+         return value;
+     }
++
++    // ---- MKSM: the native libsd (src/emulator/imports/iop_libsd.cpp) ---------------------------------------------
++    // The sound tests drive libsd the way the IRX sound drivers do: synthetic modules call its imports by ordinal,
++    // with no LIBSD.IRX loaded. The expected results are the ones of LIBSD.IRX's own functions.
++
++    constexpr uint64_t kSoundFrame = 768u;           // IOP cycles per 48 kHz frame
++    constexpr uint32_t kSoundRing = 0x00040000u;     // the stream driver's 4 KB ring: 4 blocks of 256 stereo samples
++    constexpr uint32_t kSoundHandler = 0x000100C0u;  // the stream driver's transfer handler
++    constexpr uint32_t kSoundState = 0x00010200u;    // +0 handler calls, +4 its a0, +8 its a1, +0xC.. start results
++    constexpr uint32_t kSoundSource = 0x00030000u;   // IOP RAM the tests fill
++    constexpr uint32_t kSoundCopy = 0x00030400u;     // IOP RAM a transfer reads sound RAM back into
++    constexpr uint32_t kSoundError = static_cast<uint32_t>(-100);
++    constexpr uint32_t kSoundBusy = static_cast<uint32_t>(-210);
++
++    // MIPS I encodings
++    constexpr uint32_t kZero = 0u, kV0 = 2u, kA0 = 4u, kA1 = 5u, kA2 = 6u, kA3 = 7u, kT0 = 8u, kT1 = 9u, kSp = 29u, kRa = 31u;
++    constexpr uint32_t kNop = 0u;
++    constexpr uint32_t kJrRa = 0x03E00008u;
++    constexpr uint32_t mipsLui(uint32_t rt, uint32_t value) { return 0x3C000000u | (rt << 16u) | (value & 0xFFFFu); }
++    constexpr uint32_t mipsOri(uint32_t rt, uint32_t rs, uint32_t value)
++    {
++        return 0x34000000u | (rs << 21u) | (rt << 16u) | (value & 0xFFFFu);
++    }
++    constexpr uint32_t mipsAddiu(uint32_t rt, uint32_t rs, int32_t value)
++    {
++        return 0x24000000u | (rs << 21u) | (rt << 16u) | (static_cast<uint32_t>(value) & 0xFFFFu);
++    }
++    constexpr uint32_t mipsSw(uint32_t rt, uint32_t offset, uint32_t base)
++    {
++        return 0xAC000000u | (base << 21u) | (rt << 16u) | (offset & 0xFFFFu);
++    }
++    constexpr uint32_t mipsLw(uint32_t rt, uint32_t offset, uint32_t base)
++    {
++        return 0x8C000000u | (base << 21u) | (rt << 16u) | (offset & 0xFFFFu);
++    }
++    constexpr uint32_t mipsJal(uint32_t target) { return 0x0C000000u | ((target >> 2u) & 0x03FFFFFFu); }
++
++    void putWords(std::vector<uint8_t> &segment, uint32_t offset, std::initializer_list<uint32_t> words)
++    {
++        for (const uint32_t word : words)
++        {
++            std::memcpy(segment.data() + offset, &word, sizeof(word));
++            offset += sizeof(word);
++        }
++    }
++
++    // The import table of "libsd" 1.05, as the drivers link it: one stub per ordinal, the first at +20.
++    void putLibsdImports(std::vector<uint8_t> &segment, uint32_t offset, std::initializer_list<uint32_t> ordinals)
++    {
++        putWords(segment, offset, {0x41E00000u, 0u, 0x00000105u, 0x7362696Cu, 0x00000064u});
++        offset += 20u;
++        for (const uint32_t ordinal : ordinals)
++        {
++            putWords(segment, offset, {kJrRa, 0x24000000u | ordinal});
++            offset += 8u;
++        }
++    }
++
++    // A one-segment module that loads at its link address.
++    void writeSoundIrx(TestHost &host, uint32_t address, uint32_t loadAddress, const std::vector<uint8_t> &segment)
++    {
++        constexpr uint32_t codeOffset = 0x100u;
++
++        ElfHeader header{};
++        header.ident[0] = 0x7Fu; header.ident[1] = 'E'; header.ident[2] = 'L'; header.ident[3] = 'F';
++        header.ident[4] = 1u; header.ident[5] = 1u; header.ident[6] = 1u;
++        header.type = 2u; header.machine = 8u; header.version = 1u;
++        header.entry = loadAddress; header.phoff = sizeof(ElfHeader);
++        header.ehsize = sizeof(ElfHeader); header.phentsize = sizeof(ProgramHeader); header.phnum = 1u;
++
++        ProgramHeader program{};
++        program.type = 1u; program.offset = codeOffset; program.vaddr = loadAddress; program.paddr = loadAddress;
++        program.filesz = static_cast<uint32_t>(segment.size()); program.memsz = program.filesz;
++        program.flags = 7u; program.align = 4u;
++
++        std::memset(host.guest.data() + address, 0, codeOffset + segment.size());
++        std::memcpy(host.guest.data() + address, &header, sizeof(header));
++        std::memcpy(host.guest.data() + address + sizeof(header), &program, sizeof(program));
++        std::memcpy(host.guest.data() + address + codeOffset, segment.data(), segment.size());
++    }
++
++    // Loads a module whose start function makes one libsd call and returns what the call returned: a second module
++    // calling into the sound state another one set up.
++    uint32_t callLibsd(TestHost &host, IopSubsystem &iop, uint32_t ordinal, uint32_t a0 = 0u, uint32_t a1 = 0u,
++                       uint32_t a2 = 0u, uint32_t a3 = 0u, uint32_t fifth = 0u)
++    {
++        constexpr uint32_t imageAddress = 0x1000u;
++        constexpr uint32_t loadAddress = 0x00011000u;
++        constexpr uint32_t importTable = 0x80u;
++
++        std::vector<uint8_t> segment(0x100u, 0u);
++        putWords(segment, 0u, {
++            mipsAddiu(kSp, kSp, -0x20), mipsSw(kRa, 0x1Cu, kSp),
++            mipsLui(kT0, fifth >> 16u), mipsOri(kT0, kT0, fifth), mipsSw(kT0, 0x10u, kSp), // the fifth argument
++            mipsLui(kA0, a0 >> 16u), mipsOri(kA0, kA0, a0),
++            mipsLui(kA1, a1 >> 16u), mipsOri(kA1, kA1, a1),
++            mipsLui(kA2, a2 >> 16u), mipsOri(kA2, kA2, a2),
++            mipsLui(kA3, a3 >> 16u), mipsOri(kA3, kA3, a3),
++            mipsJal(loadAddress + importTable + 20u), kNop,
++            mipsLw(kRa, 0x1Cu, kSp), kNop,
++            kJrRa, mipsAddiu(kSp, kSp, 0x20), // returns the call's v0
++        });
++        putLibsdImports(segment, importTable, {ordinal});
++        writeSoundIrx(host, imageAddress, loadAddress, segment);
++        const ModuleLoadResult loaded = iop.loadModuleBuffer(imageAddress);
++        (void)expect(loaded.handled && loaded.moduleId > 0, "a synthetic libsd caller did not load");
++        return static_cast<uint32_t>(loaded.startResult);
++    }
++
++    // The driver side of a streamed sound, as CRI ADX does it: the module sets its transfer handler on channel 0 with
++    // the argument 0x1234 (#26) and starts a looping block transfer of its ring (#18), then tries to start a second
++    // one. The handler counts its calls and keeps its two arguments.
++    void writeStreamDriverIrx(TestHost &host, uint32_t address)
++    {
++        constexpr uint32_t loadAddress = 0x00010000u;
++        constexpr uint32_t importTable = 0x100u;
++        constexpr uint32_t setHandlerStub = loadAddress + importTable + 20u;
++        constexpr uint32_t blockTransStub = setHandlerStub + 8u;
++
++        std::vector<uint8_t> segment(0x300u, 0u);
++        putWords(segment, 0u, {
++            mipsAddiu(kSp, kSp, -0x20), mipsSw(kRa, 0x1Cu, kSp),
++            mipsOri(kA0, kZero, 0u),                                              // channel 0
++            mipsLui(kA1, kSoundHandler >> 16u), mipsOri(kA1, kA1, kSoundHandler), // handler
++            mipsOri(kA2, kZero, 0x1234u),                                         // its argument
++            mipsJal(setHandlerStub), kNop,                                        // sceSdSetTransIntrHandler
++            mipsLui(kT0, kSoundState >> 16u), mipsOri(kT0, kT0, kSoundState),
++            mipsSw(kV0, 0x0Cu, kT0),
++            mipsOri(kA0, kZero, 0u), mipsOri(kA1, kZero, 0x10u),                  // channel 0, write | loop
++            mipsLui(kA2, kSoundRing >> 16u), mipsOri(kA3, kZero, 0x1000u),        // the ring and its size
++            mipsSw(kZero, 0x10u, kSp),
++            mipsJal(blockTransStub), kNop,                                        // sceSdBlockTrans
++            mipsLui(kT0, kSoundState >> 16u), mipsOri(kT0, kT0, kSoundState),
++            mipsSw(kV0, 0x10u, kT0),
++            mipsOri(kA0, kZero, 0u), mipsOri(kA1, kZero, 0x10u),
++            mipsLui(kA2, kSoundRing >> 16u), mipsOri(kA3, kZero, 0x1000u),
++            mipsJal(blockTransStub), kNop,                                        // again, while the first runs
++            mipsLui(kT0, kSoundState >> 16u), mipsOri(kT0, kT0, kSoundState),
++            mipsSw(kV0, 0x14u, kT0),
++            mipsLw(kRa, 0x1Cu, kSp), mipsOri(kV0, kZero, 0u),
++            kJrRa, mipsAddiu(kSp, kSp, 0x20),
++        });
++        putWords(segment, kSoundHandler - loadAddress, {
++            mipsLui(kT0, kSoundState >> 16u), mipsOri(kT0, kT0, kSoundState),
++            mipsLw(kT1, 0u, kT0), kNop,
++            mipsAddiu(kT1, kT1, 1), mipsSw(kT1, 0u, kT0),                         // one more call
++            mipsSw(kA0, 4u, kT0), mipsSw(kA1, 8u, kT0),                           // (channel, argument)
++            kJrRa, kNop,
++        });
++        putLibsdImports(segment, importTable, {26u, 18u});
++        writeSoundIrx(host, address, loadAddress, segment);
++    }
++
++    // A module standing for LIBSD.IRX: it registers a "libsd" export table whose functions return a marker each.
++    void writeLibsdExportsIrx(TestHost &host, uint32_t address)
++    {
++        constexpr uint32_t loadAddress = 0x00012000u;
++        constexpr uint32_t exportTable = 0x100u;
++        constexpr uint32_t importTable = 0x200u;
++        constexpr uint32_t otherExport = loadAddress + 0x50u;
++        constexpr uint32_t ownGetParam = loadAddress + 0x60u;
++        constexpr uint32_t ownNote2Pitch = loadAddress + 0x70u;
++
++        std::vector<uint8_t> segment(0x300u, 0u);
++        putWords(segment, 0u, {
++            mipsAddiu(kSp, kSp, -0x20), mipsSw(kRa, 0x1Cu, kSp),
++            mipsLui(kA0, (loadAddress + exportTable) >> 16u), mipsOri(kA0, kA0, loadAddress + exportTable),
++            mipsJal(loadAddress + importTable + 20u), kNop,                       // RegisterLibraryEntries
++            mipsLw(kRa, 0x1Cu, kSp), mipsOri(kV0, kZero, 0u),
++            kJrRa, mipsAddiu(kSp, kSp, 0x20),
++        });
++        putWords(segment, otherExport - loadAddress, {kJrRa, mipsOri(kV0, kZero, 0x11u)});
++        putWords(segment, ownGetParam - loadAddress, {kJrRa, mipsOri(kV0, kZero, 0x99u)});
++        putWords(segment, ownNote2Pitch - loadAddress, {kJrRa, mipsOri(kV0, kZero, 0x42u)});
++        putWords(segment, exportTable, {0x41C00000u, 0u, 0x00000105u, 0x7362696Cu, 0x00000064u});
++        for (uint32_t ordinal = 0; ordinal <= 13u; ++ordinal)
++        {
++            const uint32_t function = ordinal == 6u ? ownGetParam : ordinal == 13u ? ownNote2Pitch : otherExport;
++            putWords(segment, exportTable + 20u + ordinal * 4u, {function});
++        }
++        putWords(segment, importTable, {0x41E00000u, 0u, 0x00000101u, 0x64616F6Cu, 0x65726F63u, // "loadcore"
++                                        kJrRa, 0x24000006u});
++        writeSoundIrx(host, address, loadAddress, segment);
++    }
++
++    uint32_t iopWord(const IopSubsystem &iop, uint32_t address)
++    {
++        uint32_t value = 0xDEADBEEFu;
++        (void)iop.readMemory(address, &value, sizeof(value));
++        return value;
++    }
++
++    // A counter of the 'spu2' debug row.
++    uint64_t soundMetric(const IopSubsystem &iop, std::string_view name)
++    {
++        for (const DebugService &service : iop.debugSnapshot().services)
++        {
++            if (service.name != "spu2")
++                continue;
++            for (const DebugMetric &metric : service.metrics)
++            {
++                if (metric.name == name)
++                    return metric.value;
++            }
++        }
++        return UINT64_MAX;
++    }
++
++    uint64_t iopCycles(const IopSubsystem &iop)
++    {
++        return iop.debugSnapshot().emulatorCycles;
++    }
++
++    // Runs the IOP up to a cycle of its clock, in steps small enough to bypass the emulation budget.
++    void runIopUntil(IopSubsystem &iop, uint64_t cycle)
++    {
++        for (uint64_t now = iopCycles(iop); now < cycle; now = iopCycles(iop))
++            iop.runEeCycles(std::min<uint64_t>(cycle - now, 255u) * 8u);
++    }
++
++    size_t countLogs(const TestHost &host, std::string_view text)
++    {
++        return static_cast<size_t>(std::count_if(host.logs.begin(), host.logs.end(), [&](const std::string &message)
++                                                 { return message.find(text) != std::string::npos; }));
++    }
++
++    bool loopingBlockTransferCallsHandler(TestHost &host, IopSubsystem &iop)
++    {
++        writeStreamDriverIrx(host, 0x100u);
++        const ModuleLoadResult driver = iop.loadModuleBuffer(0x100u);
++        if (!expect(driver.handled && driver.startResult == 0, "the stream driver did not start")) return false;
++        if (!expect(iopWord(iop, kSoundState + 0x0Cu) == 0u,
++                    "sceSdSetTransIntrHandler should return no previous handler the first time")) return false;
++        if (!expect(iopWord(iop, kSoundState + 0x10u) == 0x800u,
++                    "sceSdBlockTrans in loop mode should return the size of one half")) return false;
++        if (!expect(iopWord(iop, kSoundState + 0x14u) == kSoundBusy,
++                    "a block transfer on a channel that is transferring should be refused with -210")) return false;
++
++        // the DMA fills the SPU2's two-block input at once, which completes the first half of the 4-block ring
++        if (!expect(iopWord(iop, kSoundState) == 1u,
++                    "the handler should be called once the first half has been fetched")) return false;
++        if (!expect(iopWord(iop, kSoundState + 4u) == 0u && iopWord(iop, kSoundState + 8u) == 0x1234u,
++                    "the transfer handler should be called with (channel, argument)")) return false;
++        if (!expect(callLibsd(host, iop, 20u) == (0x01000000u | (kSoundRing + 0x800u)),
++                    "sceSdBlockTransStatus should be (half 1 << 24) | DMA address")) return false;
++        if (!expect(callLibsd(host, iop, 28u) == 0x1234u,
++                    "sceSdGetTransIntrHandlerArgument should return the handler's argument")) return false;
++
++        // the second half is complete when its last block is fetched: when two blocks have played
++        runIopUntil(iop, 512u * kSoundFrame - 1u);
++        if (!expect(iopWord(iop, kSoundState) == 1u,
++                    "no interrupt should come before the last block of the second half is fetched")) return false;
++        runIopUntil(iop, 512u * kSoundFrame);
++        if (!expect(iopWord(iop, kSoundState) == 2u,
++                    "the handler should be called at the cycle the second half is complete")) return false;
++        if (!expect(soundMetric(iop, "frames") == 512u && soundMetric(iop, "blocks_fetched") == 4u &&
++                        soundMetric(iop, "input_interrupts") == 2u,
++                    "the spu2 debug row should count the frames, the block fetches and the interrupts")) return false;
++        if (!expect(callLibsd(host, iop, 20u) == kSoundRing,
++                    "the status should be half 0 and the start of the ring when the DMA starts over")) return false;
++        runIopUntil(iop, 1024u * kSoundFrame);
++        if (!expect(iopWord(iop, kSoundState) == 3u, "the first half should complete again one ring later")) return false;
++        if (!expect(soundMetric(iop, "outside_run_cycles") != 0u && soundMetric(iop, "outside_run_cycles") < 4096u,
++                    "only the module starts should count as IOP time outside the EE's cycle grants")) return false;
++
++        // stopping returns the status of the interrupted transfer; then the address reads 0 and the half stays
++        if (!expect(callLibsd(host, iop, 18u, 0u, 2u) == (0x01000000u | (kSoundRing + 0x800u)),
++                    "stopping a block transfer should return its status")) return false;
++        if (!expect(callLibsd(host, iop, 20u) == 0x01000000u,
++                    "a stopped transfer should read address 0 and keep LIBSD's half")) return false;
++        runIopUntil(iop, 2048u * kSoundFrame);
++        if (!expect(iopWord(iop, kSoundState) == 3u, "a stopped transfer should raise no interrupt")) return false;
++        if (!expect(callLibsd(host, iop, 26u, 0u, 0u, 0u) == kSoundHandler,
++                    "sceSdSetTransIntrHandler should return the previous handler")) return false;
++
++        // the channel is free again; "write from" (mode 3) starts at the block holding the fifth argument
++        if (!expect(callLibsd(host, iop, 18u, 0u, 0x13u, kSoundRing, 0x1000u, kSoundRing + 0xC10u) == 0x800u,
++                    "a stopped channel should accept a new transfer")) return false;
++        if (!expect(callLibsd(host, iop, 20u) == kSoundRing + 0x400u,
++                    "a transfer from the last block should wrap to the first half at once")) return false;
++        if (!expect(iopWord(iop, kSoundState) == 3u, "no handler should be called once it is removed")) return false;
++        if (!expect(callLibsd(host, iop, 30u) == kSoundRing + 0x400u,
++                    "sceSdStopTrans should return the status of the transfer it stopped")) return false;
++        if (!expect(callLibsd(host, iop, 18u, 0u, 0x13u, kSoundRing, 0x1000u, kSoundRing + 0x1000u) == kSoundError,
++                    "a start address outside the buffer should be refused with -100")) return false;
++        if (!expect(callLibsd(host, iop, 18u, 0u, 0x10u, 0x001FFC00u, 0x1000u) == kSoundError,
++                    "a buffer outside IOP RAM should be refused with -100")) return false;
++        if (!expect(callLibsd(host, iop, 18u, 0u, 0x10u, kSoundRing, 0u) == kSoundError,
++                    "an empty buffer should be refused with -100")) return false;
++        if (!expect(callLibsd(host, iop, 18u, 0u, 1u, kSoundRing, 0x1000u) == kSoundError &&
++                        countLogs(host, "sceSdBlockTrans read mode is not supported") == 1u,
++                    "a block transfer in read mode should be refused with a warning")) return false;
++        return expect(countLogs(host, "unhandled import") == 0u, "the libsd imports should be handled natively");
++    }
++
++    bool voiceTransCopies(TestHost &host, IopSubsystem &iop)
++    {
++        constexpr uint32_t sound = 0x00020000u;
++        uint8_t pattern[0x70];
++        for (size_t i = 0; i < sizeof(pattern); ++i)
++            pattern[i] = static_cast<uint8_t>(0x41u + i * 3u);
++        if (!expect(iop.writeMemory(kSoundSource, pattern, sizeof(pattern)), "could not fill IOP RAM")) return false;
++
++        // a write by DMA, then a read back into another buffer
++        if (!expect(callLibsd(host, iop, 17u, 0u, 0u, kSoundSource, sound, sizeof(pattern)) == 0x80u,
++                    "sceSdVoiceTrans should return the size rounded up to 64 bytes")) return false;
++        if (!expect(callLibsd(host, iop, 17u, 0u, 1u, kSoundCopy, sound, sizeof(pattern)) == 0x80u,
++                    "sceSdVoiceTrans should read sound RAM back")) return false;
++        uint8_t copy[sizeof(pattern)]{};
++        if (!expect(iop.readMemory(kSoundCopy, copy, sizeof(copy)) && std::memcmp(copy, pattern, sizeof(pattern)) == 0,
++                    "the bytes read from sound RAM should be the bytes written to it")) return false;
++        if (!expect(callLibsd(host, iop, 19u, 0u, 0u) == 1u,
++                    "sceSdVoiceTransStatus should report the transfer complete")) return false;
++
++        // by I/O (mode bit 3) on the other channel; LIBSD's transfer address drops the low 4 bits of the sound address
++        if (!expect(callLibsd(host, iop, 17u, 1u, 8u, kSoundSource, sound + 0x1008u, 0x40u) == 0x40u,
++                    "sceSdVoiceTrans by I/O should return the size")) return false;
++        if (!expect(callLibsd(host, iop, 17u, 1u, 1u, kSoundCopy + 0x100u, sound + 0x1000u, 0x40u) == 0x40u,
++                    "sceSdVoiceTrans should read on channel 1")) return false;
++        if (!expect(iop.readMemory(kSoundCopy + 0x100u, copy, 0x40u) && std::memcmp(copy, pattern, 0x40u) == 0,
++                    "a transfer should start at the sound address rounded down to 16 bytes")) return false;
++
++        if (!expect(callLibsd(host, iop, 17u, 0u, 0u, kSoundSource, sound, 0u) == kSoundError,
++                    "an empty voice transfer should be refused with -100")) return false;
++        if (!expect(callLibsd(host, iop, 17u, 0u, 2u, kSoundSource, sound, 0x40u) == kSoundError,
++                    "a voice transfer mode other than write or read should be refused with -100")) return false;
++        if (!expect(callLibsd(host, iop, 17u, 0u, 0u, 0x001FFFF0u, sound, 0x40u) == kSoundError,
++                    "a voice transfer from outside IOP RAM should be refused with -100")) return false;
++        if (!expect(soundMetric(iop, "voice_transfers") == 4u, "the spu2 debug row should count the transfers")) return false;
++        return expect(countLogs(host, "unhandled import") == 0u, "the libsd imports should be handled natively");
++    }
++
++    bool voiceTransInterrupt(TestHost &host, IopSubsystem &iop)
++    {
++        constexpr uint32_t sound = 0x00020000u;
++        writeStreamDriverIrx(host, 0x100u);
++        const ModuleLoadResult driver = iop.loadModuleBuffer(0x100u);
++        if (!expect(driver.handled && driver.startResult == 0, "the stream driver did not start")) return false;
++        (void)callLibsd(host, iop, 18u, 0u, 2u); // stop its stream: the handler stays on channel 0
++        if (!expect(iopWord(iop, kSoundState) == 1u, "the stream's first half should have called the handler")) return false;
++
++        // by DMA: the transfer interrupt comes 512 cycles after the call
++        if (!expect(callLibsd(host, iop, 17u, 0u, 0u, kSoundSource, sound, 0x40u) == 0x40u,
++                    "the voice transfer should be accepted")) return false;
++        const uint64_t called = iopCycles(iop);
++        runIopUntil(iop, called + 400u);
++        if (!expect(iopWord(iop, kSoundState) == 1u, "the interrupt should not come with the call")) return false;
++        runIopUntil(iop, called + 512u);
++        if (!expect(iopWord(iop, kSoundState) == 2u, "the handler should be called when the transfer is complete")) return false;
++        if (!expect(iopWord(iop, kSoundState + 4u) == 0u && iopWord(iop, kSoundState + 8u) == 0x1234u,
++                    "the transfer handler should be called with (channel, argument)")) return false;
++
++        // by I/O there is no interrupt, and channel 1 has no handler
++        (void)callLibsd(host, iop, 17u, 0u, 8u, kSoundSource, sound, 0x40u);
++        (void)callLibsd(host, iop, 17u, 1u, 0u, kSoundSource, sound, 0x40u);
++        runIopUntil(iop, iopCycles(iop) + 2048u);
++        if (!expect(iopWord(iop, kSoundState) == 2u,
++                    "a transfer by I/O or on a channel without a handler should call nothing")) return false;
++
++        // sceSdVoiceTransStatus with flag 1 waits for the transfer: its interrupt comes before the call returns
++        (void)callLibsd(host, iop, 17u, 0u, 0u, kSoundSource, sound, 0x40u);
++        if (!expect(callLibsd(host, iop, 19u, 0u, 1u) == 1u, "the waited transfer should be complete")) return false;
++        if (!expect(iopWord(iop, kSoundState) == 3u,
++                    "waiting for a transfer should deliver its interrupt at once")) return false;
++
++        // stopping the channel drops a completion that is still to come
++        (void)callLibsd(host, iop, 17u, 0u, 0u, kSoundSource, sound, 0x40u);
++        if (!expect(callLibsd(host, iop, 30u) == 0u, "sceSdStopTrans with no block transfer should return 0")) return false;
++        runIopUntil(iop, iopCycles(iop) + 2048u);
++        if (!expect(iopWord(iop, kSoundState) == 3u, "a stopped transfer should raise no interrupt")) return false;
++        return expect(soundMetric(iop, "voice_completions") == 2u,
++                      "the spu2 debug row should count the completions delivered to a handler");
++    }
++
++    bool keyedOnVoiceRaisesEnvx(TestHost &host, IopSubsystem &iop)
++    {
++        constexpr uint32_t sound = 0x00020000u;
++        // one ADPCM block that loops on itself: shift 12, filter 0; loop start + loop end + repeat
++        const uint8_t block[16] = {0x0C, 0x07, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11};
++        if (!expect(iop.writeMemory(kSoundSource, block, sizeof(block)), "could not fill IOP RAM")) return false;
++        (void)callLibsd(host, iop, 17u, 0u, 8u, kSoundSource, sound, sizeof(block)); // upload
++        (void)callLibsd(host, iop, 9u, 0x2000u, sound);   // SSA of voice 0 on core 0
++        (void)callLibsd(host, iop, 5u, 0x0300u, 0x000Fu); // ADSR1: fastest attack
++        (void)callLibsd(host, iop, 5u, 0x0400u, 0x0000u); // ADSR2: fastest release
++        (void)callLibsd(host, iop, 5u, 0x0200u, 0x1000u); // PITCH: 48 kHz
++        (void)callLibsd(host, iop, 7u, 0x1500u, 1u);      // KON
++        if (!expect(callLibsd(host, iop, 6u, 0x0500u) == 0u, "ENVX should read 0 until a frame has been made")) return false;
++
++        // 100 frames later: fewer than the batch the idle SPU2 is advanced in, so the read itself must advance it
++        runIopUntil(iop, iopCycles(iop) + 100u * kSoundFrame);
++        if (!expect(callLibsd(host, iop, 6u, 0x0500u) > 0u, "a keyed-on voice should raise ENVX")) return false;
++        if (!expect(soundMetric(iop, "frames") >= 100u, "a libsd call should bring the SPU2 to its cycle")) return false;
++        if (!expect(callLibsd(host, iop, 6u, 0x0502u) == 0u, "a voice that is not keyed on should read ENVX 0")) return false;
++        if (!expect(soundMetric(iop, "active_voices") == 1u, "one voice should be playing")) return false;
++
++        (void)callLibsd(host, iop, 7u, 0x1600u, 1u);      // KOFF
++        runIopUntil(iop, iopCycles(iop) + 100u * kSoundFrame);
++        if (!expect(callLibsd(host, iop, 6u, 0x0500u) == 0u, "a released voice should fall back to ENVX 0")) return false;
++        return expect(soundMetric(iop, "active_voices") == 0u, "no voice should be playing after the release");
++    }
++
++    bool initLeavesLibsdState(TestHost &host, IopSubsystem &iop)
++    {
++        // a master volume and a running stream with its handler, then a hot init
++        (void)callLibsd(host, iop, 5u, 0x0980u, 0x3FFFu); // MVOLL of core 0
++        writeStreamDriverIrx(host, 0x100u);
++        const ModuleLoadResult driver = iop.loadModuleBuffer(0x100u);
++        if (!expect(driver.handled && iopWord(iop, kSoundState) == 1u, "the stream driver did not start")) return false;
++        if (!expect(callLibsd(host, iop, 4u, 1u) == 0u, "sceSdInit should return 0")) return false;
++        if (!expect((callLibsd(host, iop, 20u) & 0x00FFFFFFu) == 0u, "sceSdInit should end the block transfers")) return false;
++        if (!expect(callLibsd(host, iop, 26u, 0u, 0u, 0u) == 0u, "sceSdInit should forget the transfer handlers")) return false;
++        if (!expect(callLibsd(host, iop, 6u, 0x0980u) == 0x3FFFu, "a hot init should keep the master volume")) return false;
++        if (!expect(callLibsd(host, iop, 12u, 2u) == 1u, "a hot init should leave the effects enabled")) return false;
++        if (!expect(callLibsd(host, iop, 6u, 0x0800u) == 0x0FF0u && callLibsd(host, iop, 6u, 0x0801u) == 0x0FFCu,
++                    "MMIX should be 0xFF0 on core 0 and 0xFFC on core 1")) return false;
++        if (!expect(callLibsd(host, iop, 6u, 0x0D81u) == 0x7FFFu && callLibsd(host, iop, 6u, 0x0E81u) == 0x7FFFu &&
++                        callLibsd(host, iop, 6u, 0x0D80u) == 0u,
++                    "AVOL should let core 0 through core 1 only")) return false;
++        if (!expect(callLibsd(host, iop, 8u, 0x1800u) == 0x00FFFFFFu && callLibsd(host, iop, 8u, 0x1B01u) == 0x00FFFFFFu,
++                    "VMIX should route every voice")) return false;
++        if (!expect(callLibsd(host, iop, 6u, 0x0200u | (23u << 1u) | 1u) == 0x3FFFu,
++                    "every voice should have PITCH 0x3FFF")) return false;
++        if (!expect(callLibsd(host, iop, 10u, 0x2000u | (23u << 1u) | 1u) == 0x5000u,
++                    "every voice should start at the silent loop")) return false;
++        const uint8_t silentLoop[16] = {0x00, 0x07};
++        uint8_t copy[16];
++        std::memset(copy, 0xEE, sizeof(copy));
++        (void)callLibsd(host, iop, 17u, 0u, 1u, kSoundCopy, 0x5000u, sizeof(copy));
++        if (!expect(iop.readMemory(kSoundCopy, copy, sizeof(copy)) && std::memcmp(copy, silentLoop, sizeof(copy)) == 0,
++                    "sound RAM 0x5000 should hold LIBSD's silent looping block")) return false;
++
++        // a cold init resets the sound unit
++        if (!expect(callLibsd(host, iop, 4u, 0u) == 0u, "sceSdInit should return 0")) return false;
++        if (!expect(callLibsd(host, iop, 6u, 0x0980u) == 0u, "a cold init should clear the master volume")) return false;
++        if (!expect(callLibsd(host, iop, 12u, 2u) == 0u, "a cold init should leave the effects disabled")) return false;
++        if (!expect(callLibsd(host, iop, 10u, 0x1D00u) == 0x001DFFFFu && callLibsd(host, iop, 10u, 0x1D01u) == 0x001FFFFFu,
++                    "a cold init should end the effect areas at 0x1DFFFF and 0x1FFFFF")) return false;
++        if (!expect(callLibsd(host, iop, 10u, 0x1C00u) == 0x001DFFF0u && callLibsd(host, iop, 10u, 0x1C01u) == 0x001FFFF0u,
++                    "a cold init should leave the effect areas of the type 'off'")) return false;
++        runIopUntil(iop, iopCycles(iop) + 2u * kSoundFrame);
++        (void)callLibsd(host, iop, 6u, 0x0500u);
++        if (!expect(soundMetric(iop, "active_voices") == 0u, "sceSdInit should leave no voice playing")) return false;
++
++        // sceSdSetEffectAttr: the type places the work area below EEA, the depths are EVOL
++        const struct
++        {
++            uint32_t core, mode;
++            uint16_t depthLeft, depthRight;
++            uint32_t delay, feedback;
++        } attributes = {1u, 0x0105u, 0x1111u, 0x2222u, 0u, 0u};
++        if (!expect(iop.writeMemory(kSoundSource, &attributes, sizeof(attributes)), "could not fill IOP RAM")) return false;
++        if (!expect(callLibsd(host, iop, 23u, 1u, kSoundSource) == 0u, "sceSdSetEffectAttr should return 0")) return false;
++        if (!expect(callLibsd(host, iop, 6u, 0x0B81u) == 0x1111u && callLibsd(host, iop, 6u, 0x0C81u) == 0x2222u,
++                    "the effect depths should be read as 16-bit values at +8 and +0xA")) return false;
++        if (!expect(callLibsd(host, iop, 10u, 0x1C01u) == 0x001FFFFFu - 0x15BCu * 8u + 1u,
++                    "the effect type should place the work area below EEA")) return false;
++        const uint32_t badMode = 10u;
++        if (!expect(iop.writeMemory(kSoundSource + 4u, &badMode, sizeof(badMode)) &&
++                        callLibsd(host, iop, 23u, 1u, kSoundSource) == kSoundError,
++                    "an unknown effect type should be refused with -100")) return false;
++
++        // sceSdCleanEffectWorkArea clears the work area of a type and nothing below it
++        constexpr uint32_t areaStart = 0x001DFFFFu - 0x4D8u * 8u + 1u; // type 1 on core 0
++        uint8_t area[0x20];
++        std::memset(area, 0x5A, sizeof(area));
++        if (!expect(iop.writeMemory(kSoundSource, area, sizeof(area)), "could not fill IOP RAM")) return false;
++        (void)callLibsd(host, iop, 17u, 0u, 8u, kSoundSource, areaStart - 0x10u, sizeof(area));
++        if (!expect(callLibsd(host, iop, 31u, 0u, 0u, 1u) == 0u, "sceSdCleanEffectWorkArea should return 0")) return false;
++        (void)callLibsd(host, iop, 17u, 0u, 1u, kSoundCopy, areaStart - 0x10u, sizeof(area));
++        if (!expect(iop.readMemory(kSoundCopy, area, sizeof(area)) &&
++                        std::all_of(area, area + 0x10u, [](uint8_t value) { return value == 0x5Au; }) &&
++                        std::all_of(area + 0x10u, area + 0x20u, [](uint8_t value) { return value == 0u; }),
++                    "the work area should be cleared from its first byte on, and nothing below it")) return false;
++        return expect(callLibsd(host, iop, 25u, 0u, 0u, 10u) == kSoundError,
++                      "sceSdClearEffectWorkArea should refuse an unknown effect type with -100");
++    }
++
++    bool fallbackRunsModuleExport(TestHost &host, IopSubsystem &iop)
++    {
++        // with no LIBSD module an ordinal without a native form is an unhandled import
++        if (!expect(callLibsd(host, iop, 13u) == 0u && countLogs(host, "unhandled import libsd:13") == 1u,
++                    "an ordinal with no native form and no LIBSD module should be an unhandled import")) return false;
++
++        writeLibsdExportsIrx(host, 0x100u);
++        const ModuleLoadResult module = iop.loadModuleBuffer(0x100u);
++        if (!expect(module.handled && module.startResult == 0, "the libsd export module did not start")) return false;
++        if (!expect(callLibsd(host, iop, 13u) == 0x42u && callLibsd(host, iop, 13u) == 0x42u,
++                    "an ordinal with no native form should run the module's own export")) return false;
++        if (!expect(countLogs(host, "libsd #13 (sceSdNote2Pitch) has no native form") == 1u,
++                    "each ordinal that falls back should be logged once")) return false;
++        (void)callLibsd(host, iop, 5u, 0x0200u, 0x1234u);
++        if (!expect(callLibsd(host, iop, 6u, 0x0200u) == 0x1234u,
++                    "an ordinal with a native form should not reach the module's export")) return false;
++        return expect(soundMetric(iop, "libsd_fallbacks") == 1u,
++                      "the spu2 debug row should count the ordinals that fell back");
++    }
+ }
+ 
+ int main()
+@@ -1217,6 +1713,33 @@ int main()
+     if (!expect(!emittedUnhandledSeek,
+                 "sceCdSeek still emitted an unhandled IOP import")) return 1;
+ 
++    // MKSM: the sound drivers' libsd calls land in the native SPU2 by export ordinal.
++    struct SoundTest
++    {
++        const char *name;
++        bool (*run)(TestHost &, IopSubsystem &);
++    };
++    const SoundTest soundTests[] = {
++        {"a looping block transfer calls its handler with (channel, argument) when each half has been fetched",
++         loopingBlockTransferCallsHandler},
++        {"sceSdVoiceTrans copies IOP RAM into sound RAM and back", voiceTransCopies},
++        {"a voice transfer by DMA ends with the transfer interrupt", voiceTransInterrupt},
++        {"a keyed-on voice raises ENVX", keyedOnVoiceRaisesEnvx},
++        {"sceSdInit leaves the sound unit as LIBSD's own init does", initLeavesLibsdState},
++        {"a libsd ordinal with no native form runs the loaded module's export", fallbackRunsModuleExport},
++    };
++    for (const SoundTest &test : soundTests)
++    {
++        iop.reset();
++        host.logs.clear();
++        if (!test.run(host, iop))
++        {
++            std::cerr << "FAIL: " << test.name << '\n';
++            return 1;
++        }
++        std::cout << "PASS " << test.name << '\n';
++    }
++
+     std::cout << "ps2xIOP emulator smoke tests passed\n";
+     return 0;
+ }
+diff --git a/ps2xTest/src/ps2_iop_tests.cpp b/ps2xTest/src/ps2_iop_tests.cpp
+index f1172e9..f59340d 100644
+--- a/ps2xTest/src/ps2_iop_tests.cpp
++++ b/ps2xTest/src/ps2_iop_tests.cpp
+@@ -71,5 +71,29 @@ void register_ps2_iop_tests()
+ 
+         });
+ 
++        // MKSM: the sound drivers (CRI ADX, SNDF, SDRDRV) run from the disc and call LIBSD.IRX through its exports.
++        // "libsd" imports reach the native SPU2 by ordinal: a voice pitch set with sceSdSetParam (#5) reads back with
++        // sceSdGetParam (#6), with no LIBSD module loaded at all.
++        tc.Run("libsd imports drive the sound engine by ordinal", [](TestCase &t)
++        {
++            iop_test::Host host;
++            ps2x::iop::IopSubsystem subsystem(host);
++            iop_test::Irx image;
++            image.words(0u, {
++                0x27BDFFE0u, 0xAFBF001Cu,               // save ra
++                0x34040200u, 0x34051234u,               // a0 = PITCH of voice 0 on core 0, a1 = 0x1234
++                0x0C00401Du, 0u,                        // jal 0x10074: sceSdSetParam
++                0x34040200u,                            // a0 = PITCH of voice 0 on core 0
++                0x0C00401Fu, 0u,                        // jal 0x1007C: sceSdGetParam
++                0x8FBF001Cu, 0x03E00008u, 0x27BD0020u, // return what it read
++            });
++            image.words(0x60u, {0x41E00000u, 0u, 0x0101u, 0x7362696Cu, 0x00000064u, // imports of "libsd"
++                                0x03E00008u, 0x24000005u, 0x03E00008u, 0x24000006u, 0u, 0u});
++            image.install(host);
++            const ps2x::iop::ModuleLoadResult loaded = subsystem.loadModuleBuffer(0x1000u);
++            t.IsTrue(loaded.handled, "the synthetic driver should load");
++            t.Equals(loaded.startResult, 0x1234, "sceSdGetParam should return what sceSdSetParam stored");
++        });
++
+     });
+ }

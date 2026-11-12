@@ -1,0 +1,175 @@
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index c8ca497..3f6423c 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -616,7 +616,45 @@ namespace ps2x::iop::detail
+             lastRunCyclesExit = totalCycles;
+         }
+ 
+-        ModuleLoadResult loadImage(std::string path, std::span<const uint8_t> image, const void *arguments, uint32_t argumentSize)
++        // MKSM: the (argc, argv) of a module's start function, written into IOP RAM the way the IOP kernel's modload
++        // builds them: argv[0] is the name the module is started under, then one pointer for each NUL-terminated
++        // string of the argument block, then a null pointer. Returns the block (the argv table, followed by the
++        // strings), 0 when it could not be allocated.
++        uint32_t writeStartArguments(std::string_view name, const void *arguments, uint32_t argumentSize, uint32_t &argc)
++        {
++            std::vector<uint8_t> strings(name.begin(), name.end());
++            strings.push_back(0u);
++            std::vector<uint32_t> offsets{0u};
++            if (arguments && argumentSize)
++            {
++                const auto *bytes = static_cast<const uint8_t *>(arguments);
++                for (uint32_t offset = 0u; offset < argumentSize;)
++                {
++                    offsets.push_back(static_cast<uint32_t>(strings.size()) + offset);
++                    while (offset < argumentSize && bytes[offset] != 0u)
++                        ++offset;
++                    ++offset; // the terminator
++                }
++                strings.insert(strings.end(), bytes, bytes + argumentSize);
++            }
++            strings.push_back(0u); // ends a last string the block left open
++            const uint32_t tableSize = static_cast<uint32_t>(offsets.size() + 1u) * 4u;
++            const uint32_t block = allocate(tableSize + static_cast<uint32_t>(strings.size()), 16u);
++            argc = 0u;
++            if (!block)
++                return 0u;
++            std::vector<uint32_t> table;
++            for (const uint32_t offset : offsets)
++                table.push_back(block + tableSize + offset);
++            table.push_back(0u);
++            writeRam(block, table.data(), tableSize);
++            writeRam(block + tableSize, strings.data(), strings.size());
++            argc = static_cast<uint32_t>(offsets.size());
++            return block;
++        }
++
++        ModuleLoadResult loadImage(std::string path, std::span<const uint8_t> image, const void *arguments, uint32_t argumentSize,
++                                   std::string_view startName = {})
+         {
+             ModuleLoadResult result{true, -1, -1};
+             const IopImageLoadResult loaded = IopModuleLoader::load(image, memory, moduleCursor);
+@@ -642,17 +680,13 @@ namespace ps2x::iop::detail
+             module.entry = loaded.entry;
+             module.gp = loaded.gp;
+ 
+-            uint32_t args = 0u;
+-            if (arguments && argumentSize)
+-            {
+-                args = allocate(argumentSize + 1u, 16u);
+-                if (args)
+-                {
+-                    writeRam(args, arguments, argumentSize);
+-                    write8(args + argumentSize, 0u);
+-                }
+-            }
+-            const uint32_t startResult = callFunction(module.entry, argumentSize, args, 0u, 0u, module.gp);
++            // MKSM: start(argc, argv), as modload calls it. Upstream passed the byte count of the argument block
++            // and the block itself, so a module that reads its options from argv never saw them (CRI ADX's
++            // "sdinit=0" and "spucore=2": it then reset the sound unit the game had set up).
++            uint32_t argc = 0u;
++            const uint32_t args = writeStartArguments(startName.empty() ? std::string_view(module.path) : startName,
++                                                      arguments, argumentSize, argc);
++            const uint32_t startResult = callFunction(module.entry, argc, args, 0u, 0u, module.gp);
+             if (args)
+                 freeAllocation(args);
+             module.resident = startResult == 0u || startResult == 2u;
+@@ -687,7 +721,7 @@ namespace ps2x::iop::detail
+                 return {true, -1, -1};
+             std::ostringstream tag;
+             tag << "buffer@0x" << std::hex << guestAddress;
+-            return loadImage(tag.str(), image, arguments, argumentSize);
++            return loadImage(tag.str(), image, arguments, argumentSize, "LBF"); // MKSM: the name loadfile starts a buffer under
+         }
+ 
+         bool stopModule(int32_t moduleId, int32_t *result)
+diff --git a/ps2xTest/src/ps2_iop_tests.cpp b/ps2xTest/src/ps2_iop_tests.cpp
+index f59340d..8228e98 100644
+--- a/ps2xTest/src/ps2_iop_tests.cpp
++++ b/ps2xTest/src/ps2_iop_tests.cpp
+@@ -95,5 +95,85 @@ void register_ps2_iop_tests()
+             t.Equals(loaded.startResult, 0x1234, "sceSdGetParam should return what sceSdSetParam stored");
+         });
+ 
++        // MKSM: the IOP kernel's modload starts a module with (argc, argv): argv[0] is the name the module was started
++        // under, the others point at the NUL-terminated strings of the argument block, and argv[argc] is null. CRI's
++        // ADX driver reads "sdinit=0" and "spucore=2" that way; started with the byte count and the block itself
++        // (upstream) it kept its defaults and reset the sound unit the game had already set up.
++        tc.Run("a module's start function receives argc and argv", [](TestCase &t)
++        {
++            // The start function stores argc at 0x10200, argv[0..argc-1] from 0x10204, argv[argc] at 0x1021C and up to
++            // 32 bytes of each string from 0x10220 (32 bytes apart), and returns argc.
++            iop_test::Irx image;
++            image.words(0u, {
++                0x3C080001u, 0x35080200u,               // t0 = 0x10200
++                0xAD040000u,                            // [t0] = argc
++                0x240D0000u,                            // i = 0
++                0x01A4702Au, 0x11C00012u, 0x000D7880u,  // 0x10: while (i < argc)        (t7 = i * 4)
++                0x00AF4821u, 0x8D290000u,               //   t1 = argv[i]
++                0x000D5140u, 0x01485021u, 0x254A0020u,  //   t2 = 0x10220 + i * 32
++                0x01E87821u, 0xADE90004u,               //   [0x10204 + i * 4] = t1
++                0x240B001Fu,                            //   at most 32 bytes
++                0x912C0000u, 0x25290001u, 0xA14C0000u,  // 0x3C: *t2 = *t1++
++                0x11800003u, 0x254A0001u,               //   until the terminator
++                0x1560FFFAu, 0x256BFFFFu,
++                0x1000FFEDu, 0x25AD0001u,               // 0x58: ++i
++                0x00047880u, 0x00AF4821u, 0x8D290000u,  // 0x60: t1 = argv[argc]
++                0u, 0xAD09001Cu,                        //   [0x1021C] = t1
++                0x03E00008u, 0x00801021u,               // return argc
++            });
++            const char arguments[] = "sdinit=0\0spucore=2"; // 19 bytes with the last terminator, as the game passes them
++            const auto word = [](const ps2x::iop::IopSubsystem &iop, uint32_t address)
++            {
++                uint32_t value = 0xDEADBEEFu;
++                (void)iop.readMemory(address, &value, sizeof(value));
++                return value;
++            };
++            const auto text = [](const ps2x::iop::IopSubsystem &iop, uint32_t address)
++            {
++                char bytes[33]{};
++                (void)iop.readMemory(address, bytes, 32u);
++                return std::string(bytes);
++            };
++
++            {
++                iop_test::Host host;
++                host.file = image.bytes;
++                ps2x::iop::IopSubsystem subsystem(host);
++                const ps2x::iop::ModuleLoadResult loaded =
++                    subsystem.loadModule("host0:IOP/ARGS.IRX", arguments, static_cast<uint32_t>(sizeof(arguments)));
++                t.IsTrue(loaded.handled && loaded.moduleId > 0, "the synthetic module should load from a file");
++                t.Equals(loaded.startResult, 3, "argc should count the name and the two options");
++                t.Equals(word(subsystem, 0x10200u), 3u, "a0 should be argc, not the byte count of the arguments");
++                t.Equals(text(subsystem, 0x10220u), std::string("host0:IOP/ARGS.IRX"),
++                         "argv[0] should be the path the module was loaded from");
++                t.Equals(text(subsystem, 0x10240u), std::string("sdinit=0"), "argv[1] should be the first option");
++                t.Equals(text(subsystem, 0x10260u), std::string("spucore=2"), "argv[2] should be the second option");
++                t.Equals(word(subsystem, 0x1021Cu), 0u, "argv[argc] should be a null pointer");
++                t.IsTrue(word(subsystem, 0x10208u) > word(subsystem, 0x10204u) &&
++                             word(subsystem, 0x1020Cu) == word(subsystem, 0x10208u) + 9u,
++                         "the argv pointers should follow the strings of the argument block");
++            }
++            {
++                iop_test::Host host;
++                image.install(host);
++                ps2x::iop::IopSubsystem subsystem(host);
++                const ps2x::iop::ModuleLoadResult loaded =
++                    subsystem.loadModuleBuffer(0x1000u, "debug=1", 7u); // no terminator inside the block
++                t.Equals(loaded.startResult, 2, "an argument block without its terminator should still be one string");
++                t.Equals(text(subsystem, 0x10220u), std::string("LBF"),
++                         "a module loaded from a buffer should be started under the name LBF");
++                t.Equals(text(subsystem, 0x10240u), std::string("debug=1"), "the open string should be terminated");
++            }
++            {
++                iop_test::Host host;
++                image.install(host);
++                ps2x::iop::IopSubsystem subsystem(host);
++                const ps2x::iop::ModuleLoadResult loaded = subsystem.loadModuleBuffer(0x1000u);
++                t.Equals(loaded.startResult, 1, "a module started without arguments should still get its name");
++                t.Equals(text(subsystem, 0x10220u), std::string("LBF"), "argv[0] should be the name");
++                t.Equals(word(subsystem, 0x1021Cu), 0u, "argv[1] should be the null pointer then");
++            }
++        });
++
+     });
+ }

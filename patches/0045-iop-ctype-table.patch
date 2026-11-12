@@ -1,0 +1,78 @@
+diff --git a/ps2xIOP/src/emulator/imports/iop_sysclib.cpp b/ps2xIOP/src/emulator/imports/iop_sysclib.cpp
+index 0517478..dd9fe61 100644
+--- a/ps2xIOP/src/emulator/imports/iop_sysclib.cpp
++++ b/ps2xIOP/src/emulator/imports/iop_sysclib.cpp
+@@ -73,7 +73,28 @@ namespace ps2x::iop::detail
+         case 7:
+             setV0(static_cast<uint32_t>(std::tolower(static_cast<unsigned char>(a0))));
+             return true;
+-        case 8:
++        case 8: // MKSM: look_ctype_table(c), the flags of the kernel's ctype table. It returned 0 for every character,
++        {       // so a module that reads a number from its arguments (CRI ADX: "sdinit=0") never took one for a digit.
++            // 0x01 upper, 0x02 lower, 0x04 digit, 0x08 space, 0x10 punctuation, 0x20 control, 0x40 hex letter, 0x80 blank
++            const uint32_t character = a0 & 0xFFu;
++            uint32_t flags = 0u; // also for what is not ASCII
++            if (character >= 'A' && character <= 'Z')
++                flags = 0x01u | (character <= 'F' ? 0x40u : 0u);
++            else if (character >= 'a' && character <= 'z')
++                flags = 0x02u | (character <= 'f' ? 0x40u : 0u);
++            else if (character >= '0' && character <= '9')
++                flags = 0x04u;
++            else if (character == ' ')
++                flags = 0x08u | 0x80u;
++            else if (character >= 0x09u && character <= 0x0Du)
++                flags = 0x20u | 0x08u;
++            else if (character < 0x20u || character == 0x7Fu)
++                flags = 0x20u;
++            else if (character < 0x7Fu)
++                flags = 0x10u;
++            setV0(flags);
++            return true;
++        }
+         case 9: // ctype table is optional for most IRXs.
+             setV0(0);
+             return true;
+diff --git a/ps2xTest/src/ps2_iop_tests.cpp b/ps2xTest/src/ps2_iop_tests.cpp
+index 8228e98..a183099 100644
+--- a/ps2xTest/src/ps2_iop_tests.cpp
++++ b/ps2xTest/src/ps2_iop_tests.cpp
+@@ -175,5 +175,39 @@ void register_ps2_iop_tests()
+             }
+         });
+ 
++        // MKSM: sysclib's look_ctype_table (#8) gives the flags of a character in the kernel's ctype table: 0x01 upper,
++        // 0x02 lower, 0x04 digit, 0x08 space, 0x10 punctuation, 0x20 control, 0x40 hex letter, 0x80 blank. CRI's ADX
++        // driver and SDRDRV ask for the digit flag before they read a number from an option ("sdinit=0"); with 0 for
++        // every character (upstream) no option with a number was ever taken.
++        tc.Run("look_ctype_table gives the flags of a character", [](TestCase &t)
++        {
++            iop_test::Host host;
++            ps2x::iop::IopSubsystem subsystem(host);
++            iop_test::Irx image;
++            image.words(0u, {
++                0x27BDFFE0u, 0xAFBF001Cu, 0xAFB00018u,  // save ra and s0
++                0x3C100001u, 0x36100200u,               // s0 = 0x10200: eight characters
++                0xAFB10014u, 0x24110008u,               // s1 = 8
++                0x82040000u,                            // 0x1C: a0 = the character, sign-extended as a char is passed
++                0x0C00401Du, 0u,                        // jal 0x10074: look_ctype_table
++                0xA2020100u,                            // its flags to 0x10300 + i
++                0x2631FFFFu, 0x1620FFFAu, 0x26100001u,  // the next one
++                0x8FBF001Cu, 0x8FB00018u, 0x8FB10014u,
++                0x00001021u, 0x03E00008u, 0x27BD0020u,  // return 0
++            });
++            image.words(0x60u, {0x41E00000u, 0u, 0x0101u, 0x63737973u, 0x0062696Cu, // imports of "sysclib"
++                                0x03E00008u, 0x24000008u, 0u, 0u});
++            image.words(0x200u, {0x47613930u, 0xE93D0A20u}); // '0' '9' 'a' 'G', ' ' newline '=' 0xE9
++            image.install(host);
++            const ps2x::iop::ModuleLoadResult loaded = subsystem.loadModuleBuffer(0x1000u);
++            t.IsTrue(loaded.handled && loaded.startResult == 0, "the synthetic module should run");
++            uint8_t flags[8]{};
++            t.IsTrue(subsystem.readMemory(0x10300u, flags, sizeof(flags)), "the flags should be readable");
++            const uint8_t expected[8] = {0x04u, 0x04u, 0x42u, 0x01u, 0x88u, 0x28u, 0x10u, 0x00u};
++            for (size_t i = 0; i < 8u; ++i)
++                t.Equals(static_cast<uint32_t>(flags[i]), static_cast<uint32_t>(expected[i]),
++                         "character " + std::to_string(i) + " of \"09aG \\n=\\xE9\" should have its ctype flags");
++        });
++
+     });
+ }

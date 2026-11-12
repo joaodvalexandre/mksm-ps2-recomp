@@ -1,0 +1,1244 @@
+diff --git a/ps2xIOP/CMakeLists.txt b/ps2xIOP/CMakeLists.txt
+index f8d3e44..0ae6a82 100644
+--- a/ps2xIOP/CMakeLists.txt
++++ b/ps2xIOP/CMakeLists.txt
+@@ -12,6 +12,7 @@ add_library(ps2_iop STATIC
+     src/emulator/core/iop_cpu.cpp
+     src/emulator/core/iop_kernel.cpp
+     src/emulator/core/iop_memory.cpp
++    src/emulator/core/iop_spu2.cpp
+     src/emulator/services/iop_module_loader.cpp
+     src/emulator/services/iop_rpc.cpp
+     src/emulator/imports/iop_cdvd.cpp
+@@ -53,6 +54,12 @@ if(PS2X_IOP_BUILD_TESTS)
+     target_include_directories(ps2_iop_import_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+     add_test(NAME ps2_iop_import_tests COMMAND ps2_iop_import_tests)
+ 
++    # MKSM: unit tests of the native SPU2 core
++    add_executable(ps2_iop_spu2_tests tests/iop_spu2_tests.cpp)
++    target_link_libraries(ps2_iop_spu2_tests PRIVATE ps2_iop)
++    target_include_directories(ps2_iop_spu2_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
++    add_test(NAME ps2_iop_spu2_tests COMMAND ps2_iop_spu2_tests)
++
+     add_executable(ps2_iop_compatibility_tests tests/iop_compatibility_tests.cpp)
+     target_link_libraries(ps2_iop_compatibility_tests PRIVATE ps2_iop)
+     add_test(NAME ps2_iop_compatibility_tests COMMAND ps2_iop_compatibility_tests)
+diff --git a/ps2xIOP/src/emulator/core/iop_spu2.cpp b/ps2xIOP/src/emulator/core/iop_spu2.cpp
+new file mode 100644
+index 0000000..fced6bf
+--- /dev/null
++++ b/ps2xIOP/src/emulator/core/iop_spu2.cpp
+@@ -0,0 +1,672 @@
++#include "iop_spu2.h"
++
++#include "iop_memory.h"
++
++#include <algorithm>
++
++// MKSM: native SPU2 core (see iop_spu2.h). The DSP (ADPCM, ADSR, pitch, mixing) follows psx-spx and PCSX2's SPU2.
++namespace ps2x::iop::detail
++{
++    namespace
++    {
++        constexpr int32_t kAdpcmFilters[5][2] = {{0, 0}, {60, 0}, {115, -52}, {98, -55}, {122, -60}};
++
++        // libsd ids (entry >> 8), in the order of LIBSD's register table
++        enum : uint32_t
++        {
++            IdVolL = 0x00, IdVolR = 0x01, IdPitch = 0x02, IdAdsr1 = 0x03, IdAdsr2 = 0x04, IdEnvx = 0x05, IdVolXL = 0x06,
++            IdVolXR = 0x07, IdMmix = 0x08, IdMvolL = 0x09, IdMvolR = 0x0A, IdEvolL = 0x0B, IdEvolR = 0x0C, IdAvolL = 0x0D,
++            IdAvolR = 0x0E, IdBvolL = 0x0F, IdBvolR = 0x10, IdMvolXL = 0x11, IdMvolXR = 0x12,
++            IdPmon = 0x13, IdNon = 0x14, IdKon = 0x15, IdKoff = 0x16, IdEndx = 0x17, IdVmixL = 0x18, IdVmixEL = 0x19,
++            IdVmixR = 0x1A, IdVmixER = 0x1B,
++            IdEsa = 0x1C, IdEea = 0x1D, IdTsa = 0x1E, IdIrqa = 0x1F, IdSsa = 0x20, IdLsa = 0x21, IdNax = 0x22,
++        };
++
++        int16_t clamp16(int32_t value) noexcept
++        {
++            return static_cast<int16_t>(std::clamp(value, -32768, 32767));
++        }
++
++        int16_t clamp16(int64_t value) noexcept
++        {
++            return static_cast<int16_t>(std::clamp<int64_t>(value, -32768, 32767));
++        }
++
++        // voice / core volume: fixed mode (bit 15 = 0) = 15-bit signed; sweep mode applies its target at once
++        int32_t volumeOf(uint16_t value) noexcept
++        {
++            if ((value & 0x8000u) == 0u)
++                return static_cast<int16_t>(value << 1u) >> 1; // -0x4000..0x3FFF
++            return (value & 0x2000u) != 0u ? 0 : 0x3FFF;
++        }
++
++        uint32_t idOf(uint32_t entry) noexcept { return (entry >> 8u) & 0xFFu; }
++        uint32_t coreOf(uint32_t entry) noexcept { return entry & 1u; }
++        uint32_t voiceOf(uint32_t entry) noexcept { return (entry >> 1u) & 0x1Fu; }
++
++        uint64_t hashBytes(const uint8_t *bytes, size_t size) noexcept // FNV-1a
++        {
++            uint64_t hash = 0xCBF29CE484222325ull;
++            for (size_t i = 0; i < size; ++i)
++                hash = (hash ^ bytes[i]) * 0x100000001B3ull;
++            return hash;
++        }
++    }
++
++    IopSpu2::IopSpu2(const IopMemory &memory) : m_memory(memory), m_ram(RamHalfwords)
++    {
++        m_output.reserve(2u * 4096u);
++        reset();
++    }
++
++    void IopSpu2::reset()
++    {
++        std::fill(m_ram.begin(), m_ram.end(), uint16_t{0});
++        m_cores = {};
++        m_inputs = {};
++        m_output.clear();
++        m_lastCycle = 0;
++        m_framesProduced = 0;
++        m_blocksFetched = 0;
++        m_repeatedBlocks = 0;
++    }
++
++    void IopSpu2::initCore(uint32_t core)
++    {
++        m_cores[core & 1u] = Core{};
++        stopInput(core);
++    }
++
++    // ---- parameters ----------------------------------------------------------------------------------------------
++
++    void IopSpu2::setParam(uint32_t entry, uint16_t value)
++    {
++        Core &c = m_cores[coreOf(entry)];
++        const uint32_t voice = voiceOf(entry);
++        switch (idOf(entry))
++        {
++        case IdVolL: if (voice < VoicesPerCore) c.voices[voice].volL = value; break;
++        case IdVolR: if (voice < VoicesPerCore) c.voices[voice].volR = value; break;
++        case IdPitch: if (voice < VoicesPerCore) c.voices[voice].pitch = value; break;
++        case IdAdsr1: if (voice < VoicesPerCore) c.voices[voice].adsr1 = value; break;
++        case IdAdsr2: if (voice < VoicesPerCore) c.voices[voice].adsr2 = value; break;
++        case IdMmix: c.mmix = value; break;
++        case IdMvolL: c.mvolL = value; break;
++        case IdMvolR: c.mvolR = value; break;
++        case IdEvolL: c.evolL = value; break;
++        case IdEvolR: c.evolR = value; break;
++        case IdAvolL: c.avolL = value; break;
++        case IdAvolR: c.avolR = value; break;
++        case IdBvolL: c.bvolL = value; break;
++        case IdBvolR: c.bvolR = value; break;
++        default: break; // ENVX / VOLX / MVOLX are read-only
++        }
++    }
++
++    uint16_t IopSpu2::getParam(uint32_t entry) const
++    {
++        const Core &c = m_cores[coreOf(entry)];
++        const uint32_t voice = std::min(voiceOf(entry), VoicesPerCore - 1u);
++        const Voice &v = c.voices[voice];
++        switch (idOf(entry))
++        {
++        case IdVolL: return v.volL;
++        case IdVolR: return v.volR;
++        case IdPitch: return v.pitch;
++        case IdAdsr1: return v.adsr1;
++        case IdAdsr2: return v.adsr2;
++        case IdEnvx: return static_cast<uint16_t>(v.envelope);
++        case IdVolXL: return static_cast<uint16_t>(volumeOf(v.volL) << 1);
++        case IdVolXR: return static_cast<uint16_t>(volumeOf(v.volR) << 1);
++        case IdMmix: return c.mmix;
++        case IdMvolL: return c.mvolL;
++        case IdMvolR: return c.mvolR;
++        case IdEvolL: return c.evolL;
++        case IdEvolR: return c.evolR;
++        case IdAvolL: return c.avolL;
++        case IdAvolR: return c.avolR;
++        case IdBvolL: return c.bvolL;
++        case IdBvolR: return c.bvolR;
++        case IdMvolXL: return static_cast<uint16_t>(volumeOf(c.mvolL) << 1);
++        case IdMvolXR: return static_cast<uint16_t>(volumeOf(c.mvolR) << 1);
++        default: return 0;
++        }
++    }
++
++    // ---- switches (24-bit voice masks) ---------------------------------------------------------------------------
++
++    void IopSpu2::setSwitch(uint32_t entry, uint32_t mask)
++    {
++        Core &c = m_cores[coreOf(entry)];
++        mask &= 0xFFFFFFu;
++        switch (idOf(entry))
++        {
++        case IdPmon: c.pmon = mask; break;
++        case IdNon: c.non = mask; break;
++        case IdKon: keyOn(c, mask); break;
++        case IdKoff: keyOff(c, mask); break;
++        case IdEndx: c.endx = 0; break; // writing ENDX clears it
++        case IdVmixL: c.vmixL = mask; break;
++        case IdVmixEL: c.vmixEL = mask; break;
++        case IdVmixR: c.vmixR = mask; break;
++        case IdVmixER: c.vmixER = mask; break;
++        default: break;
++        }
++    }
++
++    uint32_t IopSpu2::getSwitch(uint32_t entry) const
++    {
++        const Core &c = m_cores[coreOf(entry)];
++        switch (idOf(entry))
++        {
++        case IdPmon: return c.pmon;
++        case IdNon: return c.non;
++        case IdEndx: return c.endx;
++        case IdVmixL: return c.vmixL;
++        case IdVmixEL: return c.vmixEL;
++        case IdVmixR: return c.vmixR;
++        case IdVmixER: return c.vmixER;
++        default: return 0; // KON / KOFF read back as 0
++        }
++    }
++
++    // ---- addresses (libsd: byte addresses, 16-byte aligned; stored as halfwords) ---------------------------------
++
++    void IopSpu2::setAddr(uint32_t entry, uint32_t byteAddress)
++    {
++        Core &c = m_cores[coreOf(entry)];
++        const uint32_t halfwords = (byteAddress >> 1u) & (RamHalfwords - 1u) & ~7u;
++        const uint32_t voice = voiceOf(entry);
++        switch (idOf(entry))
++        {
++        case IdEsa: c.esa = halfwords; break;
++        case IdEea: c.eea = halfwords; break;
++        case IdTsa: c.tsa = halfwords; break;
++        case IdIrqa: c.irqa = halfwords; break;
++        case IdSsa:
++            if (voice < VoicesPerCore)
++                c.voices[voice].ssa = halfwords;
++            break;
++        case IdLsa:
++            if (voice < VoicesPerCore)
++            {
++                c.voices[voice].lsa = halfwords;
++                c.voices[voice].lsaFromDriver = true; // the driver's loop start wins over block flags
++            }
++            break;
++        case IdNax:
++            if (voice < VoicesPerCore)
++            {
++                Voice &v = c.voices[voice];
++                v.nax = halfwords;
++                v.playBlock = halfwords; // reads back as written until the next block is decoded
++                v.playStarted = false;
++            }
++            break;
++        default: break;
++        }
++    }
++
++    uint32_t IopSpu2::getAddr(uint32_t entry) const
++    {
++        const Core &c = m_cores[coreOf(entry)];
++        const Voice &v = c.voices[std::min(voiceOf(entry), VoicesPerCore - 1u)];
++        uint32_t halfwords = 0;
++        switch (idOf(entry))
++        {
++        case IdEsa: halfwords = c.esa; break;
++        case IdEea: halfwords = c.eea; break;
++        case IdTsa: halfwords = c.tsa; break;
++        case IdIrqa: halfwords = c.irqa; break;
++        case IdSsa: halfwords = v.ssa; break;
++        case IdLsa: halfwords = v.lsa; break;
++        case IdNax: halfwords = naxOf(v); break;
++        default: break;
++        }
++        return halfwords << 1u;
++    }
++
++    // NAX as PCSX2 reports NextA: always inside the block being played (block + 1 .. block + 7). 'nax' is the next
++    // block to decode, which during the last samples of a block already lies past it.
++    uint32_t IopSpu2::naxOf(const Voice &v) noexcept
++    {
++        if (!v.playStarted)
++            return (v.playBlock | 1u) & (RamHalfwords - 1u);
++        const uint32_t played = std::min<uint32_t>(v.decodedIndex, 27u) / 4u; // 0..6 (4 samples per halfword)
++        return (v.playBlock + 1u + played) & (RamHalfwords - 1u);
++    }
++
++    // sceSdSetCoreAttr ids (entry & ~1): 2 effect enable, 4 IRQ enable, 6 mute, 8 noise clock, 0xA SPDIF mode
++    void IopSpu2::setCoreAttr(uint32_t entry, uint32_t value)
++    {
++        Core &c = m_cores[coreOf(entry)];
++        switch (entry & ~1u)
++        {
++        case 2: c.attr = static_cast<uint16_t>((c.attr & ~0x0080u) | (value ? 0x0080u : 0u)); break;
++        case 4: c.attr = static_cast<uint16_t>((c.attr & ~0x0040u) | (value ? 0x0040u : 0u)); break;
++        case 6: c.attr = static_cast<uint16_t>((c.attr & ~0x4000u) | (value ? 0x4000u : 0u)); break;
++        case 8: c.attr = static_cast<uint16_t>((c.attr & ~0x3F00u) | ((value & 0x3Fu) << 8u)); break;
++        default: break;
++        }
++    }
++
++    uint32_t IopSpu2::getCoreAttr(uint32_t entry) const
++    {
++        const Core &c = m_cores[coreOf(entry)];
++        switch (entry & ~1u)
++        {
++        case 2: return (c.attr >> 7u) & 1u;
++        case 4: return (c.attr >> 6u) & 1u;
++        case 6: return (c.attr >> 14u) & 1u;
++        case 8: return (c.attr >> 8u) & 0x3Fu;
++        default: return 0u;
++        }
++    }
++
++    // ---- sound RAM -------------------------------------------------------------------------------------------------
++
++    void IopSpu2::writeSampleRam(uint32_t byteAddress, const uint8_t *source, size_t bytes)
++    {
++        uint32_t halfword = byteAddress >> 1u;
++        for (size_t i = 0; i + 1u < bytes; i += 2u)
++            m_ram[halfword++ & (RamHalfwords - 1u)] = static_cast<uint16_t>(source[i] | (source[i + 1u] << 8u));
++    }
++
++    void IopSpu2::readSampleRam(uint32_t byteAddress, uint8_t *destination, size_t bytes) const
++    {
++        uint32_t halfword = byteAddress >> 1u;
++        for (size_t i = 0; i + 1u < bytes; i += 2u)
++        {
++            const uint16_t value = m_ram[halfword++ & (RamHalfwords - 1u)];
++            destination[i] = static_cast<uint8_t>(value);
++            destination[i + 1u] = static_cast<uint8_t>(value >> 8u);
++        }
++    }
++
++    void IopSpu2::clearSampleRam(uint32_t byteAddress, size_t bytes)
++    {
++        uint32_t halfword = byteAddress >> 1u;
++        for (size_t i = 0; i + 1u < bytes; i += 2u)
++            m_ram[halfword++ & (RamHalfwords - 1u)] = 0u;
++    }
++
++    // ---- ADMA core input -------------------------------------------------------------------------------------------
++    // The hardware's input FIFO holds two blocks. The DMA fills it at once when the transfer starts, then refills a
++    // slot as soon as its block has played, so each block is copied one block ahead of playback and a later write to
++    // a block already fetched is not heard. The driver learns that it may rewrite a half from the transfer interrupt
++    // raised when the last block of that half has been fetched, and from the half bit of the status.
++
++    bool IopSpu2::startInput(uint32_t core, uint32_t iopAddress, uint32_t bytes, bool loop, uint32_t startOffset)
++    {
++        Input &in = m_inputs[core & 1u];
++        const uint64_t interrupts = in.interrupts;
++        in = Input{};
++        in.interrupts = interrupts;
++        const uint32_t size = bytes & ~(InputBlockBytes - 1u); // whole 1 KB L/R blocks
++        const uint32_t physical = IopMemory::physicalAddress(iopAddress);
++        if (size == 0u || physical > IopMemory::RamSize || size > IopMemory::RamSize - physical || startOffset >= size)
++            return false;
++        in.active = true;
++        in.loop = loop;
++        in.address = iopAddress;
++        in.size = size;
++        in.offset = startOffset & ~(InputBlockBytes - 1u);       // the DMA starts at the block holding the start
++        in.half = loop && in.offset >= size / 2u ? 1u : 0u;      // inside the second half: that half is transferred
++        in.hashes.assign((size / InputBlockBytes) * 2u, 0u);
++        in.fetched.assign(size / InputBlockBytes, 0u);
++        fetchInputBlock(in);
++        if (in.loop || in.offset < in.size)
++            fetchInputBlock(in);
++        return true;
++    }
++
++    void IopSpu2::stopInput(uint32_t core)
++    {
++        Input &in = m_inputs[core & 1u];
++        in.active = false;
++        in.queued = 0u;
++    }
++
++    bool IopSpu2::inputBusy(uint32_t core) const noexcept
++    {
++        const Input &in = m_inputs[core & 1u];
++        return in.active && (in.loop || in.offset < in.size);
++    }
++
++    uint32_t IopSpu2::inputStatus(uint32_t core) const noexcept
++    {
++        const Input &in = m_inputs[core & 1u];
++        if (!inputBusy(core))
++            return 0u;
++        return (in.half << 24u) | ((in.address + in.offset) & 0xFFFFFFu);
++    }
++
++    void IopSpu2::fetchInputBlock(Input &in)
++    {
++        const uint32_t slot = (in.playSlot + in.queued) & 1u;
++        const uint32_t block = in.offset / InputBlockBytes;
++        uint8_t *bytes = reinterpret_cast<uint8_t *>(in.slots[slot].data());
++        if (!m_memory.readRam(in.address + in.offset, bytes, InputBlockBytes))
++            std::fill_n(bytes, InputBlockBytes, uint8_t{0});
++        for (uint32_t side = 0; side < 2u; ++side)
++        {
++            const uint8_t *samples = bytes + side * (InputBlockBytes / 2u);
++            const bool silent = std::all_of(samples, samples + InputBlockBytes / 2u, [](uint8_t b) { return b == 0u; });
++            const uint64_t hash = hashBytes(samples, InputBlockBytes / 2u);
++            uint64_t &previous = in.hashes[block * 2u + side];
++            if (!silent && in.fetched[block] != 0u && previous == hash)
++                ++m_repeatedBlocks;
++            previous = hash;
++        }
++        in.fetched[block] = 1u;
++        ++in.queued;
++        ++m_blocksFetched;
++
++        const uint32_t before = in.offset;
++        const uint32_t halfPoint = in.size / 2u;
++        in.offset += InputBlockBytes;
++        if (in.loop)
++        {
++            if (before < halfPoint && in.offset >= halfPoint)
++            {
++                in.half = 1u; // the first half has been transferred: the DMA moves on to the second
++                ++in.interrupts;
++            }
++            if (in.offset >= in.size)
++            {
++                in.offset = 0u; // the second half too: the DMA starts over with the first
++                in.half = 0u;
++                ++in.interrupts;
++            }
++        }
++        else if (in.offset >= in.size)
++        {
++            ++in.interrupts; // the whole buffer has been transferred
++        }
++    }
++
++    // One frame of the input: sample n of the block being played, left from the first 512 bytes, right from the next.
++    void IopSpu2::inputSample(uint32_t core, int32_t &left, int32_t &right)
++    {
++        Input &in = m_inputs[core];
++        if (!in.active)
++            return;
++        const auto &slot = in.slots[in.playSlot];
++        const int32_t l = slot[in.position], r = slot[InputBlockFrames + in.position];
++        const Core &c = m_cores[core];
++        // BVOL (sound-data input volume) is a plain 16-bit signed level (0x7FFF = 1.0), not the voice volume format
++        // with fixed/sweep modes.
++        const auto inputVolume = [](uint16_t v) { return static_cast<int32_t>(static_cast<int16_t>(v)) >> 1; };
++        if ((c.mmix & 0x0080u) != 0u) // MMIX sound-input bits: the driver enables them while its stream runs
++            left += (l * inputVolume(c.bvolL)) >> 14;
++        if ((c.mmix & 0x0040u) != 0u)
++            right += (r * inputVolume(c.bvolR)) >> 14;
++        if (++in.position < InputBlockFrames)
++            return;
++        // the block has played: its slot is free, and the DMA refills it with the next block of the buffer
++        in.position = 0u;
++        in.playSlot ^= 1u;
++        --in.queued;
++        if (in.loop || in.offset < in.size)
++            fetchInputBlock(in);
++        if (in.queued == 0u)
++            in.active = false; // one-shot: the last block has played
++    }
++
++    uint64_t IopSpu2::nextEventCycle() const noexcept
++    {
++        uint64_t next = UINT64_MAX;
++        for (const Input &in : m_inputs)
++        {
++            if (in.active)
++                next = std::min(next, m_lastCycle + static_cast<uint64_t>(InputBlockFrames - in.position) * CyclesPerFrame);
++        }
++        return next;
++    }
++
++    // ---- voices ------------------------------------------------------------------------------------------------------
++
++    void IopSpu2::keyOn(Core &c, uint32_t mask)
++    {
++        for (uint32_t index = 0; index < VoicesPerCore; ++index)
++        {
++            if ((mask & (1u << index)) == 0u)
++                continue;
++            Voice &v = c.voices[index];
++            Voice fresh{};
++            fresh.volL = v.volL;
++            fresh.volR = v.volR;
++            fresh.pitch = v.pitch;
++            fresh.adsr1 = v.adsr1;
++            fresh.adsr2 = v.adsr2;
++            fresh.ssa = v.ssa;
++            fresh.active = true;
++            fresh.nax = v.ssa & ~7u;
++            fresh.lsa = v.ssa & ~7u;
++            fresh.playBlock = v.ssa & ~7u; // NAX reads SSA | 1 until the first block is decoded (PCSX2 Start())
++            fresh.phase = Voice::Phase::Attack;
++            v = fresh;
++            c.endx &= ~(1u << index);
++        }
++    }
++
++    void IopSpu2::keyOff(Core &c, uint32_t mask)
++    {
++        for (uint32_t index = 0; index < VoicesPerCore; ++index)
++        {
++            Voice &v = c.voices[index];
++            if ((mask & (1u << index)) != 0u && v.active)
++            {
++                v.phase = Voice::Phase::Release;
++                v.envelopeCounter = 0;
++            }
++        }
++    }
++
++    void IopSpu2::decodeBlock(Core &c, uint32_t index)
++    {
++        Voice &v = c.voices[index];
++        // end of the previous block: with the end flag jump to LSA; without "repeat" the voice stops
++        if ((v.blockFlags & 1u) != 0u)
++        {
++            c.endx |= 1u << index;
++            v.nax = v.lsa;
++            if ((v.blockFlags & 2u) == 0u)
++            {
++                v.active = false;
++                v.phase = Voice::Phase::Off;
++                v.envelope = 0;
++            }
++        }
++        v.blockFlags = 0;
++        if (!v.active)
++            return;
++
++        const uint32_t block = v.nax & (RamHalfwords - 1u);
++        const uint16_t header = m_ram[block];
++        uint32_t shift = header & 0xFu;
++        if (shift > 12u)
++            shift = 9u;
++        const uint32_t filter = std::min<uint32_t>((header >> 4u) & 7u, 4u);
++        v.blockFlags = static_cast<uint8_t>(header >> 8u);
++        if ((v.blockFlags & 4u) != 0u && !v.lsaFromDriver)
++            v.lsa = block;
++
++        for (uint32_t word = 1; word < 8u; ++word)
++        {
++            const uint16_t packed = m_ram[(block + word) & (RamHalfwords - 1u)];
++            for (uint32_t nibble = 0; nibble < 4u; ++nibble)
++            {
++                const int32_t raw = static_cast<int16_t>(((packed >> (nibble * 4u)) & 0xFu) << 12u) >> shift;
++                const int32_t predicted = (v.hist1 * kAdpcmFilters[filter][0] + v.hist2 * kAdpcmFilters[filter][1] + 32) >> 6;
++                const int16_t sample = clamp16(raw + predicted);
++                v.hist2 = v.hist1;
++                v.hist1 = sample;
++                v.decoded[(word - 1u) * 4u + nibble] = sample;
++            }
++        }
++        v.decodedIndex = 0;
++        v.nax = (block + 8u) & (RamHalfwords - 1u);
++        v.playBlock = block;
++        v.playStarted = true;
++    }
++
++    void IopSpu2::stepEnvelope(Voice &v)
++    {
++        uint32_t rate = 0;
++        bool exponential = false;
++        bool increase = false;
++        switch (v.phase)
++        {
++        case Voice::Phase::Attack:
++            rate = (v.adsr1 >> 8u) & 0x7Fu;
++            exponential = (v.adsr1 & 0x8000u) != 0u;
++            increase = true;
++            break;
++        case Voice::Phase::Decay:
++            rate = ((v.adsr1 >> 4u) & 0xFu) * 4u;
++            exponential = true;
++            break;
++        case Voice::Phase::Sustain:
++            rate = (v.adsr2 >> 6u) & 0x7Fu;
++            exponential = (v.adsr2 & 0x8000u) != 0u;
++            increase = (v.adsr2 & 0x4000u) == 0u;
++            break;
++        case Voice::Phase::Release:
++            rate = (v.adsr2 & 0x1Fu) * 4u;
++            exponential = (v.adsr2 & 0x20u) != 0u;
++            break;
++        case Voice::Phase::Off:
++            return;
++        }
++
++        // psx-spx "SPU ADSR": cycles = 1 << max(0, shift - 11); step = value << max(0, 11 - shift)
++        const int32_t shiftValue = static_cast<int32_t>(rate >> 2u);
++        const int32_t stepValue = static_cast<int32_t>(rate & 3u);
++        int32_t step = increase ? 7 - stepValue : -8 + stepValue;
++        uint32_t cycles = 1u << static_cast<uint32_t>(std::max(0, shiftValue - 11));
++        step <<= std::max(0, 11 - shiftValue);
++        if (exponential && increase && v.envelope > 0x6000)
++            cycles *= 4u;
++        if (exponential && !increase)
++            step = step * v.envelope / 0x8000;
++
++        if (++v.envelopeCounter >= cycles)
++        {
++            v.envelopeCounter = 0;
++            v.envelope = std::clamp(v.envelope + step, 0, 0x7FFF);
++        }
++
++        switch (v.phase)
++        {
++        case Voice::Phase::Attack:
++            if (v.envelope >= 0x7FFF)
++            {
++                v.phase = Voice::Phase::Decay;
++                v.envelopeCounter = 0;
++            }
++            break;
++        case Voice::Phase::Decay:
++            if (v.envelope <= static_cast<int32_t>(((v.adsr1 & 0xFu) + 1u) * 0x800u))
++            {
++                v.phase = Voice::Phase::Sustain;
++                v.envelopeCounter = 0;
++            }
++            break;
++        case Voice::Phase::Release:
++            if (v.envelope <= 0)
++            {
++                v.envelope = 0;
++                v.phase = Voice::Phase::Off;
++                v.active = false;
++            }
++            break;
++        default:
++            break;
++        }
++    }
++
++    int32_t IopSpu2::stepVoice(Core &c, uint32_t index)
++    {
++        Voice &v = c.voices[index];
++        if (!v.active)
++            return 0;
++        // pitch 4.12 (0x1000 = 48 kHz), linear interpolation between the last two samples (the hardware uses a
++        // 4-point gaussian)
++        v.pitchCounter += std::min<uint32_t>(v.pitch, 0x3FFFu);
++        while (v.pitchCounter >= 0x1000u && v.active)
++        {
++            v.pitchCounter -= 0x1000u;
++            if (v.decodedIndex >= 28u)
++                decodeBlock(c, index);
++            if (!v.active)
++                break;
++            v.prev[1] = v.prev[0];
++            v.prev[0] = v.decoded[v.decodedIndex++];
++        }
++        if (!v.active)
++            return 0;
++        const int32_t fraction = static_cast<int32_t>(v.pitchCounter & 0xFFFu);
++        const int32_t sample = v.prev[1] + (((v.prev[0] - v.prev[1]) * fraction) >> 12);
++        stepEnvelope(v);
++        return clamp16((sample * v.envelope) >> 15);
++    }
++
++    void IopSpu2::step()
++    {
++        int32_t coreOut[2][2] = {};
++        for (uint32_t core = 0; core < 2u; ++core)
++        {
++            Core &c = m_cores[core];
++            int32_t left = 0, right = 0;
++            for (uint32_t index = 0; index < VoicesPerCore; ++index)
++            {
++                const int32_t sample = stepVoice(c, index);
++                if (sample == 0)
++                    continue;
++                if ((c.vmixL & (1u << index)) != 0u)
++                    left += (sample * volumeOf(c.voices[index].volL)) >> 14;
++                if ((c.vmixR & (1u << index)) != 0u)
++                    right += (sample * volumeOf(c.voices[index].volR)) >> 14;
++            }
++            inputSample(core, left, right);
++            coreOut[core][0] = left;
++            coreOut[core][1] = right;
++        }
++        // core 0 through its master volume, added to core 1's dry output, all through core 1's master volume
++        // (simplified MMIX routing); 64-bit products, as 24 loud voices overflow 32 bits
++        const int64_t master[2][2] = {{volumeOf(m_cores[0].mvolL), volumeOf(m_cores[0].mvolR)},
++                                      {volumeOf(m_cores[1].mvolL), volumeOf(m_cores[1].mvolR)}};
++        for (uint32_t side = 0; side < 2u; ++side)
++        {
++            const int64_t core0 = (coreOut[0][side] * master[0][side]) >> 14;
++            m_output.push_back(clamp16(((core0 + coreOut[1][side]) * master[1][side]) >> 14));
++        }
++        ++m_framesProduced;
++    }
++
++    void IopSpu2::advanceTo(uint64_t iopCycle)
++    {
++        if (iopCycle <= m_lastCycle)
++            return;
++        const uint64_t frames = (iopCycle - m_lastCycle) / CyclesPerFrame;
++        for (uint64_t i = 0; i < frames; ++i)
++            step();
++        m_lastCycle += frames * CyclesPerFrame;
++    }
++
++    void IopSpu2::trimOutput(size_t maxFrames)
++    {
++        if (pendingFrames() > maxFrames)
++            m_output.erase(m_output.begin(), m_output.end() - static_cast<std::ptrdiff_t>(maxFrames * 2u));
++    }
++
++    uint32_t IopSpu2::activeVoices() const noexcept
++    {
++        uint32_t count = 0;
++        for (const Core &c : m_cores)
++            for (const Voice &v : c.voices)
++                count += v.active ? 1u : 0u;
++        return count;
++    }
++}
+diff --git a/ps2xIOP/src/emulator/core/iop_spu2.h b/ps2xIOP/src/emulator/core/iop_spu2.h
+new file mode 100644
+index 0000000..6905c04
+--- /dev/null
++++ b/ps2xIOP/src/emulator/core/iop_spu2.h
+@@ -0,0 +1,162 @@
++#pragma once
++
++// MKSM: a native SPU2 sound core with no register file. The IRX sound drivers reach the sound hardware through Sony's
++// libsd, and its calls are answered by export ordinal (imports/iop_libsd.cpp); they land here as typed voice and core
++// state, so a register front end can drive the same entry points later.
++// - 2 MB of sound RAM; 2 cores x 24 ADPCM voices (psx-spx ADPCM and ADSR, 4.12 pitch with linear interpolation),
++//   KON/KOFF/ENDX/NAX, the VMIX dry mix and the master routing.
++// - Each core has an ADMA input (sceSdBlockTrans): the DMA copies each 1 KB block (256 left then 256 right samples)
++//   of the IOP buffer into a two-block FIFO one block ahead of playback, and a half (loop mode) or the whole buffer
++//   (one-shot) is complete when its last block has been fetched, as on the hardware.
++// - One stereo frame per 768 IOP cycles (36.864 MHz / 48 kHz). The frames go into a plain buffer the owner takes;
++//   nothing in this class is shared between threads.
++// Not modelled yet: volume sweeps (the target is applied at once), reverb (its parameters are stored), noise, pitch
++// modulation, the gaussian interpolation and IRQA.
++
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <vector>
++
++namespace ps2x::iop::detail
++{
++    class IopMemory;
++
++    class IopSpu2
++    {
++    public:
++        static constexpr uint32_t RamHalfwords = 1u << 20u; // 2 MB of sound RAM
++        static constexpr uint32_t VoicesPerCore = 24u;
++        static constexpr uint32_t CyclesPerFrame = 768u;    // IOP 36.864 MHz / 48 kHz
++        static constexpr uint32_t InputBlockBytes = 0x400u; // one ADMA block: 256 left samples, then 256 right samples
++        static constexpr uint32_t InputBlockFrames = 256u;
++
++        struct Voice
++        {
++            // parameters (as the driver sets them)
++            uint16_t volL = 0, volR = 0, pitch = 0, adsr1 = 0, adsr2 = 0;
++            uint32_t ssa = 0;           // start, halfwords
++            // playback state
++            bool active = false;
++            uint32_t nax = 0;           // next ADPCM block to decode (halfwords)
++            uint32_t playBlock = 0;     // block being played (NAX reads from it, like PCSX2's NextA)
++            bool playStarted = false;
++            uint32_t lsa = 0;           // loop start
++            bool lsaFromDriver = false; // the driver set LSA: block loop-start flags do not override it
++            uint32_t pitchCounter = 0;  // 4.12
++            int16_t decoded[28]{};
++            uint32_t decodedIndex = 28; // 28 = decode the next block first
++            int32_t hist1 = 0, hist2 = 0;
++            int16_t prev[2]{};
++            uint8_t blockFlags = 0;
++            enum class Phase : uint8_t { Off, Attack, Decay, Sustain, Release } phase = Phase::Off;
++            int32_t envelope = 0;
++            uint32_t envelopeCounter = 0;
++        };
++
++        explicit IopSpu2(const IopMemory &memory);
++        void reset();
++
++        // ---- libsd entry points (entry codes as libsd: (id << 8) | (voice << 1) | core; core-level ids have bit 7 set)
++        void setParam(uint32_t entry, uint16_t value);          // sceSdSetParam
++        [[nodiscard]] uint16_t getParam(uint32_t entry) const;  // sceSdGetParam
++        void setSwitch(uint32_t entry, uint32_t mask);          // sceSdSetSwitch (KON, KOFF, VMIX*, NON, PMON, ENDX)
++        [[nodiscard]] uint32_t getSwitch(uint32_t entry) const; // sceSdGetSwitch
++        void setAddr(uint32_t entry, uint32_t byteAddress);     // sceSdSetAddr (SSA, LSA, NAX, ESA, EEA, ...)
++        [[nodiscard]] uint32_t getAddr(uint32_t entry) const;   // sceSdGetAddr (byte address)
++        void setCoreAttr(uint32_t entry, uint32_t value);       // sceSdSetCoreAttr
++        [[nodiscard]] uint32_t getCoreAttr(uint32_t entry) const;
++        void initCore(uint32_t core); // the state sceSdInit starts from: voices and registers cleared, input stopped
++
++        // ---- sound RAM transfers (sceSdVoiceTrans): byte addresses in sound RAM
++        void writeSampleRam(uint32_t byteAddress, const uint8_t *source, size_t bytes);
++        void readSampleRam(uint32_t byteAddress, uint8_t *destination, size_t bytes) const;
++        void clearSampleRam(uint32_t byteAddress, size_t bytes);
++
++        // ---- ADMA core input (sceSdBlockTrans). iopAddress is the driver's buffer, read through IopMemory; bytes is
++        // rounded down to whole 1 KB blocks. The DMA starts at the block holding startOffset (the "write from" mode).
++        // false: the buffer is outside IOP RAM, shorter than one block, or startOffset lies outside it.
++        [[nodiscard]] bool startInput(uint32_t core, uint32_t iopAddress, uint32_t bytes, bool loop, uint32_t startOffset = 0u);
++        void stopInput(uint32_t core);
++        // playing: the FIFO still holds blocks
++        [[nodiscard]] bool inputActive(uint32_t core) const noexcept { return m_inputs[core & 1u].active; }
++        // transferring: the DMA still has blocks to fetch (a loop never ends; a one-shot buffer ends at its last block)
++        [[nodiscard]] bool inputBusy(uint32_t core) const noexcept;
++        // (half << 24) | DMA address, as LIBSD's sceSdBlockTransStatus computes it; 0 when no transfer runs
++        [[nodiscard]] uint32_t inputStatus(uint32_t core) const noexcept;
++        // completed halves (loop mode) or buffers (one-shot) since reset: one transfer interrupt each
++        [[nodiscard]] uint64_t inputInterrupts(uint32_t core) const noexcept { return m_inputs[core & 1u].interrupts; }
++
++        // ---- time: one stereo frame every CyclesPerFrame IOP cycles
++        void advanceTo(uint64_t iopCycle);
++        // the cycle at which the input block being played ends (the next block fetch); UINT64_MAX with no input
++        [[nodiscard]] uint64_t nextEventCycle() const noexcept;
++        // the cycle up to which frames have been made
++        [[nodiscard]] uint64_t frameCycle() const noexcept { return m_lastCycle; }
++
++        // ---- output: interleaved signed 16-bit stereo at 48 kHz, taken by the owner
++        [[nodiscard]] const std::vector<int16_t> &output() const noexcept { return m_output; }
++        [[nodiscard]] size_t pendingFrames() const noexcept { return m_output.size() / 2u; }
++        void clearOutput() noexcept { m_output.clear(); }
++        void trimOutput(size_t maxFrames); // drops the oldest frames beyond maxFrames
++
++        // ---- diagnostics
++        [[nodiscard]] uint64_t framesProduced() const noexcept { return m_framesProduced; }
++        [[nodiscard]] uint64_t blocksFetched() const noexcept { return m_blocksFetched; }
++        // non-silent left or right halves fetched with the same content as the previous fetch of that ring block:
++        // the driver did not refill them in time
++        [[nodiscard]] uint64_t repeatedBlocks() const noexcept { return m_repeatedBlocks; }
++        [[nodiscard]] uint32_t activeVoices() const noexcept;
++        [[nodiscard]] const Voice &voice(uint32_t core, uint32_t index) const
++        {
++            return m_cores[core & 1u].voices[index % VoicesPerCore];
++        }
++
++    private:
++        struct Core
++        {
++            std::array<Voice, VoicesPerCore> voices{};
++            uint32_t vmixL = 0, vmixR = 0, vmixEL = 0, vmixER = 0, non = 0, pmon = 0, endx = 0;
++            uint16_t mmix = 0, attr = 0;
++            uint16_t mvolL = 0, mvolR = 0, evolL = 0, evolR = 0, avolL = 0, avolR = 0, bvolL = 0, bvolR = 0;
++            uint32_t esa = 0, eea = 0, irqa = 0, tsa = 0; // halfwords
++        };
++
++        struct Input
++        {
++            bool active = false;
++            bool loop = false;
++            uint32_t address = 0;  // the driver's buffer (IOP address as passed)
++            uint32_t size = 0;     // bytes, whole blocks
++            uint32_t offset = 0;   // DMA offset: the next byte to fetch
++            uint32_t half = 0;     // the half the DMA is transferring (loop mode)
++            uint32_t queued = 0;   // blocks in the FIFO
++            uint32_t playSlot = 0; // FIFO slot being played
++            uint32_t position = 0; // frame of the block being played
++            std::array<std::array<int16_t, 2u * InputBlockFrames>, 2> slots{}; // 256 left, then 256 right samples
++            std::vector<uint64_t> hashes; // per ring block: the left and right hashes of its previous fetch
++            std::vector<uint8_t> fetched; // per ring block: fetched before
++            uint64_t interrupts = 0;
++        };
++
++        void keyOn(Core &core, uint32_t mask);
++        void keyOff(Core &core, uint32_t mask);
++        void decodeBlock(Core &core, uint32_t index);
++        int32_t stepVoice(Core &core, uint32_t index);
++        static void stepEnvelope(Voice &v);
++        static uint32_t naxOf(const Voice &v) noexcept;
++        void fetchInputBlock(Input &input);
++        void inputSample(uint32_t core, int32_t &left, int32_t &right);
++        void step();
++
++        const IopMemory &m_memory;
++        std::vector<uint16_t> m_ram;
++        std::array<Core, 2> m_cores{};
++        std::array<Input, 2> m_inputs{};
++        std::vector<int16_t> m_output;
++        uint64_t m_lastCycle = 0;
++        uint64_t m_framesProduced = 0;
++        uint64_t m_blocksFetched = 0;
++        uint64_t m_repeatedBlocks = 0;
++    };
++}
+diff --git a/ps2xIOP/tests/iop_spu2_tests.cpp b/ps2xIOP/tests/iop_spu2_tests.cpp
+new file mode 100644
+index 0000000..6ba4184
+--- /dev/null
++++ b/ps2xIOP/tests/iop_spu2_tests.cpp
+@@ -0,0 +1,367 @@
++// MKSM: unit tests of the native SPU2 core (src/emulator/core/iop_spu2.*).
++#include "emulator/core/iop_memory.h"
++#include "emulator/core/iop_spu2.h"
++#include "iop_compat_test_support.h"
++
++#include <algorithm>
++#include <cstdint>
++#include <vector>
++
++namespace
++{
++    using ps2x::iop::detail::IopMemory;
++    using ps2x::iop::detail::IopSpu2;
++    using iop_test::require;
++
++    constexpr uint64_t kFrame = IopSpu2::CyclesPerFrame;
++
++    // libsd ids
++    constexpr uint32_t kVolL = 0x00u, kVolR = 0x01u, kPitch = 0x02u, kAdsr1 = 0x03u, kAdsr2 = 0x04u, kEnvx = 0x05u;
++    constexpr uint32_t kMmix = 0x08u, kMvolL = 0x09u, kMvolR = 0x0Au, kBvolL = 0x0Fu, kBvolR = 0x10u;
++    constexpr uint32_t kKon = 0x15u, kKoff = 0x16u, kEndx = 0x17u, kVmixL = 0x18u, kVmixR = 0x1Au;
++    constexpr uint32_t kSsa = 0x20u, kNax = 0x22u;
++
++    uint32_t voiceEntry(uint32_t id, uint32_t core, uint32_t voice) { return (id << 8u) | (voice << 1u) | core; }
++    uint32_t coreEntry(uint32_t id, uint32_t core) { return (id << 8u) | 0x80u | core; }
++
++    // a 16-byte ADPCM block: header (shift, filter, flags) and up to 28 nibbles
++    void writeBlock(IopSpu2 &spu, uint32_t byteAddress, uint8_t shift, uint8_t filter, uint8_t flags,
++                    const std::vector<uint8_t> &nibbles)
++    {
++        uint8_t bytes[16] = {};
++        bytes[0] = static_cast<uint8_t>(shift | (filter << 4u));
++        bytes[1] = flags;
++        for (size_t i = 0; i < nibbles.size() && i < 28u; ++i)
++            bytes[2u + i / 2u] |= static_cast<uint8_t>((nibbles[i] & 0xFu) << ((i & 1u) * 4u));
++        spu.writeSampleRam(byteAddress, bytes, sizeof(bytes));
++    }
++
++    // fastest attack (sustain level 0xF), sustain rising at rate 0 (stays at the maximum), fastest linear release
++    void setupVoice(IopSpu2 &spu, uint32_t core, uint32_t voice, uint32_t ssa, uint16_t pitch)
++    {
++        spu.setAddr(voiceEntry(kSsa, core, voice), ssa);
++        spu.setParam(voiceEntry(kPitch, core, voice), pitch);
++        spu.setParam(voiceEntry(kAdsr1, core, voice), 0x000Fu);
++        spu.setParam(voiceEntry(kAdsr2, core, voice), 0x0000u);
++        spu.setParam(voiceEntry(kVolL, core, voice), 0x3FFFu);
++        spu.setParam(voiceEntry(kVolR, core, voice), 0x3FFFu);
++    }
++
++    void setMasters(IopSpu2 &spu, uint16_t core0, uint16_t core1)
++    {
++        spu.setParam(coreEntry(kMvolL, 0u), core0);
++        spu.setParam(coreEntry(kMvolR, 0u), core0);
++        spu.setParam(coreEntry(kMvolL, 1u), core1);
++        spu.setParam(coreEntry(kMvolR, 1u), core1);
++    }
++
++    int16_t lastFrame(const IopSpu2 &spu, uint32_t side)
++    {
++        const std::vector<int16_t> &out = spu.output();
++        require(out.size() >= 2u, "no frame was made");
++        return out[out.size() - 2u + side];
++    }
++
++    // an input sample through BVOL 0x7FFF and both master volumes at 0x3FFF, as IopSpu2 mixes it
++    int32_t throughInputAndMasters(int32_t sample)
++    {
++        const int32_t input = (sample * 0x3FFF) >> 14;
++        const int32_t core0 = (input * 0x3FFF) >> 14;
++        return (core0 * 0x3FFF) >> 14;
++    }
++
++    void fillInputBlock(IopMemory &memory, uint32_t address, int16_t left, int16_t right)
++    {
++        std::vector<int16_t> block(512u);
++        std::fill(block.begin(), block.begin() + 256, left);
++        std::fill(block.begin() + 256, block.end(), right);
++        require(memory.writeRam(address, block.data(), block.size() * sizeof(int16_t)), "input block outside IOP RAM");
++    }
++
++    void routeInput(IopSpu2 &spu, uint32_t core)
++    {
++        spu.setParam(coreEntry(kMmix, core), 0x00C0u); // input dry left and right
++        spu.setParam(coreEntry(kBvolL, core), 0x7FFFu);
++        spu.setParam(coreEntry(kBvolR, core), 0x7FFFu);
++        setMasters(spu, 0x3FFFu, 0x3FFFu);
++    }
++
++    void adpcmDecodesShiftAndFilters()
++    {
++        IopMemory memory;
++        IopSpu2 spu(memory);
++        writeBlock(spu, 0x2000u, 12u, 0u, 0u, {1u, 2u, 3u, 0xFu});
++        const std::vector<uint8_t> second = {1u, 0u, 0u, 2u, 0xFu, 7u, 0u, 0u, 8u};
++        writeBlock(spu, 0x2010u, 0u, 1u, 0u, second);
++        writeBlock(spu, 0x2020u, 13u, 0u, 0x03u, {1u});
++        setupVoice(spu, 0u, 0u, 0x2000u, 0x1000u);
++        spu.setSwitch(voiceEntry(kKon, 0u, 0u), 1u);
++        spu.advanceTo(kFrame);
++        const IopSpu2::Voice &v = spu.voice(0u, 0u);
++        require(v.decoded[0] == 1 && v.decoded[1] == 2 && v.decoded[2] == 3, "shift 12 should keep the nibble value");
++        require(v.decoded[3] == -1, "nibbles are signed");
++        require(v.decoded[4] == 0 && v.decoded[27] == 0, "filter 0 adds nothing to a zero nibble");
++
++        spu.advanceTo(29u * kFrame); // the 29th sample is the first of the second block
++        int32_t h1 = 0;
++        for (size_t i = 0; i < 28u; ++i)
++        {
++            const int32_t nibble = i < second.size() ? second[i] : 0;
++            const int32_t raw = static_cast<int16_t>(nibble << 12) >> 0;
++            const int32_t expected = std::clamp(raw + ((h1 * 60 + 32) >> 6), -32768, 32767);
++            require(spu.voice(0u, 0u).decoded[i] == expected, "filter 1 should add (h1 * 60 + 32) >> 6 to each nibble");
++            h1 = expected;
++        }
++
++        spu.advanceTo(57u * kFrame); // the third block: a shift above 12 decodes as 9
++        require(spu.voice(0u, 0u).decoded[0] == ((1 << 12) >> 9), "a shift above 12 should decode as shift 9");
++    }
++
++    void loopEndFlags()
++    {
++        IopMemory memory;
++        IopSpu2 spu(memory);
++        writeBlock(spu, 0x4000u, 0u, 0u, 0x01u, {1u}); // end without repeat
++        writeBlock(spu, 0x6000u, 0u, 0u, 0x07u, {1u}); // loop start + end + repeat
++        setupVoice(spu, 0u, 0u, 0x4000u, 0x1000u);
++        setupVoice(spu, 0u, 1u, 0x6000u, 0x1000u);
++        spu.setSwitch(voiceEntry(kKon, 0u, 0u), 0x3u);
++        spu.advanceTo(28u * kFrame);
++        require(spu.getSwitch(voiceEntry(kEndx, 0u, 0u)) == 0u, "ENDX is not set before the flagged block has played");
++        spu.advanceTo(40u * kFrame);
++        require(!spu.voice(0u, 0u).active, "a block ending without repeat should stop the voice");
++        require(spu.voice(0u, 1u).active, "a repeating block should keep the voice playing");
++        require(spu.voice(0u, 1u).playBlock == 0x3000u, "the repeating voice should jump back to its loop start");
++        require(spu.getSwitch(voiceEntry(kEndx, 0u, 0u)) == 0x3u, "both voices should report the end flag in ENDX");
++        spu.setSwitch(voiceEntry(kEndx, 0u, 0u), 0u);
++        require(spu.getSwitch(voiceEntry(kEndx, 0u, 0u)) == 0u, "writing ENDX should clear it");
++        spu.advanceTo(70u * kFrame);
++        require(spu.getSwitch(voiceEntry(kEndx, 0u, 0u)) == 0x2u, "the looping voice should set ENDX again");
++        spu.setSwitch(voiceEntry(kKon, 0u, 0u), 0x2u);
++        require(spu.getSwitch(voiceEntry(kEndx, 0u, 0u)) == 0u, "KON should clear the voice's ENDX bit");
++    }
++
++    void adsrAttackAndRelease()
++    {
++        IopMemory memory;
++        IopSpu2 spu(memory);
++        writeBlock(spu, 0x8000u, 0u, 0u, 0x03u, {7u, 7u, 7u, 7u});
++        setupVoice(spu, 0u, 0u, 0x8000u, 0x1000u);
++        spu.setSwitch(voiceEntry(kKon, 0u, 0u), 1u);
++        spu.advanceTo(2u * kFrame);
++        require(spu.getParam(voiceEntry(kEnvx, 0u, 0u)) == 0x7000u, "attack rate 0 should add 0x3800 per frame");
++        spu.advanceTo(3u * kFrame);
++        require(spu.getParam(voiceEntry(kEnvx, 0u, 0u)) == 0x7FFFu, "ENVX should reach the maximum on the third frame");
++        spu.setSwitch(voiceEntry(kKoff, 0u, 0u), 1u);
++        spu.advanceTo(19u * kFrame);
++        require(spu.getParam(voiceEntry(kEnvx, 0u, 0u)) == 0u, "ENVX should reach zero after the release");
++        require(!spu.voice(0u, 0u).active, "the voice should be off after its release");
++        require(spu.activeVoices() == 0u, "no voice should be counted as active");
++    }
++
++    void pitchSteps()
++    {
++        IopMemory memory;
++        IopSpu2 spu(memory);
++        writeBlock(spu, 0xA000u, 0u, 0u, 0x03u, std::vector<uint8_t>(28u, 1u));
++        setupVoice(spu, 0u, 0u, 0xA000u, 0x1000u);
++        setupVoice(spu, 0u, 1u, 0xA000u, 0x0800u);
++        setupVoice(spu, 0u, 2u, 0xA000u, 0xFFFFu);
++        spu.setSwitch(voiceEntry(kKon, 0u, 0u), 0x7u);
++        spu.advanceTo(kFrame);
++        require(spu.voice(0u, 2u).decodedIndex == 3u, "a pitch above 0x3FFF should be clamped to 0x3FFF");
++        spu.advanceTo(20u * kFrame);
++        require(spu.voice(0u, 0u).decodedIndex == 20u, "pitch 0x1000 should play one ADPCM sample per frame");
++        require(spu.voice(0u, 1u).decodedIndex == 10u, "pitch 0x0800 should play one ADPCM sample per two frames");
++    }
++
++    void voiceReachesOutput()
++    {
++        IopMemory memory;
++        IopSpu2 spu(memory);
++        writeBlock(spu, 0xC000u, 0u, 0u, 0x03u, std::vector<uint8_t>(28u, 3u));
++        setupVoice(spu, 0u, 0u, 0xC000u, 0x1000u);
++        spu.setParam(voiceEntry(kVolR, 0u, 0u), 0x4000u); // -1.0
++        spu.setSwitch(voiceEntry(kVmixL, 0u, 0u), 1u);
++        spu.setSwitch(voiceEntry(kVmixR, 0u, 0u), 1u);
++        setMasters(spu, 0x3FFFu, 0x3FFFu);
++        spu.setSwitch(voiceEntry(kKon, 0u, 0u), 1u);
++        spu.advanceTo(64u * kFrame);
++        require(lastFrame(spu, 0u) > 0, "the left output should follow the positive samples");
++        require(lastFrame(spu, 1u) < 0, "the right output should follow the negative voice volume");
++
++        setMasters(spu, 0u, 0x3FFFu);
++        spu.advanceTo(65u * kFrame);
++        require(lastFrame(spu, 0u) == 0 && lastFrame(spu, 1u) == 0, "core 0 should reach the output through its MVOL");
++        setMasters(spu, 0x3FFFu, 0u);
++        spu.advanceTo(66u * kFrame);
++        require(lastFrame(spu, 0u) == 0 && lastFrame(spu, 1u) == 0, "core 0 should reach the output through core 1");
++        setMasters(spu, 0x3FFFu, 0x3FFFu);
++        spu.setSwitch(voiceEntry(kVmixL, 0u, 0u), 0u);
++        spu.advanceTo(67u * kFrame);
++        require(lastFrame(spu, 0u) == 0 && lastFrame(spu, 1u) < 0, "VMIXL should gate the left side only");
++
++        // a core 1 voice goes through core 1's master volume only
++        spu.setSwitch(voiceEntry(kKoff, 0u, 0u), 1u);
++        writeBlock(spu, 0xD000u, 0u, 0u, 0x03u, std::vector<uint8_t>(28u, 3u));
++        setupVoice(spu, 1u, 5u, 0xD000u, 0x1000u);
++        spu.setSwitch(voiceEntry(kVmixL, 1u, 0u), 1u << 5u);
++        spu.setSwitch(voiceEntry(kVmixR, 1u, 0u), 1u << 5u);
++        setMasters(spu, 0u, 0x3FFFu);
++        spu.setSwitch(voiceEntry(kKon, 1u, 0u), 1u << 5u);
++        spu.advanceTo(100u * kFrame);
++        require(lastFrame(spu, 0u) > 0 && lastFrame(spu, 1u) > 0, "a core 1 voice should not need core 0's MVOL");
++    }
++
++    void oneFramePer768Cycles()
++    {
++        IopMemory memory;
++        IopSpu2 spu(memory);
++        spu.advanceTo(64u * kFrame);
++        require(spu.pendingFrames() == 64u, "64 x 768 cycles should make 64 frames");
++        spu.advanceTo(65u * kFrame - 1u);
++        require(spu.pendingFrames() == 64u, "a partial frame should not be made");
++        spu.advanceTo(65u * kFrame);
++        require(spu.pendingFrames() == 65u && spu.framesProduced() == 65u, "the 65th frame ends at 65 x 768 cycles");
++        require(spu.frameCycle() == 65u * kFrame, "the frame clock should stop at the last frame boundary");
++        spu.advanceTo(10u * kFrame);
++        require(spu.pendingFrames() == 65u, "time does not run backwards");
++        spu.clearOutput();
++        require(spu.pendingFrames() == 0u && spu.framesProduced() == 65u, "the owner takes the frames");
++    }
++
++    void inputReadsAhead()
++    {
++        IopMemory memory;
++        IopSpu2 spu(memory);
++        constexpr uint32_t ring = 0x40000u;
++        const int16_t left[4] = {0x1000, 0x2000, 0x3000, 0x4000};
++        for (uint32_t block = 0; block < 4u; ++block)
++            fillInputBlock(memory, ring + block * 0x400u, left[block], static_cast<int16_t>(-left[block]));
++        routeInput(spu, 0u);
++        require(spu.startInput(0u, ring, 0x1000u, true), "the ring should start");
++        require(spu.blocksFetched() == 2u, "the empty FIFO takes the first two blocks at once");
++        spu.advanceTo(256u * kFrame);
++        require(spu.blocksFetched() == 3u, "block 2 is fetched when block 0 has played");
++        fillInputBlock(memory, ring + 2u * 0x400u, 0x7000, -0x7000); // already fetched: not heard
++        fillInputBlock(memory, ring + 3u * 0x400u, 0x6000, -0x6000); // not fetched yet: heard
++        spu.advanceTo(1024u * kFrame);
++        const std::vector<int16_t> &out = spu.output();
++        require(out.size() == 2u * 1024u, "1024 frames");
++        const auto frameAt = [&](size_t frame, uint32_t side) { return static_cast<int32_t>(out[frame * 2u + side]); };
++        for (size_t frame : {size_t{0}, size_t{255}})
++            require(frameAt(frame, 0u) == throughInputAndMasters(0x1000) &&
++                        frameAt(frame, 1u) == throughInputAndMasters(-0x1000),
++                    "frames 0-255 play block 0");
++        for (size_t frame : {size_t{256}, size_t{511}})
++            require(frameAt(frame, 0u) == throughInputAndMasters(0x2000), "frames 256-511 play block 1");
++        for (size_t frame : {size_t{512}, size_t{767}})
++            require(frameAt(frame, 0u) == throughInputAndMasters(0x3000) &&
++                        frameAt(frame, 1u) == throughInputAndMasters(-0x3000),
++                    "a block rewritten after its fetch should still play its old data");
++        for (size_t frame : {size_t{768}, size_t{1023}})
++            require(frameAt(frame, 0u) == throughInputAndMasters(0x6000) &&
++                        frameAt(frame, 1u) == throughInputAndMasters(-0x6000),
++                    "a block rewritten before its fetch should play the new data");
++
++        spu.setParam(coreEntry(kMmix, 0u), 0x0080u);
++        spu.advanceTo(1025u * kFrame);
++        require(lastFrame(spu, 0u) != 0 && lastFrame(spu, 1u) == 0, "MMIX 0x40 gates the right input");
++    }
++
++    void halfCompletesAtLastFetch()
++    {
++        IopMemory memory;
++        IopSpu2 spu(memory);
++        constexpr uint32_t base = 0x40000u;
++        for (uint32_t block = 0; block < 4u; ++block)
++            fillInputBlock(memory, base + block * 0x400u, static_cast<int16_t>(0x100 * (block + 1u)), 0x55);
++        require(spu.nextEventCycle() == UINT64_MAX, "no event without an input");
++        require(spu.startInput(0u, base, 0x1000u, true), "the ring should start");
++        const auto half = [&] { return spu.inputStatus(0u) >> 24u; };
++        const auto madr = [&] { return spu.inputStatus(0u) & 0xFFFFFFu; };
++        require(spu.inputInterrupts(0u) == 1u, "the first half is fetched at once: interrupt at frame 0");
++        require(half() == 1u && madr() == base + 0x800u, "the DMA moves on to the second half");
++        require(spu.nextEventCycle() == 256u * kFrame, "the next fetch is at the end of block 0");
++
++        spu.advanceTo(256u * kFrame);
++        require(spu.inputInterrupts(0u) == 1u && madr() == base + 0xC00u, "block 2 is fetched at frame 256");
++        require(spu.nextEventCycle() == 512u * kFrame, "the next fetch is at the end of block 1");
++        spu.advanceTo(512u * kFrame - 1u);
++        require(spu.inputInterrupts(0u) == 1u, "no interrupt before the last block of the half is fetched");
++        spu.advanceTo(512u * kFrame);
++        require(spu.inputInterrupts(0u) == 2u, "the second half completes at frame 512");
++        require(half() == 0u && madr() == base, "the DMA starts over with the first half");
++        require(spu.nextEventCycle() == 768u * kFrame, "the next fetch is 256 frames later");
++        spu.advanceTo(768u * kFrame);
++        require(spu.inputInterrupts(0u) == 2u && madr() == base + 0x400u, "block 0 again at frame 768");
++        spu.advanceTo(1024u * kFrame);
++        require(spu.inputInterrupts(0u) == 3u && half() == 1u && madr() == base + 0x800u,
++                "the first half completes again at frame 1024");
++        require(spu.nextEventCycle() == 1280u * kFrame, "nextEventCycle follows the block fetches");
++        require(spu.repeatedBlocks() == 4u, "blocks 0 and 1 came back unchanged: 2 left and 2 right halves");
++
++        spu.stopInput(0u);
++        require(spu.inputStatus(0u) == 0u && spu.nextEventCycle() == UINT64_MAX, "a stopped input has no status");
++
++        // one-shot: one interrupt when the last block is fetched, then the input stops after it has played
++        require(spu.startInput(0u, base, 0x1000u, false), "the buffer should start");
++        const uint64_t start = spu.frameCycle();
++        require(spu.inputInterrupts(0u) == 3u, "a one-shot buffer completes only when its last block is fetched");
++        require(spu.inputBusy(0u) && spu.inputStatus(0u) == base + 0x800u, "a one-shot transfer reports its address");
++        spu.advanceTo(start + 512u * kFrame);
++        require(spu.inputInterrupts(0u) == 4u, "the buffer is complete when block 3 is fetched");
++        require(!spu.inputBusy(0u) && spu.inputStatus(0u) == 0u, "a completed one-shot transfer has no status");
++        spu.advanceTo(start + 1024u * kFrame - 1u);
++        require(spu.inputActive(0u), "the last block is still playing");
++        spu.advanceTo(start + 1024u * kFrame);
++        require(!spu.inputActive(0u) && spu.inputInterrupts(0u) == 4u, "the input stops after its last block");
++
++        // "write from": the DMA starts at the block holding the start address, here in the second half
++        require(spu.startInput(1u, base, 0x1000u, true, 0xC10u), "a start inside the buffer should be accepted");
++        require(spu.inputInterrupts(1u) == 1u, "the second half completes with its only fetched block, block 3");
++        require(spu.inputStatus(1u) == base + 0x400u, "then the DMA wraps to block 0: half 0, MADR after block 0");
++        require(!spu.startInput(1u, base, 0x1000u, true, 0x1000u), "a start past the buffer is refused");
++        require(!spu.startInput(1u, 0x1FFC00u, 0x1000u, true), "a buffer past the end of IOP RAM is refused");
++        require(!spu.startInput(1u, base, 0x3FFu, true), "a buffer shorter than one block is refused");
++    }
++
++    void naxInsidePlayedBlock()
++    {
++        IopMemory memory;
++        IopSpu2 spu(memory);
++        writeBlock(spu, 0xA000u, 0u, 0u, 0x00u, {1u});
++        writeBlock(spu, 0xA010u, 0u, 0u, 0x03u, {1u});
++        setupVoice(spu, 0u, 0u, 0xA000u, 0x1000u);
++        spu.setSwitch(voiceEntry(kKon, 0u, 0u), 1u);
++        const uint32_t nax = voiceEntry(kNax, 0u, 0u);
++        require(spu.getAddr(nax) == 0xA002u, "before the first block is decoded NAX reads SSA + 2");
++        for (uint32_t frame = 1; frame <= 28u; ++frame)
++        {
++            spu.advanceTo(frame * kFrame);
++            const uint32_t value = spu.getAddr(nax);
++            require(value > 0xA000u && value < 0xA010u, "NAX should stay inside the first block while it plays");
++        }
++        spu.advanceTo(29u * kFrame);
++        const uint32_t value = spu.getAddr(nax);
++        require(value > 0xA010u && value < 0xA020u, "NAX should move into the second block once it plays");
++        spu.setAddr(nax, 0xA000u);
++        require(spu.getAddr(nax) == 0xA002u, "a NAX set by the driver reads back inside that block");
++    }
++}
++
++int main()
++{
++    const iop_test::Test tests[] = {
++        {"ADPCM decodes shift and prediction filters", adpcmDecodesShiftAndFilters},
++        {"loop end flags stop or repeat the voice and set ENDX", loopEndFlags},
++        {"ADSR attacks to full level and releases to silence after KOFF", adsrAttackAndRelease},
++        {"pitch 0x1000 plays one ADPCM sample per frame, 0x0800 one per two frames", pitchSteps},
++        {"a voice reaches the output through VMIX and MVOL, core 0 through core 1", voiceReachesOutput},
++        {"one stereo frame per 768 IOP cycles", oneFramePer768Cycles},
++        {"the ADMA input copies a block one block ahead and keeps it", inputReadsAhead},
++        {"a half completes when its last block is fetched", halfCompletesAtLastFetch},
++        {"NAX reads back inside the block being played", naxInsidePlayedBlock},
++    };
++    return iop_test::run(tests);
++}
