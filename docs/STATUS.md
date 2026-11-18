@@ -57,3 +57,9 @@ MSCAL/MSCNT, so the packet leaves with an older chunk's colours.
 
 Ryzen 7 5800X (8 cores, 16 threads), RX 6950 XT, 32 GB DDR4-3200, two 2 TB M.2 SSDs, two 1080p 144 Hz monitors.
 The GPU is not the limit; the frame rate is bound by software work on the CPU side (the profile must say which part).
+
+## Who works on what (since 18 Nov 2026)
+
+The owner tests and develops on his Windows machine with an interactive session; the weekly scheduled session is a
+researcher (no game files, cannot run the game) that answers issues labelled `research` and may push small changes
+to a `research/<date>` branch only. Details in AGENTS.md ("Who works on what").

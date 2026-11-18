@@ -22,6 +22,23 @@ scripts and the research log ([`docs/MKSM.md`](docs/MKSM.md)). No game files and
 | `config/vu1_images.txt` | the game's VU1 program images for `tools/vu1gen`: ELF addresses, hashes, entry points (addresses only) |
 | `tools/vu1gen/` | ahead-of-time translator of the game's VU1 programs: generator, runtime helpers, `vu1difftest` against upstream's interpreter. `scripts\build.cmd` translates the images from the ELF during the build (into the build folder, never committed) and links them into the runner; state, commands and measurements in its `PROGRESS.md` |
 
+## Who works on what
+
+- **The owner** builds, runs and tests the game on Windows (Ryzen 7 5800X, RX 6950 XT, 32 GB) and works on the
+  recomp directly, with an interactive Claude session on his machine: `scripts\build.cmd`, `scripts\run.cmd`,
+  screenshots, `MKSM_*` diagnostics. Nothing waits for a scheduled run.
+- **The weekly researcher** (a scheduled cloud session, Sundays, a mid-size model, about 25 minutes) has no game
+  files, no GPU and no Windows: it cannot run the game. It answers the owner's open GitHub issues (label `research`,
+  or an issue reporting what a test run showed) with a comment starting `🤖 **Claude (researcher):**` (what the
+  code and sources say, what is certain and what is inferred, the exact experiment to run on Windows), or writes
+  `docs/research/<date>-<topic>.md`. It may make **small** code changes, only on a branch `research/<date>`, off by
+  default behind an `MKSM_*` toggle when they cannot be verified without the game, and never on `pal-restart`,
+  `master`, `vu1-native`, `sound`, `notes/*`, `weekly/*` or `archive/*`. The owner reviews and merges.
+- To ask the researcher something, open an issue with the label `research`: the symptom, the log lines, the
+  screenshot, what was already tried.
+- `docs/STATUS.md` is a text copy of the progress board (a whiteboard artifact); the logs win when they disagree, and
+  its percentages are estimates, not measurements.
+
 ## Rules
 
 - **PS2Recomp stays upstream.** Game-specific behavior goes to `src/mksm_overrides.cpp` (upstream's game override
